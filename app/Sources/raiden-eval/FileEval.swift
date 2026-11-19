@@ -103,7 +103,8 @@ func runFileEval(embedder: Embedder, appQs: [(String, [String])], appEngine: Eng
         }
         return
     }
-    let store = try Store()
+    // --file-store <path>: 説明文を試すときにアプリの SQLite を書き換えないよう、別のファイルを使う
+    let store = try opt("--file-store").map { try Store(url: URL(fileURLWithPath: $0)) } ?? Store()
     let e = Engine(embedder: embedder, store: store)
     t = Date()
     let made = e.setFiles(entries) { n in FileHandle.standardError.write("  ベクトル化 \(n) 件\n".data(using: .utf8)!) }
@@ -372,6 +373,41 @@ func runFileEval(embedder: Embedder, appQs: [(String, [String])], appEngine: Eng
     let rf = evalFiles(e, qs, Mix.fileDefault)
     print("  外れ（例0）:")
     for c in cats { rf[c]?.misses.forEach { print($0) } }
+    }
+    if on("fold") {
+    // フォルダの点数の付け方を比べる（Mix.fileDefault からの変更。例0 と 例全部）
+    print("\n== フォルダの点数（例0 / 例全部）")
+    print(header())
+    var vars: [(String, (inout Mix) -> Void)] = [("今の既定", { _ in })]
+    vars.append(("中の種類の加点なし", { $0.folderTypeBonus = 0 }))
+    vars.append(("子がそろって上位の加点なし", { $0.folderCrowd = 0 }))
+    vars.append(("空のフォルダにも加点", { $0.emptyFolderBonus = true }))
+    vars.append(("時間はフォルダ自身の日付だけ", { $0.folderTimeByChildren = false }))
+    vars.append(("フォルダの言葉がどこにあっても加点", { $0.folderHeadOnly = false }))
+    vars.append(("フォルダの扱いを全部前のまま", { $0.folderTypeBonus = 0; $0.folderCrowd = 0; $0.emptyFolderBonus = true; $0.folderTimeByChildren = false; $0.folderHeadOnly = false }))
+    if let extra = opt("--fold-only") { let keep = Set(extra.split(separator: ",").compactMap { Int($0) }); vars = vars.enumerated().filter { keep.contains($0.offset) }.map(\.element) }
+    for (name, f) in vars {
+        var m = Mix.fileDefault; f(&m)
+        setExamples([])
+        let r0 = evalFiles(e, qs, m)
+        setExamples(exs)
+        let (_, allA) = line(m, evalFiles(e, qs, m), nil)
+        print(line(m, r0, nil).0 + "  例全部 \(allA.cell)  " + name)
+        if args.contains("--miss") { for c in cats { r0[c]?.misses.forEach { print($0) } } }
+    }
+    setExamples([])
+    }
+    if on("folddbg") {
+    // フォルダの問題で、答えが何位にいて点数がいくつか（例0・Mix.fileDefault）
+    setExamples([])
+    print("\n== フォルダの問題の順位（例0）")
+    for p in qs where p.cat == "folder" {
+        let top = e.rankFiles(query: p.q, vec: p.vec, mix: Mix.fileDefault, intent: p.intent, rel: p.rel, limit: 40)
+        let gi = top.firstIndex { p.gold.contains($0.file.path) }
+        let fmt: (FileResult) -> String = { String(format: "%@ %.3f", ($0.file.path as NSString).lastPathComponent, $0.score) }
+        print("  \(gi.map { "\($0 + 1)位" } ?? "40位外") \(p.q)  [\(p.intent.families.sorted().joined(separator: ","))]")
+        print("      " + top.prefix(3).map(fmt).joined(separator: " | ") + (gi.map { $0 >= 3 ? "  … 答え " + fmt(top[$0]) : "" } ?? ""))
+    }
     }
     if on("misc") {
     // 5) 外れた問題（一番よかった組み合わせ・例0）
