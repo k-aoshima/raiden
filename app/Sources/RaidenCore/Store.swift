@@ -4,9 +4,9 @@ import SQLite3
 /// ~/Library/Application Support/Raiden/raiden.sqlite（OS 標準の SQLite3 を直接使う）
 ///
 /// ベクトルとグラフを一緒に使えるよう、点（nodes）と線（edges）の 2 表にしている。
-///   nodes  id, kind（app / example / 後で file / folder）, key（bundle id・入力文・パス）, name, description,
+///   nodes  id, kind（app / example / file / folder）, key（bundle id・入力文・パス）, name, description,
 ///          vector（Float32 の BLOB）, desc_hash（モデル名＋説明文のハッシュ。変わった時だけ作り直す）, updated_at
-///   edges  from_id, to_id, kind（example→app の chose。後で contains / opened_with / co_opened など）,
+///   edges  from_id, to_id, kind（example→app の chose、folder→中の物の contains、同じ日に使った物どうしの co_used）,
 ///          weight（選んだ回数など）, last_used
 public final class Store {
     private var db: OpaquePointer?
@@ -199,6 +199,70 @@ public final class Store {
             sqlite3_finalize(st)
         }
         try? exec("COMMIT")
+    }
+
+    // MARK: - ファイル・フォルダの点と線
+
+    /// ファイル・フォルダの点のベクトルを返す。stamp（説明文の元・日付・大きさ・モデル名のハッシュ）が変わったものだけ
+    /// describe で説明文を作り（中身を読むのはここだけ）、embed し直す。消えたパスの点は消す。
+    public func fileVectors(_ entries: [FileEntry], stamps: [String], describe: (Int) -> String,
+                            embed: (String) -> [Float], progress: ((Int) -> Void)? = nil) -> (vecs: [[Float]], embedded: Int) {
+        lock.lock(); defer { lock.unlock() }
+        var have: [String: (String, [Float])] = [:]
+        if let st = prepare("SELECT key, desc_hash, vector FROM nodes WHERE kind IN ('file','folder')") {
+            while sqlite3_step(st) == SQLITE_ROW { have[text(st, 0)] = (text(st, 1), blob(st, 2)) }
+            sqlite3_finalize(st)
+        }
+        try? exec("BEGIN")
+        var out: [[Float]] = []
+        var made = 0
+        for (i, e) in entries.enumerated() {
+            if let old = have[e.path], old.0 == stamps[i], !old.1.isEmpty { out.append(old.1); continue }
+            let d = describe(i)
+            let v = embed(d)
+            out.append(v)
+            made += 1
+            _ = upsertNode(kind: e.isDir ? "folder" : "file", key: e.path, name: e.name, description: d, vector: v, hash: stamps[i])
+            if made % 100 == 0 { try? exec("COMMIT"); try? exec("BEGIN"); progress?(made) }
+        }
+        let live = Set(entries.map(\.path))
+        if let del = prepare("DELETE FROM nodes WHERE kind IN ('file','folder') AND key = ?") {
+            for k in have.keys where !live.contains(k) { sqlite3_reset(del); bind(del, 1, k); sqlite3_step(del) }
+            sqlite3_finalize(del)
+        }
+        try? exec("COMMIT")
+        return (out, made)
+    }
+
+    /// ファイル・フォルダどうしの線（contains / co_used）を、その種類の分だけ入れ替える。組はパス
+    public func replaceFileEdges(kind: String, _ pairs: [(String, String, Float)]) {
+        lock.lock(); defer { lock.unlock() }
+        var ids: [String: Int64] = [:]
+        if let st = prepare("SELECT id, key FROM nodes WHERE kind IN ('file','folder')") {
+            while sqlite3_step(st) == SQLITE_ROW { ids[text(st, 1)] = sqlite3_column_int64(st, 0) }
+            sqlite3_finalize(st)
+        }
+        try? exec("BEGIN")
+        if let del = prepare("DELETE FROM edges WHERE kind = ?") { bind(del, 1, kind); sqlite3_step(del); sqlite3_finalize(del) }
+        if let st = prepare("INSERT OR REPLACE INTO edges(from_id, to_id, kind, weight, last_used) VALUES(?,?,?,?,?)") {
+            for (a, b, w) in pairs {
+                guard let x = ids[a], let y = ids[b] else { continue }
+                sqlite3_reset(st)
+                sqlite3_bind_int64(st, 1, x); sqlite3_bind_int64(st, 2, y); bind(st, 3, kind)
+                sqlite3_bind_double(st, 4, Double(w)); sqlite3_bind_int64(st, 5, now)
+                sqlite3_step(st)
+            }
+            sqlite3_finalize(st)
+        }
+        try? exec("COMMIT")
+    }
+
+    public func edgeCount(kind: String) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        guard let st = prepare("SELECT COUNT(*) FROM edges WHERE kind=?") else { return 0 }
+        defer { sqlite3_finalize(st) }
+        bind(st, 1, kind)
+        return sqlite3_step(st) == SQLITE_ROW ? Int(sqlite3_column_int(st, 0)) : 0
     }
 
     public func count(kind: String) -> Int {

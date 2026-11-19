@@ -164,10 +164,15 @@ for a in apps where firstKey[a.jp] == nil { firstKey[a.jp] = a.key }
 rich.addExamples(EX.flatMap { name, qs in qs.compactMap { q in firstKey[name].map { (q, $0) } } })
 print("説明文と例のベクトル化 \(String(format: "%.1f", Date().timeIntervalSince(tA)))s")
 
+if args.contains("--files") {
+    try runFileEval(embedder: embedder, appQs: Q, appEngine: rich)
+    exit(0)
+}
+
 if args.contains("--sweep") {
     for w in [0.5, 0.75, 1.0, 1.5, 2.0] as [Float] {
         for ms in [0.0, 0.4, 0.5, 0.6] as [Float] {
-            rich.params.knnWeight = w; rich.params.knnMinSim = ms
+            rich.appMix.wK = w; rich.appMix.knnMinSim = ms
             let (h1, h3, _) = run(rich, Q, examples: true, "", verbose: false)
             print("w=\(w) min_sim=\(ms): 1位 \(h1) 3位以内 \(h3)")
         }

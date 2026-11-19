@@ -1,13 +1,28 @@
 import Foundation
 
-/// 並べ方の重み（raiden-eval の --sweep の結果で決めた。README 参照）
-public struct RankParams: Sendable {
-    public var knnK = 5               // k近傍法で見る過去の例の数
-    public var knnWeight: Float = 1.0 // k近傍法の点数に掛ける重み
-    public var knnMinSim: Float = 0.0 // これより遠い例は数えない
-    public var prefixBonus: Float = 0.6   // 名前の先頭が一致
-    public var substrBonus: Float = 0.35  // 名前の途中に含まれる
-    public init() {}
+/// アプリの並べ方の既定（raiden-eval の --sweep / --combos の結果で決めた。README 参照）
+public extension Mix {
+    /// アプリ: V+K の重みつきの和（k=5、重み 1.0）＋名前の文字一致
+    static var appDefault: Mix {
+        var m = Mix()
+        m.v = true; m.k = true; m.g = false; m.fusion = .sum
+        m.knnK = 5; m.wK = 1.0; m.knnMinSim = 0
+        m.prefixBonus = 0.6; m.substrBonus = 0.35; m.fuzzyBonus = 0
+        return m
+    }
+    /// ファイル・フォルダ（raiden-eval --files で決めた。README 参照）
+    ///   V+K の和（K は重み 0.3・近さ 0.6 未満の例は数えない）＋時間・種類の絞り込み＋フォルダ加点 0.3
+    ///   「A と同じ日の B」「A の中の B」は A/B に分け、A の上位 5 件から co_used を 2 回たどる
+    static var fileDefault: Mix {
+        var m = Mix()
+        m.v = true; m.k = true; m.g = false; m.fusion = .sum
+        m.wK = 0.3; m.knnMinSim = 0.6
+        m.intents = true; m.folderBonus = 0.3
+        m.relation = true; m.seeds = 5; m.hops = 2; m.relAlpha = 0.5; m.relWT = 1.0
+        m.contains = false; m.coUsed = true; m.coTime = false
+        m.alpha = 0.2
+        return m
+    }
 }
 
 /// 例の点（入力文）と、そこから chose の線でつながったアプリ
@@ -30,11 +45,17 @@ public struct SearchResult: Sendable {
     public let score: Float
 }
 
+public struct FileResult: Sendable {
+    public let file: FileEntry
+    public let score: Float
+}
+
 /// 検索の本体。アプリも答え合わせ（raiden-eval）もこれを通す。
-/// 近さはメモリに載せたベクトルとの総当たりの内積（数千件なら十分速い）。
+/// 近さはメモリに載せたベクトルとの総当たりの内積（数千件なら十分速い）。並べ方は Ranker（Mix で組み合わせを選ぶ）。
 public final class Engine {
     public let embedder: Embedder
-    public var params = RankParams()
+    public var appMix = Mix.appDefault
+    public var fileMix = Mix.fileDefault
     public let useDict: Bool
     public let store: Store?
     private let lock = NSLock()
@@ -43,6 +64,10 @@ public final class Engine {
     private var byKey: [String: Int] = [:]
     private(set) public var examples: [ExampleNode] = []
     private var exVecs: [[Float]] = []
+    private var appCorpus = Corpus()
+    private(set) public var files: [FileEntry] = []
+    private var fileCorpus = Corpus()
+    private var fileIndex: [String: Int] = [:]
 
     public init(embedder: Embedder, store: Store? = nil, useDict: Bool = true) {
         self.embedder = embedder
@@ -61,6 +86,7 @@ public final class Engine {
         lock.lock()
         apps = list; appVecs = vs
         byKey = Dictionary(list.enumerated().map { ($1.key, $0) }, uniquingKeysWith: { a, _ in a })
+        rebuildAppCorpus()
         lock.unlock()
     }
 
@@ -70,6 +96,7 @@ public final class Engine {
         let rows = store.examples(model: embedder.identifier) { embedder.embed($0) }
         lock.lock()
         examples = rows.map(\.0); exVecs = rows.map(\.1)
+        rebuildAppCorpus()
         lock.unlock()
     }
 
@@ -85,6 +112,7 @@ public final class Engine {
         let vs = nodes.map { embedder.embed($0.q) }
         lock.lock()
         examples += nodes; exVecs += vs
+        rebuildAppCorpus()
         lock.unlock()
     }
 
@@ -108,37 +136,118 @@ public final class Engine {
             examples.append(ExampleNode(q: q, links: [.init(appKey: app.key, weight: 1, lastUsed: now)]))
             exVecs.append(v)
         }
+        rebuildAppCorpus()
         lock.unlock()
+    }
+
+    /// lock を持った状態で呼ぶ
+    private func rebuildAppCorpus() {
+        var c = Corpus()
+        c.setItems(names: apps.map { [$0.jp, $0.name, String(($0.path as NSString).lastPathComponent.dropLast(4))] }, vecs: appVecs)
+        for (ex, v) in zip(examples, exVecs) {
+            c.addExample(text: ex.q, vec: v, links: ex.links.compactMap { l in byKey[l.appKey].map { ($0, l.weight) } })
+        }
+        appCorpus = c
     }
 
     public func search(_ query: String, limit: Int = 8, useExamples: Bool = true) -> [SearchResult] {
         let q = query.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
         if q.isEmpty { return [] }
-        let v = embedder.embed(q)
+        var m = appMix
+        if !useExamples { m.k = false }
+        return rankApps(query: q, vec: embedder.embed(q), mix: m, limit: limit)
+    }
+
+    /// ベクトルを作り済みの入力で並べる（答え合わせで組み合わせを振るとき用）
+    public func rankApps(query q: String, vec: [Float], mix: Mix, limit: Int = 8) -> [SearchResult] {
         lock.lock()
-        let apps = self.apps, appVecs = self.appVecs, byKey = self.byKey
-        let examples = self.examples, exVecs = self.exVecs
+        let c = appCorpus, apps = self.apps
         lock.unlock()
-        var score = appVecs.map { Vec.dot($0, v) }
-        if useExamples && !examples.isEmpty {
-            let sims = exVecs.map { Vec.dot($0, v) }
-            let order = sims.indices.sorted { sims[$0] > sims[$1] }.prefix(params.knnK)
-            for (rank, i) in order.enumerated() {
-                if sims[i] < params.knnMinSim { break }
-                // example の点から chose の線をたどり、app の点に点数を配る（線の重みで按分）
-                let links = examples[i].links
-                let total = links.reduce(0) { $0 + $1.weight }
-                for l in links {
-                    guard let ai = byKey[l.appKey], total > 0 else { continue }
-                    score[ai] += params.knnWeight * sims[i] / Float(rank + 1) * (l.weight / total)
-                }
-            }
+        return Ranker.rank(c, query: q, vec: vec, mix: mix, limit: limit).map { SearchResult(app: apps[$0.0], score: $0.1) }
+    }
+
+    // MARK: - ファイル・フォルダ
+
+    /// ファイル・フォルダの点を入れる。説明文が変わったものだけベクトルを作り直し（Store があれば保存）、
+    /// contains（フォルダ → 中の物）と co_used（同じ日に使った物どうし）の線を張る。作り直した数を返す。
+    @discardableResult
+    public func setFiles(_ entries: [FileEntry], progress: ((Int) -> Void)? = nil) -> Int {
+        let cm = FileCatalog.childrenMap(entries)
+        let bases = entries.map { FileCatalog.baseDescription($0, children: cm[$0.path] ?? []) }
+        let model = embedder.identifier
+        let stamps = zip(entries, bases).map { Store.hash("\(model)\n\($1)\n\($0.mtime) \($0.size)") }
+        let describe: (Int) -> String = { i in
+            let c = FileCatalog.content(entries[i])
+            return c.isEmpty ? bases[i] : bases[i] + " 中身: " + c
         }
-        for i in apps.indices {
-            score[i] += Describe.nameBonus(q, apps[i], prefix: params.prefixBonus, substr: params.substrBonus)
+        var vs: [[Float]], made: Int
+        if let store {
+            (vs, made) = store.fileVectors(entries, stamps: stamps, describe: describe, embed: { self.embedder.embed($0) }, progress: progress)
+        } else {
+            vs = entries.indices.map { embedder.embed(describe($0)) }; made = entries.count
         }
-        let top = score.indices.sorted { score[$0] > score[$1] }.prefix(limit)
-        return top.map { SearchResult(app: apps[$0], score: score[$0]) }
+        let contains = FileCatalog.containsEdges(entries)
+        let co = FileCatalog.coUsedEdges(entries)
+        let ct = FileCatalog.coTimeEdges(entries)
+        if let store {
+            store.replaceFileEdges(kind: "contains", contains.map { (entries[$0.0].path, entries[$0.1].path, 1) })
+            store.replaceFileEdges(kind: "co_used", co.map { (entries[$0.0].path, entries[$0.1].path, $0.2) })
+            store.replaceFileEdges(kind: "co_time", ct.map { (entries[$0.0].path, entries[$0.1].path, $0.2) })
+        }
+        var c = Corpus()
+        c.setItems(names: entries.map { [$0.stem] }, vecs: vs, meta: entries.map {
+            Corpus.Meta(families: Set($0.families), times: [$0.lastUsed, $0.mtime, $0.added].filter { $0 > 0 },
+                        added: $0.added, downloaded: $0.downloaded)
+        })
+        c.addEdges(contains: contains, coUsed: co, coTime: ct)
+        lock.lock()
+        files = entries
+        fileIndex = Dictionary(entries.enumerated().map { ($1.path, $0) }, uniquingKeysWith: { a, _ in a })
+        fileCorpus = c
+        lock.unlock()
+        return made
+    }
+
+    /// ファイルの例（入力文, パス）をメモリに足す（答え合わせ用）
+    public func addFileExamples(_ pairs: [(String, String)]) {
+        let vs = pairs.map { embedder.embed($0.0) }
+        lock.lock()
+        for ((q, p), v) in zip(pairs, vs) {
+            guard let i = fileIndex[p] else { continue }
+            fileCorpus.addExample(text: q, vec: v, links: [(i, 1)])
+        }
+        lock.unlock()
+    }
+
+    /// いまのファイルの Corpus（答え合わせで件数を増やして試す用）
+    public var fileCorpusSnapshot: Corpus { lock.lock(); defer { lock.unlock() }; return fileCorpus }
+
+    public func clearFileExamples() { lock.lock(); fileCorpus.clearExamples(); lock.unlock() }
+
+    public var fileEdgeCounts: (contains: Int, coUsed: Int, coTime: Int) {
+        lock.lock(); defer { lock.unlock() }
+        var a = 0, b = 0, c = 0
+        for es in fileCorpus.adj { for e in es { if e.kind == 0 { a += 1 } else if e.kind == 2 { b += 1 } else if e.kind == 3 { c += 1 } } }
+        return (a, b / 2, c / 2)
+    }
+
+    public func searchFiles(_ query: String, limit: Int = 8, now: Date = Date()) -> [FileResult] {
+        let q = query.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
+        if q.isEmpty { return [] }
+        let it = QueryIntent.parse(q, now: now)
+        var rel: ([Float], [Float])?
+        if fileMix.relation && it.hasRelation {
+            rel = (embedder.embed(it.anchor), embedder.embed(it.target.isEmpty ? q : it.target))
+        }
+        return rankFiles(query: q, vec: embedder.embed(q), mix: fileMix, intent: it, rel: rel, limit: limit)
+    }
+
+    public func rankFiles(query q: String, vec: [Float], mix: Mix, intent: QueryIntent?,
+                          rel: (anchor: [Float], target: [Float])? = nil, limit: Int = 8) -> [FileResult] {
+        lock.lock()
+        let c = fileCorpus, fs = files
+        lock.unlock()
+        return Ranker.rank(c, query: q, vec: vec, mix: mix, intent: intent, rel: rel, limit: limit).map { FileResult(file: fs[$0.0], score: $0.1) }
     }
 }
 

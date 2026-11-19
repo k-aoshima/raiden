@@ -1,0 +1,410 @@
+import Accelerate
+import Foundation
+
+/// 並べ方の組み合わせ。
+///   V: 説明文との近さ（ベクトル）
+///   K: k近傍法（入力に近い過去の例 → chose の線 → 点）
+///   G: グラフ（入口の点から contains / co_used / chose の線をたどって点数を広げる）
+///      V か K があるときは、その点数の上位 N 件を入口にする。G だけのときは文字の重なり（ベクトルを使わない）で入口を選ぶ。
+/// 名前の文字一致・時間と種類の絞り込みは、どの組み合わせにも共通で足す。
+public struct Mix: Sendable, CustomStringConvertible {
+    public enum Fusion: String, Sendable { case sum, rrf }
+    public var v = true, k = true, g = false
+    public var fusion: Fusion = .sum
+    public var wV: Float = 1, wK: Float = 1, wG: Float = 1
+    public var knnK = 5
+    public var knnMinSim: Float = 0
+    public var seeds = 10            // グラフの入口の数 N
+    public var alpha: Float = 0.5    // 1 回たどるごとに掛ける割合
+    public var hops = 1
+    public var contains = true, coUsed = true, coTime = false, up = true   // up: 中の物 → フォルダにも広げる
+    public var coWeight: Float = 1
+    public var rrfK: Float = 60
+    public var prefixBonus: Float = 0.6, substrBonus: Float = 0.35, fuzzyBonus: Float = 0.3
+    public var intents = false       // 時間・種類の言葉で絞る
+    public var typeBonus: Float = 0.15
+    public var timeBonus: Float = 0.3
+    public var timeFilter = true     // 時間の言葉があれば範囲外を下げる（-1）
+    public var folderBonus: Float = 0.15  // 「〜のとこ」「フォルダ」などでフォルダを上げる
+    // つながりの言い方（QueryIntent.anchor/target）があるとき: anchor のベクトルで入口を選び、線をたどった点数 ＋ target との近さで並べる
+    public var relation = false
+    public var relAlpha: Float = 1.0
+    public var relWT: Float = 1.0      // target との近さの重み
+    public var relEdges: (contains: Bool, coUsed: Bool, coTime: Bool)? = nil  // nil なら G と同じ線
+    public var relByKind = false       // 「の中の」は contains、「同じ日」は co_used/co_time と、言い方で線を選ぶ
+    public init() {}
+
+    public var label: String {
+        var s = [v ? "V" : nil, k ? "K" : nil, g ? "G" : nil].compactMap { $0 }.joined(separator: "+")
+        if s.isEmpty { s = "名前だけ" }
+        return s
+    }
+    public var description: String {
+        var d = "\(label) \(fusion.rawValue)"
+        if relation { d += " 分割(α=\(relAlpha) wT=\(relWT)\(relByKind ? " 線を言い方で" : ""))" }
+        if g { d += " N=\(seeds) α=\(alpha) 回=\(hops)\(contains ? " c" : "")\(up && contains ? "↑" : "")\(coUsed ? " co" : "")\(coTime ? " ct" : "")" }
+        if fusion == .sum && (wV != 1 || wK != 1 || wG != 1) { d += " w=\(wV)/\(wK)/\(wG)" }
+        if intents { d += " 絞込" }
+        return d
+    }
+}
+
+/// 並べる対象（アプリ・ファイル）と、例・線をまとめたもの。
+public struct Corpus {
+    public struct Meta: Sendable {
+        public var families: Set<String>
+        public var times: [Int]       // 使った・変更・追加の日時（どれかが範囲に入れば当たり）
+        public var added: Int
+        public var downloaded: Bool
+        public init(families: Set<String>, times: [Int], added: Int, downloaded: Bool) {
+            self.families = families; self.times = times; self.added = added; self.downloaded = downloaded
+        }
+    }
+    public struct Edge: Sendable { public var to: Int32; public var w: Float; public var kind: UInt8 } // 0 中へ 1 外へ 2 co_used 3 co_time
+
+    public private(set) var vecs: [[Float]] = []
+    private(set) var flat: [Float] = []   // vecs を 1 本に並べたもの（内積をまとめて Accelerate で計算する）
+    public var dim: Int { vecs.first?.count ?? 0 }
+
+    /// 全部の点との内積（vDSP_mmul で行列×ベクトル）
+    public func dots(_ v: [Float]) -> [Float] {
+        let n = vecs.count, d = dim
+        var out = [Float](repeating: 0, count: n)
+        guard n > 0, d > 0, v.count == d else { return vecs.map { Vec.dot($0, v) } }
+        flat.withUnsafeBufferPointer { a in v.withUnsafeBufferPointer { x in out.withUnsafeMutableBufferPointer { y in
+            vDSP_mmul(a.baseAddress!, 1, x.baseAddress!, 1, y.baseAddress!, 1, vDSP_Length(n), 1, vDSP_Length(d))
+        } } }
+        return out
+    }
+    public private(set) var names: [[String]] = []     // 正規化した名前（文字一致用）
+    public private(set) var romaji: [String] = []      // 名前の読みのローマ字（打ち間違い・ローマ字入力用）
+    var grams: [Set<String>] = []
+    public var meta: [Meta?] = []
+    public var adj: [[Edge]] = []
+    // 例（入力文 → 選んだ点）
+    public private(set) var exText: [String] = []
+    public private(set) var exVecs: [[Float]] = []
+    public private(set) var exLinks: [[(Int, Float)]] = []
+    var exGrams: [Set<String>] = []
+
+    public init() {}
+    public var count: Int { vecs.count }
+
+    public mutating func setItems(names raw: [[String]], vecs: [[Float]], meta: [Meta?]? = nil) {
+        self.vecs = vecs
+        let d = vecs.first?.count ?? 0
+        flat = vecs.allSatisfy { $0.count == d } ? vecs.flatMap { $0 } : []
+        names = raw.map { Array(Set($0.map(Lexical.normalize).filter { !$0.isEmpty })) }
+        romaji = raw.map { Lexical.canonRomaji(Lexical.romaji($0.first ?? "")) }
+        grams = names.map { Lexical.bigrams($0.joined(separator: " ")) }
+        self.meta = meta ?? Array(repeating: nil, count: vecs.count)
+        adj = Array(repeating: [], count: vecs.count)
+    }
+
+    public mutating func addEdges(contains: [(Int, Int)], coUsed: [(Int, Int, Float)], coTime: [(Int, Int, Float)] = []) {
+        for (a, b, w) in coTime {
+            adj[a].append(Edge(to: Int32(b), w: w, kind: 3))
+            adj[b].append(Edge(to: Int32(a), w: w, kind: 3))
+        }
+        for (a, b) in contains {
+            adj[a].append(Edge(to: Int32(b), w: 1, kind: 0))
+            adj[b].append(Edge(to: Int32(a), w: 1, kind: 1))
+        }
+        // co_used の重みはその点の最大の回数で割って 0〜1 にする
+        var mx = [Float](repeating: 0, count: count)
+        for (a, b, w) in coUsed { mx[a] = max(mx[a], w); mx[b] = max(mx[b], w) }
+        for (a, b, w) in coUsed {
+            adj[a].append(Edge(to: Int32(b), w: w / mx[a], kind: 2))
+            adj[b].append(Edge(to: Int32(a), w: w / mx[b], kind: 2))
+        }
+    }
+
+    /// 例を足す。links は（点の添字, 回数）
+    public mutating func addExample(text: String, vec: [Float], links: [(Int, Float)]) {
+        if let i = exText.firstIndex(of: text) {
+            for (t, w) in links {
+                if let j = exLinks[i].firstIndex(where: { $0.0 == t }) { exLinks[i][j].1 += w } else { exLinks[i].append((t, w)) }
+            }
+            return
+        }
+        exText.append(text); exVecs.append(vec); exLinks.append(links)
+        exGrams.append(Lexical.bigrams(Lexical.normalize(text)))
+    }
+
+    public mutating func clearExamples() { exText = []; exVecs = []; exLinks = []; exGrams = [] }
+}
+
+public enum Ranker {
+    /// 上位 limit 件の（添字, 点数）を返す
+    /// rel: つながりの言い方の anchor / target のベクトル（mix.relation のときだけ使う）
+    public static func rank(_ c: Corpus, query q: String, vec v: [Float], mix m: Mix,
+                            intent: QueryIntent? = nil, rel: (anchor: [Float], target: [Float])? = nil,
+                            limit: Int = 8) -> [(Int, Float)] {
+        if m.relation, let it = intent, it.hasRelation, let rel {
+            return rankRelation(c, it, rel, m, limit)
+        }
+        let n = c.count
+        if n == 0 { return [] }
+        let nq = Lexical.normalize(q)
+        // 名前の文字一致（全方式に共通）
+        var bonus = [Float](repeating: 0, count: n)
+        let asciiQ = nq.allSatisfy { $0.isASCII }
+        let rq = asciiQ ? Lexical.canonRomaji(nq.filter { $0.isLetter || $0.isNumber }) : ""
+        if !nq.isEmpty && !(asciiQ && nq.count < 2) {
+            for i in 0..<n {
+                var best: Float = 0
+                for nn in c.names[i] {
+                    let words = nn.split(whereSeparator: { " -_.".contains($0) })
+                    if nn.hasPrefix(nq) || words.contains(where: { $0.hasPrefix(nq) }) { best = max(best, m.prefixBonus) }
+                    else if nn.contains(nq) { best = max(best, m.substrBonus) }
+                }
+                if best == 0 && m.fuzzyBonus > 0 && rq.count >= 3 && !c.romaji[i].isEmpty {
+                    let d = Lexical.approxSubstringDistance(rq, in: c.romaji[i])
+                    if d == 0 || (d == 1 && rq.count >= 4) { best = m.fuzzyBonus * (d == 0 ? 1 : 0.8) }
+                }
+                bonus[i] = best
+            }
+        }
+        // V
+        var V = [Float](repeating: 0, count: n)
+        if m.v { V = c.dots(v) }
+        // K
+        var K = [Float](repeating: 0, count: n)
+        if m.k && !c.exVecs.isEmpty {
+            let sims = c.exVecs.map { Vec.dot($0, v) }
+            let order = topIndices(sims, m.knnK)
+            for (rank, i) in order.enumerated() {
+                if sims[i] < m.knnMinSim { break }
+                let total = c.exLinks[i].reduce(0) { $0 + $1.1 }
+                for (t, w) in c.exLinks[i] where total > 0 { K[t] += sims[i] / Float(rank + 1) * (w / total) }
+            }
+        }
+        // 入口の点数
+        var pre = [Float](repeating: 0, count: n)
+        let qg = Lexical.bigrams(nq)
+        if m.v || m.k {
+            for i in 0..<n { pre[i] = m.wV * V[i] + m.wK * K[i] }
+        } else if m.g {
+            for i in 0..<n { pre[i] = Lexical.containment(qg, c.grams[i]) }
+        }
+        // G
+        var P = [Float](repeating: 0, count: n)
+        if m.g {
+            var cand: [(Int, Float)] = []   // 0..<n は点、n.. は例
+            for i in 0..<n { let s = pre[i] + bonus[i]; if s > 0 { cand.append((i, s)) } }
+            for j in 0..<c.exText.count { let s = Lexical.containment(qg, c.exGrams[j]); if s > 0 { cand.append((n + j, s)) } }
+            var frontier = Array(cand.sorted { $0.1 > $1.1 }.prefix(m.seeds))
+            var a: Float = 1
+            for _ in 0..<m.hops {
+                a *= m.alpha
+                var next: [Int: Float] = [:]
+                for (node, s) in frontier {
+                    if node >= n {
+                        let ls = c.exLinks[node - n]
+                        let total = ls.reduce(0) { $0 + $1.1 }
+                        for (t, w) in ls where total > 0 { next[t] = max(next[t] ?? 0, s * m.alpha * w / total) }
+                        continue
+                    }
+                    for e in c.adj[node] {
+                        let w: Float
+                        switch e.kind {
+                        case 0: guard m.contains else { continue }; w = 1
+                        case 1: guard m.contains && m.up else { continue }; w = 1
+                        case 2: guard m.coUsed else { continue }; w = e.w * m.coWeight
+                        default: guard m.coTime else { continue }; w = e.w * m.coWeight
+                        }
+                        let t = Int(e.to)
+                        next[t] = max(next[t] ?? 0, s * m.alpha * w)
+                    }
+                }
+                for (t, s) in next { P[t] = max(P[t], s) }
+                frontier = Array(next.sorted { $0.value > $1.value }.prefix(m.seeds).map { ($0.key, $0.value) })
+                _ = a
+            }
+        }
+        // 時間・種類
+        var adjust = [Float](repeating: 0, count: n)
+        if m.intents, let it = intent, !it.isEmpty {
+            for i in 0..<n {
+                guard let md = c.meta[i] else { continue }
+                if !it.families.isEmpty {
+                    if !it.families.isDisjoint(with: md.families) {
+                        adjust[i] += md.families.contains("folder") ? m.folderBonus : m.typeBonus
+                    }
+                }
+                if it.download && !md.downloaded { adjust[i] -= m.timeFilter ? 1 : 0 }
+                if let r = it.range {
+                    let hit = it.download ? r.contains(md.added) : md.times.contains { r.contains($0) }
+                    if hit { adjust[i] += m.timeBonus } else if m.timeFilter { adjust[i] -= 1 }
+                }
+            }
+        }
+        // 足し合わせ
+        var score = [Float](repeating: 0, count: n)
+        switch m.fusion {
+        case .sum:
+            for i in 0..<n { score[i] = pre[i] + bonus[i] + m.wG * P[i] + adjust[i] }
+        case .rrf:
+            var lists: [[Float]] = []
+            if m.v { lists.append(V) }
+            if m.k { lists.append(K) }
+            if m.g { lists.append((m.v || m.k) ? P : zip(pre, P).map { $0 + $1 }) }
+            for l in lists {
+                let order = l.indices.filter { l[$0] > 0 }.sorted { l[$0] > l[$1] }
+                for (r, i) in order.enumerated() { score[i] += (m.rrfK + 1) / (m.rrfK + Float(r + 1)) }
+            }
+            for i in 0..<n { score[i] += bonus[i] + adjust[i] }
+        }
+        return topIndices(score, limit).map { ($0, score[$0]) }
+    }
+
+    /// つながりの言い方: anchor に近い上位 N 件を入口に、contains / co_used / co_time を 1〜hops 回たどり、
+    /// たどり着いた点数 ×α ＋ target との近さ ＋ 時間・種類で並べる（入口そのものは答えにしない）
+    static func rankRelation(_ c: Corpus, _ it: QueryIntent, _ rel: (anchor: [Float], target: [Float]), _ m: Mix, _ limit: Int) -> [(Int, Float)] {
+        let n = c.count
+        let na = Lexical.normalize(it.anchor)
+        var seedScore = [Float](repeating: 0, count: n)
+        let aDots = c.dots(rel.anchor), tDots = c.dots(rel.target)
+        for i in 0..<n {
+            var s = aDots[i]
+            for nn in c.names[i] where na.count >= 2 && (nn.contains(na) || na.contains(nn) && nn.count >= 3) { s += m.substrBonus }
+            seedScore[i] = s
+        }
+        let seeds = topIndices(seedScore, m.seeds)
+        let seedSet = Set(seeds)
+        var frontier = seeds.map { ($0, seedScore[$0]) }
+        var P = [Float](repeating: 0, count: n)
+        var m = m
+        if let r = m.relEdges { m.contains = r.contains; m.coUsed = r.coUsed; m.coTime = r.coTime }
+        if m.relByKind {
+            if it.inside { m.contains = true; m.coUsed = false; m.coTime = false }
+            else { m.contains = false; m.coUsed = true }
+        }
+        for _ in 0..<max(1, m.hops) {
+            var next: [Int: Float] = [:]
+            for (node, s) in frontier {
+                for e in c.adj[node] {
+                    let w: Float
+                    switch e.kind {
+                    case 0: guard m.contains else { continue }; w = 1
+                    case 1: guard m.contains && !(m.relByKind && it.inside) else { continue }; w = 1
+                    case 2: guard m.coUsed else { continue }; w = e.w
+                    default: guard m.coTime else { continue }; w = e.w
+                    }
+                    let t = Int(e.to)
+                    next[t] = max(next[t] ?? 0, s * m.relAlpha * w)
+                }
+            }
+            for (t, s) in next { P[t] = max(P[t], s) }
+            frontier = Array(next.sorted { $0.value > $1.value }.prefix(m.seeds).map { ($0.key, $0.value) })
+        }
+        var score = [Float](repeating: -9, count: n)
+        for i in 0..<n where P[i] > 0 && !seedSet.contains(i) {
+            var s = P[i] + m.relWT * tDots[i]
+            if let md = c.meta[i] {
+                if !it.families.isEmpty && !it.families.isDisjoint(with: md.families) {
+                    s += md.families.contains("folder") ? m.folderBonus : m.typeBonus
+                }
+                if let r = it.range, m.timeFilter, !md.times.contains(where: { r.contains($0) }) { s -= 1 }
+            }
+            score[i] = s
+        }
+        // たどり着いた点が足りなければ、ふつうの近さ（元の文ではなく target）で埋める
+        var out = topIndices(score, limit).filter { score[$0] > -9 }.map { ($0, score[$0]) }
+        if out.count < limit {
+            let have = Set(out.map(\.0))
+            let fill = topIndices(tDots, limit * 2).filter { !have.contains($0) }
+            out += fill.prefix(limit - out.count).map { ($0, tDots[$0] - 1) }
+        }
+        return out
+    }
+
+    static func topIndices(_ xs: [Float], _ k: Int) -> [Int] {
+        if xs.count <= k * 4 { return Array(xs.indices.sorted { xs[$0] > xs[$1] }.prefix(k)) }
+        // 部分選択（毎回全部を並べ替えない）
+        var heap: [(Float, Int)] = []
+        heap.reserveCapacity(k)
+        for (i, x) in xs.enumerated() {
+            if heap.count < k { heap.append((x, i)); if heap.count == k { heap.sort { $0.0 > $1.0 } } }
+            else if x > heap[k - 1].0 {
+                var j = k - 1
+                heap[j] = (x, i)
+                while j > 0 && heap[j - 1].0 < heap[j].0 { heap.swapAt(j, j - 1); j -= 1 }
+            }
+        }
+        if heap.count < k { heap.sort { $0.0 > $1.0 } }
+        return heap.map(\.1)
+    }
+}
+
+/// 文字の重なり・読み（ベクトルを使わない側）
+public enum Lexical {
+    public static func normalize(_ s: String) -> String { Describe.normalize(s) }
+
+    /// 2 文字ずつの組。ひらがなだけの組（「やつ」「のと」）は中身が無いので捨てる
+    static func bigrams(_ s: String) -> Set<String> {
+        let cs = Array(s.filter { !$0.isWhitespace && !"_-.・、。「」()（）".contains($0) })
+        var out = Set<String>()
+        if cs.count < 2 { return out }
+        for i in 0..<(cs.count - 1) {
+            let a = cs[i], b = cs[i + 1]
+            if isHira(a) && isHira(b) { continue }
+            out.insert(String([a, b]))
+        }
+        return out
+    }
+
+    static func isHira(_ c: Character) -> Bool {
+        guard let u = c.unicodeScalars.first?.value else { return false }
+        return (0x3041...0x309F).contains(u) || c == "ー"
+    }
+
+    /// 入力の組のうち、名前に入っている割合
+    static func containment(_ q: Set<String>, _ t: Set<String>) -> Float {
+        if q.isEmpty || t.isEmpty { return 0 }
+        return Float(q.intersection(t).count) / Float(q.count)
+    }
+
+    /// 日本語の読みをローマ字に（CFStringTokenizer の LatinTranscription。漢字も読む）
+    public static func romaji(_ s: String) -> String {
+        let cf = s as CFString
+        guard let tok = CFStringTokenizerCreate(nil, cf, CFRange(location: 0, length: CFStringGetLength(cf)),
+                                                kCFStringTokenizerUnitWord, Locale(identifier: "ja") as CFLocale) else { return "" }
+        var out = ""
+        while !CFStringTokenizerAdvanceToNextToken(tok).isEmpty {
+            if let r = CFStringTokenizerCopyCurrentTokenAttribute(tok, kCFStringTokenizerAttributeLatinTranscription) as? String {
+                out += r
+            }
+        }
+        return out.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil)
+    }
+
+    /// ヘボン式・訓令式・長音の違いを揃える（mitsumori / mitumori、seikyuusho / seikyusyo）
+    public static func canonRomaji(_ s: String) -> String {
+        var t = s.lowercased().filter { $0.isLetter || $0.isNumber }
+        for (a, b) in [("tsu", "tu"), ("shi", "si"), ("chi", "ti"), ("sha", "sya"), ("shu", "syu"), ("sho", "syo"),
+                       ("cha", "tya"), ("chu", "tyu"), ("cho", "tyo"), ("ja", "zya"), ("ju", "zyu"), ("jo", "zyo"),
+                       ("ji", "zi"), ("fu", "hu"), ("sh", "sy"), ("ch", "ty"), ("ou", "o"), ("uu", "u"), ("aa", "a"),
+                       ("ii", "i"), ("ee", "e"), ("oo", "o"), ("nn", "n")] {
+            t = t.replacingOccurrences(of: a, with: b)
+        }
+        return t
+    }
+
+    /// q が t のどこかの部分に「何文字の直しで」一致するか（Sellers のアルゴリズム）
+    public static func approxSubstringDistance(_ q: String, in t: String) -> Int {
+        let a = Array(q.utf8), b = Array(t.utf8)
+        if a.isEmpty { return 0 }
+        var prev = Array(0...a.count)
+        var best = prev[a.count]
+        for j in 0..<b.count {
+            var cur = [Int](repeating: 0, count: a.count + 1)
+            for i in 1...a.count {
+                cur[i] = min(prev[i] + 1, cur[i - 1] + 1, prev[i - 1] + (a[i - 1] == b[j] ? 0 : 1))
+            }
+            best = min(best, cur[a.count])
+            prev = cur
+        }
+        return best
+    }
+}
