@@ -400,6 +400,62 @@ func runFileEval(embedder: Embedder, appQs: [(String, [String])], appEngine: Eng
     }
 
     }
+    if on("nomatch") {
+    // 9) 「見つからない」の判定（NoMatchRule）。手がかりを --dump-signals <file> に TSV で書き出し、
+    //    いまの既定（.files / .apps）で答え無しを弾けた数と、答えのある問題を誤って弾いた数を出す。
+    //    parts/none2.json は判定を決めた後に作った答え無しの問題（当てはまりすぎの確かめ用）なので別に数える。
+    let held = Set(((try? JSONDecoder().decode([FQ].self, from: Data(contentsOf: URL(fileURLWithPath: evalDir + "/parts/none2.json")))) ?? []).map(\.q))
+    var tsv = ["set\tcat\tsrc\thit1\tq\ttop1\ttop2\trawV\tmaxV\tvZ\tknnSim\tnameHit\tintent\trelation\tvGap\tgap0"]
+    func row(_ set: String, _ cat: String, _ src: String, _ hit: Bool, _ q: String, _ s: MatchSignals) -> String {
+        [set, cat, src, hit ? "1" : "0", q, String(s.top1), String(s.top2), String(s.rawV), String(s.maxV), String(s.vZ),
+         String(s.knnSim), s.nameHit ? "1" : "0", s.hasIntent ? "1" : "0", s.relation ? "1" : "0", String(s.vGap), String(s.gapNoEx)].joined(separator: "\t")
+    }
+    let fr = NoMatchRule.files, ar = NoMatchRule.apps
+    print("\n== 「見つからない」の判定（ファイル: maxV<\(fr.lowMaxV) か maxV<\(fr.midMaxV)・差<\(fr.maxGap)、例≥\(fr.keepKnnSim) は残す / アプリ: maxV<\(ar.lowMaxV)、例≥\(ar.keepKnnSim) は残す）")
+    for (lvName, xs) in exLevels where lvName != "例少し" {
+        setExamples(xs)
+        var rejNone = 0, nNone = 0, rejHeld = 0, nHeld = 0, rejOk = 0, nOk = 0, keep1 = 0, keep3 = 0
+        var wrong: [String] = []
+        for p in qs {
+            let j = e.rankFilesJudged(query: p.q, vec: p.vec, mix: Mix.fileDefault, intent: p.intent, rel: p.rel, limit: 5)
+            let paths = j.results.map(\.file.path)
+            let hit = paths.first.map(p.gold.contains) ?? false
+            let src = held.contains(p.q) ? "none2" : (p.cat == "none" ? "none" : "ok")
+            tsv.append(row(lvName, p.cat, src, hit, p.q, j.signals))
+            if p.cat == "none" {
+                if src == "none2" { nHeld += 1; if j.noMatch { rejHeld += 1 } else { wrong.append("    残った[none2] \(p.q)  \(j.signals)") } }
+                else { nNone += 1; if j.noMatch { rejNone += 1 } else { wrong.append("    残った[none] \(p.q)  \(j.signals)") } }
+            } else {
+                nOk += 1
+                if j.noMatch { rejOk += 1; wrong.append("    弾いた[\(p.cat)]\(hit ? "（1位は正解）" : "") \(p.q)  \(j.signals)") }
+                if hit { keep1 += 1 }
+                if paths.prefix(3).contains(where: p.gold.contains) { keep3 += 1 }
+            }
+        }
+        print("  \(lvName): 答え無し \(rejNone)/\(nNone) を弾いた  作った答え無し \(rejHeld)/\(nHeld)  答えのある問題を誤って弾いた \(rejOk)/\(nOk)  （1位 \(keep1) 3位以内 \(keep3)）")
+        if args.contains("--miss") { wrong.forEach { print($0) } }
+    }
+    setExamples([])
+    for (name, list) in [("アプリ25問", appQs), ("アプリ名前の一部", PARTIAL)] {
+        var rej = 0
+        for (q, gold) in list {
+            let j = appEngine.searchJudged(q, limit: 3)
+            let hit = j.results.first.map { gold.contains($0.app.jp) } ?? false
+            tsv.append(row(name, "app", "ok", hit, q, j.signals))
+            if j.noMatch { rej += 1; print("    弾いた[\(name)] \(q)  \(j.signals)") }
+        }
+        print("  \(name): 誤って弾いた \(rej)/\(list.count)")
+    }
+    // アプリ側で答え無しの入力（ファイルの答え無しの問題をそのままアプリに入れる）
+    var rejA = 0, nA = 0
+    for p in qs where p.cat == "none" && !held.contains(p.q) {
+        let j = appEngine.searchJudged(p.q, limit: 3)
+        tsv.append(row("アプリ答え無し", "none", "none", false, p.q, j.signals))
+        nA += 1; if j.noMatch { rejA += 1 }
+    }
+    print("  アプリに答え無しの入力: 弾いた \(rejA)/\(nA)（参考）")
+    if let out = opt("--dump-signals") { try? tsv.joined(separator: "\n").write(toFile: out, atomically: true, encoding: .utf8); print("  手がかり → \(out)") }
+    }
     if on("misc") {
     // 7) 1 文字ずつ打つ間の時間
     print("\n== 1 文字ずつ打つ間の時間（埋め込み＋並べ替え、\(best.0.description)）")
