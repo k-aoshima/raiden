@@ -77,7 +77,7 @@ func runFilterTests() {
     }
     expect(p("請求書 #").text == "請求書", "打ちかけの「#」は残りの文に入れない")
     expect(p("#date 7d").isActive, "最後の値でも読めれば効く")
-    expect(p("#help").help && p("#h").help, "#help")
+    expect(p("#help ").notes == ["#help は使えません"] && p("#h 請求書").notes == ["#h は使えません"], "#help は無い（知らないコマンド）")
 
     // 当てはまるか
     let home = NSHomeDirectory()
@@ -126,7 +126,7 @@ func runFilterTests() {
     expect(pal("#type ")?.items.map(\.insert) == ["f", "d", "app"], "#type の候補")
     expect(pal("#name ") == nil, "#name は候補なし")
     expect(pal("#date 7d ") == nil, "値の後に空白を打ったら閉じる")
-    expect(pal("#help ")?.mode == .commands, "#help で一覧")
+    expect(pal("#help") == nil && pal("#help ") == nil, "#help で一覧は出さない")
     // ゴーストテキスト
     func ghost(_ t: String) -> String? { pal(t).flatMap(FilterCompletion.ghost)?.text }
     expect(ghost("#date 7") == "d（直近7日）", "ゴースト #date 7 → \(ghost("#date 7") ?? "nil")")

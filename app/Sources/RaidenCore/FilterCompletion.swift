@@ -79,7 +79,6 @@ public enum FilterCompletion {
         (.name, "textformat", "名前に含む文字で絞る", "例: 請求書"),
         (.modified, "pencil", "変更日で絞る", "例: 7d, 先月"),
         (.created, "calendar", "作成日で絞る", "例: 2026-11"),
-        (.help, "questionmark.circle", "使い方（コマンドの一覧）", ""),
     ]
 
     static let dateValues: [(String, String)] = [
@@ -116,13 +115,6 @@ public enum FilterCompletion {
         var s = chars.count
         while s > 0 && !chars[s - 1].isWhitespace { s -= 1 }
         let last = String(chars[s...])
-        let toks = QueryFilters.tokenize(text)
-        // #help（打ち終えて空白）なら全部の一覧
-        if let h = toks.lastIndex(where: { QueryFilters.commandName($0).flatMap(QueryFilters.command(named:)) == .help }),
-           h == toks.count - 1, text.last?.isWhitespace == true,
-           let r = text.range(of: toks[h], options: .backwards) {
-            return Palette(mode: .commands, items: commands(matching: ""), start: text.distance(from: text.startIndex, to: r.lowerBound), partial: "")
-        }
         // 「#t #ap」: #type の値の位置に別名（#app #folder #file）を打っているなら、#type の値の候補にする
         if !last.isEmpty, let name = QueryFilters.commandName(last), !name.isEmpty {
             var e = s
@@ -227,7 +219,7 @@ public enum FilterCompletion {
             }
         case .path:
             out = placeItems(partial: partial, others: others, pool: pool, ctx: ctx)
-        case .name, .help:
+        case .name:
             return []
         }
         // 並べ方: よく使う値 → 件数のある値（種類・拡張子は多い順）→ 0 件
@@ -297,7 +289,6 @@ public enum FilterCompletion {
         switch p.mode {
         case .commands:
             guard let cmd = QueryFilters.command(named: String(item.insert.dropFirst())) else { return (text, nil) }
-            if cmd == .help { return (head + QueryFilters.mark, nil) }
             return (head + cmd.name + " ", nil)
         case .values(let cmd):
             return (tidy(head), cmd.name + " " + item.insert)
@@ -317,7 +308,7 @@ public enum FilterCompletion {
         var cmds: [String] = [], rest: [String] = []
         var i = 0
         while i < toks.count {
-            if let n = QueryFilters.commandName(toks[i]), let c = QueryFilters.command(named: n), c != .help,
+            if let n = QueryFilters.commandName(toks[i]), let c = QueryFilters.command(named: n),
                i + 1 < toks.count, QueryFilters.commandName(toks[i + 1]) == nil {
                 var probe = QueryFilters()
                 if probe.apply(c, QueryFilters.unquote(toks[i + 1]), now: now) != nil {

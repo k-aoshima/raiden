@@ -13,8 +13,8 @@ import Foundation
 ///   コマンドと読むのは、入力の先頭か空白の直後の「#」「＃」＋文字だけ（「C#」「#1」は普通の文字）。
 public struct QueryFilters: Sendable {
     public enum Command: String, Sendable, CaseIterable {
-        case kind, type, ext, date, modified, created, path, name, help
-        public var takesValue: Bool { self != .help }
+        case kind, type, ext, date, modified, created, path, name
+        public var takesValue: Bool { true }
         public var name: String { QueryFilters.mark + rawValue }
         /// 短い別名（find / fd と同じ 1 文字）。#date は無し
         public var short: String? {
@@ -26,7 +26,6 @@ public struct QueryFilters: Sendable {
             case .created: return "#c"
             case .path: return "#p"
             case .name: return "#n"
-            case .help: return "#h"
             case .date: return nil
             }
         }
@@ -57,7 +56,6 @@ public struct QueryFilters: Sendable {
     public var hasSyntax = false          // コマンドが 1 つでも書かれていた（無ければ今までの検索そのまま）
     public var parsed: [Parsed] = []
     public var notes: [String] = []       // 「#size は使えません」など
-    public var help = false
     /// 値がまだ無い・打ちかけのコマンド（"" は「#」だけ）。絞り込みには使わない
     public var pending: String?
     public var dates: [Command: DateCond] = [:]
@@ -78,12 +76,12 @@ public struct QueryFilters: Sendable {
     public var wantsApps: Bool { types.contains("app") || kinds.contains("app") }
     /// アプリを候補に出すか（ファイルにしか効かない条件が付いていれば出さない）
     public var allowsApps: Bool {
-        !help && (types.isEmpty || types.contains("app")) && (!hasKind || kinds.contains("app"))
+        (types.isEmpty || types.contains("app")) && (!hasKind || kinds.contains("app"))
             && exts.isEmpty && dates.isEmpty && paths.isEmpty
     }
     /// ファイル・フォルダを候補に出すか（アプリだけを頼んだときは出さない）
     public var allowsFiles: Bool {
-        !help && !(!types.isEmpty && types == ["app"]) && !(!kinds.isEmpty && kinds == ["app"] && kindExts.isEmpty)
+        !(!types.isEmpty && types == ["app"]) && !(!kinds.isEmpty && kinds == ["app"] && kindExts.isEmpty)
     }
 
     // MARK: - 名前
@@ -98,7 +96,6 @@ public struct QueryFilters: Sendable {
         ("created", .created), ("c", .created), ("作成日", .created),
         ("path", .path), ("p", .path), ("in", .path), ("場所", .path),
         ("name", .name), ("n", .name), ("名前", .name),
-        ("help", .help), ("h", .help), ("?", .help), ("ヘルプ", .help),
     ]
 
     /// #type の別名（前の版の名前）。#app → #type app、#folder → #type d、#file → #type f。
@@ -196,7 +193,6 @@ public struct QueryFilters: Sendable {
         guard let first = token.first, isMark(first) else { return nil }
         let n = String(token.dropFirst())
         if n.isEmpty { return "" }
-        if n == "?" { return n }
         guard let f = n.first, f.isLetter, !n.contains("/"), !n.contains("-"), !n.contains(".") else { return nil }
         return n.lowercased()
     }
@@ -222,11 +218,6 @@ public struct QueryFilters: Sendable {
                     f.notes.append("#\(name) は使えません")
                     f.parsed.append(Parsed(command: nil, raw: t, value: nil, meaning: nil, ok: false))
                 }
-                i += 1; continue
-            }
-            if cmd == .help {
-                f.help = true
-                f.parsed.append(Parsed(command: cmd, raw: t, value: nil, meaning: "使い方", ok: true))
                 i += 1; continue
             }
             // 値: 次のトークン（コマンドの形でなければ）
@@ -331,8 +322,6 @@ public struct QueryFilters: Sendable {
             if !names.contains(n) { names.append(n) }
             remember(.name, ["「\(v)」"])
             return "「\(v)」"
-        case .help:
-            return nil
         }
     }
 
@@ -346,7 +335,6 @@ public struct QueryFilters: Sendable {
         case .ext: f.exts = []
         case .path: f.paths = []
         case .name: f.names = []
-        case .help: f.help = false
         }
         f.labels[c] = nil
         f.order.removeAll { $0 == c }
@@ -441,7 +429,6 @@ public struct QueryFilters: Sendable {
             case .ext: return Chip(command: c, symbol: "tag", label: "拡張子: " + v)
             case .path: return Chip(command: c, symbol: "folder", label: "場所: " + v)
             case .name: return Chip(command: c, symbol: "textformat", label: "名前: " + v)
-            case .help: return nil
             }
         }
     }

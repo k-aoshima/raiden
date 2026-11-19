@@ -300,7 +300,13 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         field.focusRingType = .none
         field.font = .systemFont(ofSize: 24, weight: .regular)
         field.textColor = PanelStyle.text
-        // 入力欄が空のときの案内文は出さない（虫めがねのアイコンだけ）
+        // 入力欄が空のときの案内文: 「Raiden 検索」は薄いグレー、「filter: #」は # の使い方の手がかりとしてさらに薄く小さく
+        let ph = NSMutableAttributedString(string: "Raiden 検索", attributes: [
+            .foregroundColor: PanelStyle.faint, .font: NSFont.systemFont(ofSize: 24)])
+        ph.append(NSAttributedString(string: "   filter: #", attributes: [
+            .foregroundColor: NSColor(white: 0.70, alpha: 1), .font: NSFont.systemFont(ofSize: 15),
+            .baselineOffset: 2]))
+        field.placeholderAttributedString = ph
         field.delegate = self
         field.cell?.usesSingleLineMode = true
         statusIcon.contentTintColor = PanelStyle.faint

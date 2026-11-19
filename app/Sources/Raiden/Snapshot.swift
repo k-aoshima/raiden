@@ -30,6 +30,7 @@ enum Snapshot {
         let appSec = ResultSection(title: "アプリ", symbol: "app.badge", items: apps)
         let fileSec = ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: files)
 
+        shoot(dir + "/panel-empty.png", query: "", sections: [])
         shoot(dir + "/panel-normal.png", query: "PDFを見るやつ", sections: [appSec, fileSec])
         shoot(dir + "/panel-selected.png", query: "PDFを見るやつ", sections: [appSec, fileSec], select: 6)
         var weakApps = appSec, weakFiles = fileSec
