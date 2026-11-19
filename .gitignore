@@ -1,0 +1,7 @@
+build/
+.build/
+tools/convert/.venv/
+__pycache__/
+*.mlpackage
+*.mlmodelc
+.DS_Store

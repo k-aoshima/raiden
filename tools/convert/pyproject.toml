@@ -1,0 +1,12 @@
+[project]
+name = "raiden-convert"
+version = "0.1.0"
+description = "bge-m3 を Core ML に変換する（開発用）"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "torch==2.7.0",
+    "transformers==4.51.3",
+    "coremltools==9.0",
+    "numpy<2.3",
+    "sentencepiece",
+]
