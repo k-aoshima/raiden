@@ -259,7 +259,8 @@ public final class Engine {
     }
 
     /// ファイル・フォルダの点を入れて、作るべきベクトルを返す（ベクトル化はしない。embedFiles で裏で進める）。
-    /// 保存済みのベクトル（説明文の元・日付・大きさが同じ物）はそのまま使い、無い物は 0 のベクトルで入れる。
+    /// 保存済みのベクトル（説明文の元・日付・大きさが同じ物）はそのまま使い、無い物はベクトル無し（近さ 0）で入れる。
+    /// ファイル・フォルダのベクトルはメモリにも DB にも 2 値（128 バイト、BinVec）だけを持つ。
     /// 0 の物も名前の文字一致（ローマ字・打ち間違いも）と絞り込みのコマンドでは候補に出る。
     /// contains（フォルダ → 中の物）・co_used・co_time の線もここで張る
     public func installFiles(_ entries: [FileEntry]) -> FilePending {
@@ -267,31 +268,37 @@ public final class Engine {
         let bases = entries.map { FileCatalog.baseDescription($0, children: cm[$0.path] ?? []) }
         let model = embedder.identifier
         let stamps = zip(entries, bases).map { Store.hash("\(model)\n\($1)\n\($0.mtime) \($0.size)") }
-        let have = store?.storedFileVectors() ?? [:]
-        let zero = [Float](repeating: 0, count: embedder.dimension)
-        var vs: [[Float]] = []
-        vs.reserveCapacity(entries.count)
+        let have = store?.storedFileCodes() ?? [:]
+        let zero = [UInt8](repeating: 0, count: BinVec.bytes)
+        var codes: [UInt8] = []
+        codes.reserveCapacity(entries.count * BinVec.bytes)
+        var present: [Bool] = []
+        present.reserveCapacity(entries.count)
         var pending = FilePending()
-        var newNodes: [(entry: FileEntry, description: String, vec: [Float]?, hash: String)] = []
+        var newNodes: [(entry: FileEntry, code: [UInt8]?, hash: String)] = []
         lock.lock()
         let prior = Dictionary(files.enumerated().map { ($1.path, $0) }, uniquingKeysWith: { a, _ in a })
-        let priorStamps = fileStamps, priorVecs = fileCorpus.vecs
+        let priorStamps = fileStamps, priorCorpus = fileCorpus
         lock.unlock()
         for (i, e) in entries.enumerated() {
             // メモリにあれば使う（Store なしの答え合わせ・保存前の物）
-            if let j = prior[e.path], j < priorStamps.count, j < priorVecs.count {
+            if let j = prior[e.path], j < priorStamps.count, j < priorCorpus.count, priorCorpus.isBinary, priorCorpus.present[j] {
                 let ps = priorStamps[j]
-                if ps == stamps[i] { vs.append(priorVecs[j]); continue }
-                if ps == stamps[i] + Self.shortMark { vs.append(priorVecs[j]); pending.full.append(e.path); continue }
+                if ps == stamps[i] || ps == stamps[i] + Self.shortMark {
+                    codes += priorCorpus.code(j); present.append(true)
+                    if ps != stamps[i] { pending.full.append(e.path) }
+                    continue
+                }
             }
-            if let h = have[e.path], !h.vec.isEmpty {
-                if h.hash == stamps[i] { vs.append(h.vec); continue }
-                if h.hash == stamps[i] + Self.shortMark { vs.append(h.vec); pending.full.append(e.path); continue }
+            if let h = have[e.path], h.code.count == BinVec.bytes, h.hash == stamps[i] || h.hash == stamps[i] + Self.shortMark {
+                codes += h.code; present.append(true)
+                if h.hash != stamps[i] { pending.full.append(e.path) }
+                continue
             }
-            vs.append(zero)
+            codes += zero; present.append(false)
             pending.short.append(e.path)
             if FileCatalog.hasContent(e) { pending.full.append(e.path) }
-            if have[e.path] == nil { newNodes.append((e, "", nil, "")) }
+            if have[e.path] == nil { newNodes.append((e, nil, "")) }
         }
         // まだベクトルの無い物も点だけ作っておく（線を張るため）。消えた物の点は消す
         store?.saveFileNodes(newNodes)
@@ -312,7 +319,7 @@ public final class Engine {
             store.replaceFileEdges(kind: "co_time", ct.map { (entries[$0.0].path, entries[$0.1].path, $0.2) })
         }
         var c = Corpus()
-        c.setItems(names: entries.map { [$0.stem] }, vecs: vs, meta: entries.map {
+        c.setItems(names: entries.map { [$0.stem] }, codes: codes, present: present, meta: entries.map {
             Corpus.Meta(families: Set($0.families), times: [$0.lastUsed, $0.mtime, $0.added].filter { $0 > 0 },
                         added: $0.added, downloaded: $0.downloaded)
         })
@@ -354,15 +361,16 @@ public final class Engine {
             return c.isEmpty ? it.2 : it.2 + " 中身: " + c
         }
         let vs = embedder.embedBatch(descs, batch: embedBatchSize)
-        var rows: [(entry: FileEntry, description: String, vec: [Float]?, hash: String)] = []
+        var rows: [(entry: FileEntry, code: [UInt8]?, hash: String)] = []
         lock.lock()
         for (k, it) in items.enumerated() where vs[k].contains(where: { $0 != 0 }) {
             let done = full || !FileCatalog.hasContent(it.1)
             let h = done ? it.3 : it.3 + Self.shortMark
-            rows.append((it.1, descs[k], vs[k], h))
+            let code = BinVec.encode(vs[k])
+            rows.append((it.1, code, h))
             // 待っている間に一覧が入れ替わっていたら、同じ物（同じ stamp）のときだけ入れる
             guard let i = fileIndex[it.0], i < targetStamps.count, targetStamps[i] == it.3 else { continue }
-            fileCorpus.setVec(i, vs[k])
+            fileCorpus.setCode(i, code)
             fileStamps[i] = h
         }
         lock.unlock()
@@ -394,12 +402,6 @@ public final class Engine {
 
     /// 一覧に入っているパスか
     public func hasFile(_ path: String) -> Bool { lock.lock(); defer { lock.unlock() }; return fileIndex[path] != nil }
-
-    /// まだベクトルの無い（0 の）ファイル・フォルダの数（設定窓の「ベクトルを作成中」と合わせる用）
-    public var filesWithoutVector: Int {
-        lock.lock(); defer { lock.unlock() }
-        return fileStamps.filter(\.isEmpty).count
-    }
 
     /// ファイルの例（入力文, パス）をメモリに足す（答え合わせ用）
     public func addFileExamples(_ pairs: [(String, String)]) {
@@ -489,7 +491,66 @@ public final class Engine {
         lock.lock()
         let c = fileCorpus, fs = files
         lock.unlock()
-        return Ranker.rank(c, query: q, vec: vec, mix: mix, intent: intent, rel: rel, limit: limit).map { FileResult(file: fs[$0.0], score: $0.1) }
+        let relation = mix.relation && (intent?.hasRelation ?? false) && rel != nil
+        var ranked = Ranker.rank(c, query: q, vec: vec, mix: mix, intent: intent, rel: rel, limit: max(limit, rerankN))
+        // つながりの言い方は target との近さ（重み relWT）で点数を付けているので、そちらを並べ直す
+        if Self.worthRerank(q) {
+            ranked = relation ? rerank(ranked, c: c, vec: rel!.target, wV: mix.relWT) : rerank(ranked, c: c, vec: vec, wV: mix.wV)
+        }
+        return ranked.prefix(limit).map { FileResult(file: fs[$0.0], score: $0.1) }
+    }
+
+    /// 並べ直す件数（0 なら並べ直さない）。上位 rerankN 件だけ、その場で説明文を作り直して bge-m3 でベクトル化し、
+    /// 2 値の近さとの差を点数に足して並べ直す（ディスクに細かいベクトルを置かない並べ直し）。作ったベクトルはメモリに少しだけ覚える
+    public var rerankN = 10
+
+    /// 打ちかけの短い入力（英数字 3 文字まで・1 文字）は並べ直さない（名前の一致で決まり、上位が 1 文字ごとに入れ替わって毎回作り直しになる）
+    static func worthRerank(_ q: String) -> Bool {
+        let n = Lexical.normalize(q).filter { !$0.isWhitespace }
+        return n.allSatisfy(\.isASCII) ? n.count >= 4 : n.count >= 2
+    }
+    private var exactCache: [String: [Float]] = [:]
+    private let exactLock = NSLock()
+    static let exactCapacity = 2048
+
+    private func rerank(_ ranked: [(Int, Float)], c: Corpus, vec: [Float], wV: Float) -> [(Int, Float)] {
+        rerankExact(ranked, c: c, vec: vec, wV: wV).0
+    }
+
+    /// 並べ直した結果と、その場で作ったベクトルとの近さ（添字 → cos。見つからない判定の手がかりに使う）
+    private func rerankExact(_ ranked: [(Int, Float)], c: Corpus, vec: [Float], wV: Float) -> ([(Int, Float)], [Int: Float]) {
+        guard rerankN > 0, c.isBinary, !ranked.isEmpty else { return (ranked, [:]) }
+        let top = Array(ranked.prefix(rerankN))
+        lock.lock()
+        let keys = top.map { $0.0 < targetStamps.count ? files[$0.0].path + "\n" + targetStamps[$0.0] : "" }
+        let items = top.map { $0.0 < files.count ? (files[$0.0], fileBases[$0.0]) : nil }
+        lock.unlock()
+        exactLock.lock()
+        var vs = keys.map { exactCache[$0] }
+        exactLock.unlock()
+        let miss = vs.indices.filter { vs[$0] == nil && items[$0] != nil }
+        if !miss.isEmpty {
+            let descs = miss.map { k -> String in
+                let (e, b) = items[k]!
+                let ct = FileCatalog.content(e)
+                return ct.isEmpty ? b : b + " 中身: " + ct
+            }
+            let made = (embedder as? UrgentEmbedder)?.embedUrgent(descs, batch: embedBatchSize) ?? embedder.embedBatch(descs, batch: embedBatchSize)
+            exactLock.lock()
+            if exactCache.count > Self.exactCapacity { exactCache.removeAll(keepingCapacity: true) }
+            for (j, k) in miss.enumerated() where made[j].contains(where: { $0 != 0 }) { vs[k] = made[j]; exactCache[keys[k]] = made[j] }
+            exactLock.unlock()
+        }
+        var out = ranked
+        var exact: [Int: Float] = [:]
+        for (k, (i, s)) in top.enumerated() {
+            guard let v = vs[k] else { continue }
+            let approx = c.present[i] ? BinVec.asymScore(c.code(i), q: vec) : 0
+            let x = Vec.dot(v, vec)
+            exact[i] = x
+            out[k] = (i, s + wV * (x - approx))
+        }
+        return (out.sorted { $0.1 > $1.1 }, exact)
     }
 
     public func rankFilesJudged(query q: String, vec: [Float], mix: Mix, intent: QueryIntent?,
@@ -499,15 +560,21 @@ public final class Engine {
         let c = fileCorpus, fs = files
         lock.unlock()
         let allow = allow.flatMap { $0.count == fs.count ? $0 : nil }
-        let ranked = Ranker.rank(c, query: q, vec: vec, mix: mix, intent: intent, rel: rel, limit: max(limit, 3), allow: allow)
         let relation = mix.relation && (intent?.hasRelation ?? false) && rel != nil
+        var ranked = Ranker.rank(c, query: q, vec: vec, mix: mix, intent: intent, rel: rel, limit: max(limit, 3, rerankN), allow: allow)
+        var exact: [Int: Float] = [:]
+        let doRerank = Self.worthRerank(q)
+        if doRerank && relation { ranked = rerank(ranked, c: c, vec: rel!.target, wV: mix.relWT) }
+        else if doRerank { (ranked, exact) = rerankExact(ranked, c: c, vec: vec, wV: mix.wV) }
         // 1 位と 2 位の差は例を抜いて見る（弱い例が 1 件だけ点数を押し上げて差が開くのを避ける。並べ替えは 1ms ほど）
         var noEx: [(Int, Float)]?
         if mix.k && !c.exVecs.isEmpty && !relation {
             var m0 = mix; m0.k = false
-            noEx = Ranker.rank(c, query: q, vec: vec, mix: m0, intent: intent, rel: rel, limit: 2, allow: allow)
+            noEx = Ranker.rank(c, query: q, vec: vec, mix: m0, intent: intent, rel: rel, limit: max(2, rerankN), allow: allow)
+            if doRerank { noEx = rerank(noEx!, c: c, vec: vec, wV: m0.wV) }   // 作ったベクトルは覚えているので軽い
         }
-        let s = NoMatch.signals(c, query: q, vec: vec, mix: mix, ranked: ranked, rankedNoEx: noEx, intent: intent, relation: relation, allow: allow)
+        let s = NoMatch.signals(c, query: q, vec: vec, mix: mix, ranked: ranked, rankedNoEx: noEx, intent: intent, relation: relation,
+                                allow: allow, exact: exact)
         return Judged(results: ranked.prefix(limit).map { FileResult(file: fs[$0.0], score: $0.1) },
                       noMatch: rule.isNoMatch(s), signals: s)
     }

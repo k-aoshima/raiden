@@ -144,7 +144,7 @@ public struct RaidenSettings: Codable, Equatable, Sendable {
         // 初期値が増えた分だけを足す。knownExcludeDefaults が無いのは前の版の settings.json（前の初期値だけを知っている）
         let known = get(.knownExcludeDefaults, ScanScope.legacyExcludeNames)
         for n in ScanScope.defaultExcludeNames where !known.contains(n) && !excludeNames.contains(n) { excludeNames.append(n) }
-        knownExcludeDefaults = Array(Set(known).union(ScanScope.defaultExcludeNames)).sorted()
+        knownExcludeDefaults = known + ScanScope.defaultExcludeNames.filter { !known.contains($0) }
         hotKey = (try? c.decodeIfPresent(HotKeySetting.self, forKey: .hotKey)) ?? nil
         unloadMinutes = max(0, get(.unloadMinutes, def.unloadMinutes))
         maxRows = min(max(get(.maxRows, def.maxRows), Self.maxRowsRange.lowerBound), Self.maxRowsRange.upperBound)

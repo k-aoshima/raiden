@@ -74,8 +74,20 @@ public struct Corpus {
     private(set) var flat: [Float] = []   // vecs を 1 本に並べたもの（内積をまとめて Accelerate で計算する）
     public var dim: Int { vecs.first?.count ?? 0 }
 
-    /// 全部の点との内積（vDSP_mmul で行列×ベクトル）
+    /// 2 値のベクトル（ファイル・フォルダ）。n 件 × 128 バイトを 1 本に並べたもの。これがあるときは vecs は空（BinVec）
+    public private(set) var codes: [UInt8] = []
+    public private(set) var isBinary = false
+    /// 2 値のとき、ベクトルがある点か（まだ作っていない点は false）
+    public private(set) var present: [Bool] = []
+    private var n = 0
+
+    /// 全部の点との近さ。2 値なら非対称の内積（BinVec、cos の目盛りに合わせてある）、そうでなければ内積（vDSP_mmul）
     public func dots(_ v: [Float]) -> [Float] {
+        if isBinary {
+            var s = BinVec.scores(codes: codes, n: n, query: v)
+            for i in 0..<n where !present[i] { s[i] = 0 }   // まだベクトルの無い点は 0（名前の一致と絞り込みだけで出る）
+            return s
+        }
         let n = vecs.count, d = dim
         var out = [Float](repeating: 0, count: n)
         guard n > 0, d > 0, v.count == d else { return vecs.map { Vec.dot($0, v) } }
@@ -100,31 +112,44 @@ public struct Corpus {
     var exGrams: [Set<String>] = []
 
     public init() {}
-    public var count: Int { vecs.count }
+    public var count: Int { n }
 
     public mutating func setItems(names raw: [[String]], vecs: [[Float]], meta: [Meta?]? = nil) {
         self.vecs = vecs
+        isBinary = false; codes = []
         let d = vecs.first?.count ?? 0
         flat = vecs.allSatisfy { $0.count == d } ? vecs.flatMap { $0 } : []
+        setNames(raw, meta: meta)
+    }
+
+    /// 2 値のベクトルで入れる（codes は names.count × 128 バイト）
+    public mutating func setItems(names raw: [[String]], codes: [UInt8], present: [Bool], meta: [Meta?]? = nil) {
+        vecs = []; flat = []
+        isBinary = true
+        self.codes = codes
+        self.present = present
+        setNames(raw, meta: meta)
+    }
+
+    private mutating func setNames(_ raw: [[String]], meta: [Meta?]?) {
+        n = raw.count
         names = raw.map { Array(Set($0.map(Lexical.normalize).filter { !$0.isEmpty })) }
         romaji = raw.map { Lexical.canonRomaji(Lexical.romaji($0.first ?? "")) }
         grams = names.map { Lexical.bigrams($0.joined(separator: " ")) }
-        self.meta = meta ?? Array(repeating: nil, count: vecs.count)
-        adj = Array(repeating: [], count: vecs.count)
-        filesBelow = Array(repeating: 0, count: vecs.count)
+        self.meta = meta ?? Array(repeating: nil, count: n)
+        adj = Array(repeating: [], count: n)
+        filesBelow = Array(repeating: 0, count: n)
     }
 
-    /// 1 点のベクトルを差し替える（裏でベクトル化が進んだとき）
-    public mutating func setVec(_ i: Int, _ v: [Float]) {
-        guard i < vecs.count else { return }
-        vecs[i] = v
-        let d = dim
-        if flat.count == vecs.count * d && v.count == d {
-            flat.withUnsafeMutableBufferPointer { f in for j in 0..<d { f[i * d + j] = v[j] } }
-        } else {
-            flat = vecs.allSatisfy { $0.count == d } ? vecs.flatMap { $0 } : []
-        }
+    /// 1 点の 2 値のベクトルを差し替える（裏でベクトル化が進んだとき）
+    public mutating func setCode(_ i: Int, _ c: [UInt8]) {
+        guard isBinary, i < n, c.count == BinVec.bytes else { return }
+        codes.withUnsafeMutableBufferPointer { p in for j in 0..<BinVec.bytes { p[i * BinVec.bytes + j] = c[j] } }
+        present[i] = true
     }
+
+    /// 1 点の 2 値のベクトル（128 バイト）
+    public func code(_ i: Int) -> ArraySlice<UInt8> { codes[(i * BinVec.bytes)..<((i + 1) * BinVec.bytes)] }
 
     public mutating func addEdges(contains: [(Int, Int)], coUsed: [(Int, Int, Float)], coTime: [(Int, Int, Float)] = []) {
         for (a, b, w) in coTime {

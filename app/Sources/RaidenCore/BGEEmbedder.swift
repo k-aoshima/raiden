@@ -10,7 +10,7 @@ import Foundation
 ///   meta.json                         {"vocab", "dim", "shapes"}
 ///
 /// unload() でモデルと表を手放し、次の embed() で読み直す（入力欄を閉じて暫くしたら解放する設定用）。
-public final class BGEEmbedder: Embedder {
+public final class BGEEmbedder: UrgentEmbedder {
     public let identifier: String
     public let dimension: Int
     public let modelDir: URL
@@ -40,6 +40,8 @@ public final class BGEEmbedder: Embedder {
         shapes = (meta["shapes"] as? [Int] ?? [16, 32, 64, 128]).sorted()
         self.maxTokens = min(maxTokens, shapes.last ?? 128)
         identifier = "bge-m3:" + body
+        // ファイル・フォルダの 2 値のベクトルの中心（無ければ中心を引かない）
+        BinVec.loadCenter(modelDir.appendingPathComponent("center.bin"))
     }
 
     public var isLoaded: Bool { lock.lock(); defer { lock.unlock() }; return model != nil }
@@ -155,6 +157,32 @@ public final class BGEEmbedder: Embedder {
             lock.unlock()
             // まとめて通せなかったら 1 件ずつ
             for (k, j) in chunk.enumerated() { out[j] = vs?[k] ?? embed(texts[j]) }
+        }
+        return out
+    }
+
+    /// 検索の途中（並べ直し）で使う: 入力 1 文と同じく、裏のまとめてのベクトル化より先に通し、終わるまで続けて使う
+    public func embedUrgent(_ texts: [String], batch want: Int = 8) -> [[Float]] {
+        waitLock.lock(); waiting += 1; waitLock.unlock()
+        defer { waitLock.lock(); waiting -= 1; waitLock.unlock() }
+        let zero = [Float](repeating: 0, count: dimension)
+        lock.lock(); defer { lock.unlock() }
+        guard (try? loadLocked()) != nil, let tok = tokenizer, let model else { return texts.map { _ in zero } }
+        let ids = texts.map { clip(tok.encode($0).map(Int.init)) }
+        let B = batchSizes.last { $0 <= max(want, 1) } ?? 1
+        var out = [[Float]](repeating: zero, count: texts.count)
+        let order = ids.indices.sorted { ids[$0].count < ids[$1].count }
+        var i = 0
+        while i < order.count {
+            let chunk = Array(order[i..<min(i + B, order.count)])
+            i += chunk.count
+            let L = shapes.first { $0 >= ids[chunk.last!].count } ?? maxTokens
+            let bShape = batchSizes.first { $0 >= chunk.count } ?? B
+            if let vs = run(model, rows: chunk.map { ids[$0] }, B: bShape, L: L) {
+                for (k, j) in chunk.enumerated() { out[j] = vs[k] }
+            } else {
+                for j in chunk { out[j] = run(model, rows: [ids[j]], B: 1, L: shapes.first { $0 >= ids[j].count } ?? maxTokens)?.first ?? zero }
+            }
         }
         return out
     }

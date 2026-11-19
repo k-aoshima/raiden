@@ -109,6 +109,8 @@ func runFileEval(embedder: Embedder, appQs: [(String, [String])], appEngine: Eng
     t = Date()
     // --short-desc: 中身の頭を入れず、名前・場所・種類の短い説明だけでベクトルを作る（二段構えの 1 段目の当たり方）
     if let b = opt("--embed-batch").flatMap(Int.init) { e.embedBatchSize = b }
+    // --rerank N: 上位 N 件をその場でベクトル化し直して並べ直す（Engine.rerankN。既定 10、0 で並べ直さない）
+    if let n = opt("--rerank").flatMap(Int.init) { e.rerankN = n }
     let made = e.setFiles(entries, full: !args.contains("--short-desc")) { n, total in if n % 100 == 0 || n == total { FileHandle.standardError.write("  ベクトル化 \(n)/\(total) 件\n".data(using: .utf8)!) } }
     let tVec = Date().timeIntervalSince(t)
     let ec = e.fileEdgeCounts
@@ -510,21 +512,26 @@ func runFileEval(embedder: Embedder, appQs: [(String, [String])], appEngine: Eng
 
     }
     if on("misc") {
-    // 8) ファイル数が増えた場合（今のベクトルに揺らぎを足して複製）
+    // 8) ファイル数が増えた場合（今の 2 値のベクトルのビットを少し反転して複製）。--scale-muls 1,10,50 で倍率を変える
     print("\n== ファイル数が増えた場合（並べ替えだけの時間・メモリ。埋め込みは件数に関係なく約 \(f1(embedMs))ms）")
     let base = e.fileCorpusSnapshot
-    for mul in [1, 10, 50] {
+    let muls = (opt("--scale-muls") ?? "1,10,50").split(separator: ",").compactMap { Int($0) }
+    for mul in muls {
         let fpB = physFootprintMB()
         var c = Corpus()
-        var vecs: [[Float]] = [], names: [[String]] = [], meta: [Corpus.Meta?] = []
+        var codes: [UInt8] = [], present: [Bool] = [], names: [[String]] = [], meta: [Corpus.Meta?] = []
+        codes.reserveCapacity(base.count * mul * BinVec.bytes)
         for r in 0..<mul {
             for i in 0..<base.count {
-                vecs.append(r == 0 ? base.vecs[i] : Vec.normalized(base.vecs[i].map { $0 + Float.random(in: -0.02...0.02) }))
+                var cd = Array(base.code(i))
+                if r > 0 { for _ in 0..<20 { let b = Int.random(in: 0..<(BinVec.bytes * 8)); cd[b / 8] ^= UInt8(1 << (b % 8)) } }
+                codes += cd
+                present.append(base.present[i])
                 names.append(base.names[i].map { $0 + (r == 0 ? "" : "\(r)") })
                 meta.append(base.meta[i])
             }
         }
-        c.setItems(names: names, vecs: vecs, meta: meta)
+        c.setItems(names: names, codes: codes, present: present, meta: meta)
         let n0 = base.count
         var ce: [(Int, Int)] = [], co: [(Int, Int, Float)] = []
         for r in 0..<mul {
@@ -540,8 +547,9 @@ func runFileEval(embedder: Embedder, appQs: [(String, [String])], appEngine: Eng
             _ = Ranker.rank(c, query: p.q, vec: p.vec, mix: best.0, intent: p.intent, limit: 8)
             ts.append(Date().timeIntervalSince(t0) * 1000)
         }
-        print(String(format: "    %6d 件: 並べ替え %.1fms（中央値）/ 最大 %.1fms  footprint +%.0fMB（ベクトル Float32 で %.0fMB）",
-                     c.count, med(ts), ts.max() ?? 0, physFootprintMB() - fpB, Double(c.count * 1024 * 4) / 1_048_576))
+        print(String(format: "    %7d 件: 並べ替え %.1fms（中央値）/ 最大 %.1fms  footprint +%.0fMB（2 値のベクトル %.0fMB。Float32 なら %.0fMB）",
+                     c.count, med(ts), ts.max() ?? 0, physFootprintMB() - fpB, Double(c.count * BinVec.bytes) / 1_048_576,
+                     Double(c.count * 1024 * 4) / 1_048_576))
     }
     }
 }

@@ -14,6 +14,11 @@ public extension Embedder {
     func embedBatch(_ texts: [String], batch: Int) -> [[Float]] { texts.map { embed($0) } }
 }
 
+/// 検索の途中で使うまとめてのベクトル化（並べ直し）。裏のベクトル化より先に通す
+public protocol UrgentEmbedder: Embedder {
+    func embedUrgent(_ texts: [String], batch: Int) -> [[Float]]
+}
+
 public enum EmbedderError: Error { case unavailable, assets(String) }
 
 /// OS に入っている NLContextualEmbedding（モデルを同梱しない）。

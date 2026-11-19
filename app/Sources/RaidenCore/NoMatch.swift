@@ -78,7 +78,7 @@ public enum NoMatch {
     /// rankedNoEx は例（k近傍法）を抜いて並べた結果（例が無ければ nil で ranked を使う）
     public static func signals(_ c: Corpus, query q: String, vec v: [Float], mix m: Mix,
                                ranked: [(Int, Float)], rankedNoEx: [(Int, Float)]?,
-                               intent: QueryIntent?, relation: Bool, allow: [Bool]? = nil) -> MatchSignals {
+                               intent: QueryIntent?, relation: Bool, allow: [Bool]? = nil, exact: [Int: Float] = [:]) -> MatchSignals {
         var s = MatchSignals()
         guard let first = ranked.first else { return s }
         s.top1 = first.1
@@ -87,7 +87,9 @@ public enum NoMatch {
         s.gapNoEx = r0.count > 1 ? r0[0].1 - r0[1].1 : 1
         s.relation = relation
         s.hasIntent = !(intent?.isEmpty ?? true)
-        let V0 = c.dots(v)
+        // exact: 並べ直しでその場で作った細かいベクトルとの近さ（2 値の近さより正確なので差し替える）
+        var V0 = c.dots(v)
+        for (i, x) in exact where i < V0.count { V0[i] = x }
         // 絞り込みがあるときは、残った物の中で見る
         let V = allow.map { a in V0.indices.filter { a[$0] }.map { V0[$0] } } ?? V0
         if !V.isEmpty {

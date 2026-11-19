@@ -45,6 +45,7 @@ public final class Store {
         CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
         """)
         try exec(Store.searchLogSchema)
+        migrateFileVectorsToBinary()
     }
 
     deinit { sqlite3_close(db) }
@@ -60,7 +61,7 @@ public final class Store {
         }
     }
 
-    private static let TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+    static let TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
     func prepare(_ sql: String) -> OpaquePointer? {
         var st: OpaquePointer?
@@ -237,27 +238,81 @@ public final class Store {
 
     // MARK: - ファイル・フォルダの点と線
 
-    /// 保存済みのファイル・フォルダの点（パス → (desc_hash, ベクトル)）。ベクトルの無い点は空の配列
-    public func storedFileVectors() -> [String: (hash: String, vec: [Float])] {
+    /// 保存済みのファイル・フォルダの点（パス → (desc_hash, 2 値のベクトル 128 バイト)）。ベクトルの無い点は空の配列
+    public func storedFileCodes() -> [String: (hash: String, code: [UInt8])] {
         lock.lock(); defer { lock.unlock() }
-        var have: [String: (hash: String, vec: [Float])] = [:]
+        var have: [String: (hash: String, code: [UInt8])] = [:]
         if let st = prepare("SELECT key, desc_hash, vector FROM nodes WHERE kind IN ('file','folder')") {
-            while sqlite3_step(st) == SQLITE_ROW { have[text(st, 0)] = (text(st, 1), blob(st, 2)) }
+            while sqlite3_step(st) == SQLITE_ROW {
+                let n = Int(sqlite3_column_bytes(st, 2))
+                var code: [UInt8] = []
+                if n == BinVec.bytes, let p = sqlite3_column_blob(st, 2) {
+                    code = Array(UnsafeBufferPointer(start: p.assumingMemoryBound(to: UInt8.self), count: n))
+                }
+                have[text(st, 0)] = (text(st, 1), code)
+            }
             sqlite3_finalize(st)
         }
         return have
     }
 
-    /// ファイル・フォルダの点を書く（vec が nil なら点だけ作ってベクトルは触らない。線を張るため）。まとめて 1 回の BEGIN〜COMMIT
-    public func saveFileNodes(_ rows: [(entry: FileEntry, description: String, vec: [Float]?, hash: String)]) {
+    /// ファイル・フォルダの点を書く。保存するのはパス・名前・desc_hash（説明文の元・日付・大きさのハッシュ）と 2 値のベクトルだけ。
+    /// 説明文は保存しない（要るときは FileCatalog から作り直す）。code が nil なら点だけ作ってベクトルは触らない（線を張るため）
+    public func saveFileNodes(_ rows: [(entry: FileEntry, code: [UInt8]?, hash: String)]) {
         guard !rows.isEmpty else { return }
         lock.lock(); defer { lock.unlock() }
         try? exec("BEGIN")
+        let withVec = prepare("""
+            INSERT INTO nodes(kind,key,name,description,updated_at,vector,desc_hash) VALUES(?,?,?,'',?,?,?)
+            ON CONFLICT(kind,key) DO UPDATE SET name=excluded.name, description='', vector=excluded.vector,
+            desc_hash=excluded.desc_hash, updated_at=excluded.updated_at
+            """)
         for r in rows {
-            _ = upsertNode(kind: r.entry.isDir ? "folder" : "file", key: r.entry.path, name: r.entry.name,
-                           description: r.description, vector: r.vec, hash: r.hash)
+            if let c = r.code, let st = withVec {
+                sqlite3_reset(st)
+                bind(st, 1, r.entry.isDir ? "folder" : "file"); bind(st, 2, r.entry.path); bind(st, 3, r.entry.name)
+                sqlite3_bind_int64(st, 4, now)
+                _ = c.withUnsafeBytes { sqlite3_bind_blob(st, 5, $0.baseAddress, Int32($0.count), Store.TRANSIENT) }
+                bind(st, 6, r.hash)
+                sqlite3_step(st)
+            } else {
+                _ = upsertNode(kind: r.entry.isDir ? "folder" : "file", key: r.entry.path, name: r.entry.name, description: "", vector: nil, hash: nil)
+            }
         }
+        sqlite3_finalize(withVec)
         try? exec("COMMIT")
+    }
+
+    /// 前の版の DB（ファイル・フォルダに float32 のベクトル 4KB と説明文）を、作り直さずに 2 値（128 バイト）へ変換し、説明文を消す。
+    /// 起動時に一度だけ（meta の file_vectors が bin1 になったら何もしない）。変換したら VACUUM でファイルを詰める。変換した点の数を返す
+    @discardableResult
+    public func migrateFileVectorsToBinary() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        if let st = prepare("SELECT v FROM meta WHERE k='file_vectors'") {
+            defer { sqlite3_finalize(st) }
+            if sqlite3_step(st) == SQLITE_ROW, text(st, 0) == "bin1" { return 0 }
+        }
+        var rows: [(Int64, [Float])] = []
+        if let st = prepare("SELECT id, vector FROM nodes WHERE kind IN ('file','folder') AND length(vector) > \(BinVec.bytes)") {
+            while sqlite3_step(st) == SQLITE_ROW { rows.append((sqlite3_column_int64(st, 0), blob(st, 1))) }
+            sqlite3_finalize(st)
+        }
+        try? exec("BEGIN")
+        if let up = prepare("UPDATE nodes SET vector=? WHERE id=?") {
+            for (id, v) in rows {
+                let c = BinVec.encode(v)
+                sqlite3_reset(up)
+                _ = c.withUnsafeBytes { sqlite3_bind_blob(up, 1, $0.baseAddress, Int32($0.count), Store.TRANSIENT) }
+                sqlite3_bind_int64(up, 2, id)
+                sqlite3_step(up)
+            }
+            sqlite3_finalize(up)
+        }
+        try? exec("UPDATE nodes SET description='' WHERE kind IN ('file','folder')")
+        try? exec("INSERT OR REPLACE INTO meta(k, v) VALUES('file_vectors', 'bin1')")
+        try? exec("COMMIT")
+        if !rows.isEmpty { try? exec("VACUUM") }
+        return rows.count
     }
 
     /// keys の点を消す（一覧から消えたパス）
@@ -325,7 +380,7 @@ public final class Store {
                 let a = appIds[k] ?? upsertNode(kind: "app", key: k, name: name, description: name, vector: nil, hash: nil)
                 appIds[k] = a
                 let f = upsertNode(kind: "file", key: p, name: (p as NSString).lastPathComponent,
-                                   description: (p as NSString).lastPathComponent, vector: nil, hash: nil)
+                                   description: "", vector: nil, hash: nil)
                 guard a >= 0, f >= 0 else { continue }
                 sqlite3_reset(st)
                 sqlite3_bind_int64(st, 1, a); sqlite3_bind_int64(st, 2, f); sqlite3_bind_int64(st, 3, now)
@@ -341,7 +396,7 @@ public final class Store {
         lock.lock(); defer { lock.unlock() }
         try? exec("BEGIN")
         let f = upsertNode(kind: "file", key: path, name: (path as NSString).lastPathComponent,
-                           description: (path as NSString).lastPathComponent, vector: nil, hash: nil)
+                           description: "", vector: nil, hash: nil)
         let a = upsertNode(kind: "app", key: appKey, name: appName, description: appName, vector: nil, hash: nil)
         if f >= 0, a >= 0, let st = prepare("""
             INSERT INTO edges(from_id, to_id, kind, weight, last_used) VALUES(?,?,'opened_with',1,?)

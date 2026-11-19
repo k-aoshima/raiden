@@ -131,3 +131,84 @@ func runBenchEmbed() throws {
     print(String(format: "検索 1 文（後）: 中央値 %.1fms 最大 %.1fms  footprint %.0fMB resident %.0fMB", qb.0, qb.1, physFootprintMB(), residentMB()))
     exit(0)
 }
+
+/// 広い範囲を丸ごと入れてみる（raiden-eval --scope-run --roots ~/Project --file-store <コピー>）。
+/// アプリと同じ FileIndex の道筋（一覧 → 短い説明で全部 → 中身ありで作り直し）で、段ごとの時間・メモリ・DB の大きさ・検索の時間を出す。
+/// 本物の settings.json と raiden.sqlite には触らない（--file-store はコピーを渡す）。ユーザーのファイルは読むだけ
+func runScopeRun(embedder: Embedder) throws {
+    guard let sp = opt("--file-store"), sp != Store.defaultURL.path else { print("--file-store <コピー> を渡してください"); return }
+    let roots = (opt("--roots") ?? "~/Project").split(separator: ",").map { String($0) }
+    let scope = ScanScope(roots: roots)
+    let store = try Store(url: URL(fileURLWithPath: sp))
+    let e = Engine(embedder: CachedEmbedder(embedder), store: store)
+    let idx = FileIndex(engine: e, scope: scope)
+    idx.background = true
+    let meter = PeakMeter(); meter.start()
+    let fp0 = physFootprintMB(), rs0 = residentMB()
+    var t = Date()
+    idx.fullScan()
+    let tList = Date().timeIntervalSince(t)
+    print(String(format: "一覧 %d 件 %.1fs（短い説明で作る %d 件・中身ありで作り直す %d 件）footprint %.0f→%.0fMB resident %.0f→%.0fMB",
+                 e.files.count, tList, idx.shortTotal, idx.fullTotal, fp0, physFootprintMB(), rs0, residentMB()))
+    func searchMs() -> String {
+        let qs = ["請求書のPDF", "先週のスクショ", "README", "Unity のシーン", "設計書"]
+        var ts: [Double] = []
+        for q in qs { let t1 = Date(); _ = e.searchFilesJudged(q, limit: 9); ts.append(Date().timeIntervalSince(t1) * 1000) }
+        return qs.indices.map { String(format: "%@ %.0fms", qs[$0], ts[$0]) }.joined(separator: " / ")
+    }
+    print("  検索（ベクトル化の前）: " + searchMs())
+    t = Date()
+    var last = Date()
+    while idx.shortDone < idx.shortTotal {
+        idx.embedStep(count: 256)
+        if Date().timeIntervalSince(last) > 60 {
+            last = Date()
+            FileHandle.standardError.write("  短い説明 \(idx.shortDone)/\(idx.shortTotal) \(Int(Date().timeIntervalSince(t)))s\n".data(using: .utf8)!)
+        }
+    }
+    let tShort = Date().timeIntervalSince(t)
+    print(String(format: "短い説明 %d 件 %.0fs（%.1fms/件）footprint %.0fMB resident %.0fMB", idx.shortTotal, tShort,
+                 tShort * 1000 / Double(max(idx.shortTotal, 1)), physFootprintMB(), residentMB()))
+    print("  検索（短い説明のあと）: " + searchMs())
+    t = Date()
+    while idx.hasPending {
+        idx.embedStep(count: 256)
+        if Date().timeIntervalSince(last) > 60 {
+            last = Date()
+            FileHandle.standardError.write("  中身あり \(idx.fullDone)/\(idx.fullTotal) \(Int(Date().timeIntervalSince(t)))s\n".data(using: .utf8)!)
+        }
+    }
+    let tFull = Date().timeIntervalSince(t)
+    meter.stop()
+    print(String(format: "中身あり %d 件 %.0fs（%.1fms/件）footprint %.0fMB resident %.0fMB  山 footprint %.0fMB resident %.0fMB", idx.fullTotal, tFull,
+                 tFull * 1000 / Double(max(idx.fullTotal, 1)), physFootprintMB(), residentMB(), meter.footprint, meter.resident))
+    print("  検索（全部のあと）: " + searchMs())
+    // DB の大きさ（WAL を書き戻してから）
+    _ = try? Store(url: URL(fileURLWithPath: sp))
+    let size = (try? FileManager.default.attributesOfItem(atPath: sp)[.size] as? Int) ?? 0
+    let wal = (try? FileManager.default.attributesOfItem(atPath: sp + "-wal")[.size] as? Int) ?? 0
+    print(String(format: "DB %.1fMB（WAL %.1fMB）点 file %d folder %d", Double(size) / 1_048_576, Double(wal) / 1_048_576,
+                 store.count(kind: "file"), store.count(kind: "folder")))
+    print(String(format: "合計 %.0f 分（一覧 %.0fs＋短い説明 %.0fs＋中身あり %.0fs）", (tList + tShort + tFull) / 60, tList, tShort, tFull))
+}
+
+/// 2 値のベクトルの近さの計算だけの速さとメモリ（raiden-eval --bench-binary 1200,270000,1140000）。中身は乱数
+func runBenchBinary() {
+    let ns = (opt("--bench-binary") ?? "1200,270000,1140000").split(separator: ",").compactMap { Int($0) }
+    var q = (0..<1024).map { _ in Float.random(in: -1...1) }
+    q = Vec.normalized(q)
+    for n in ns {
+        let fp0 = physFootprintMB()
+        var codes = [UInt8](repeating: 0, count: n * BinVec.bytes)
+        for i in codes.indices { codes[i] = UInt8.random(in: 0...255) }
+        for mode in [BinVec.Mode.asym, .hamming] {
+            BinVec.mode = mode
+            var ts: [Double] = []
+            for _ in 0..<5 { let t = Date(); _ = BinVec.scores(codes: codes, n: n, query: q); ts.append(Date().timeIntervalSince(t) * 1000) }
+            ts.sort()
+            print(String(format: "  %8d 件 %@: 中央 %.1fms  2 値のベクトル %.1fMB（footprint +%.0fMB）", n, mode.rawValue, ts[2],
+                         Double(codes.count) / 1_048_576, physFootprintMB() - fp0))
+        }
+    }
+    exit(0)
+}

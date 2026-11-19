@@ -91,8 +91,12 @@ if let i = args.firstIndex(of: "--compile"), i + 2 < args.count {
 // --test-filters / --dump-entries: 入力欄の絞り込みコマンドの確かめ（モデル不要。FilterEval.swift）
 if args.contains("--test-filters") { runFilterTests() }
 if let p = opt("--dump-entries") { try dumpEntries(p); exit(0) }
+// --bin-mode asym|hamming|twoStage [--bin-n 100]: ファイル・フォルダの 2 値のベクトルの並べ方（BinVec.mode）を変える
+if let m = opt("--bin-mode").flatMap(BinVec.Mode.init(rawValue:)) { BinVec.mode = m }
+if let n = opt("--bin-n").flatMap(Int.init) { BinVec.twoStageN = n }
 // --bench-embed: ベクトル化の速さとメモリ（1 件ずつとまとめて。BenchEmbed.swift）
 if args.contains("--bench-embed") { try runBenchEmbed() }
+if args.contains("--bench-binary") { runBenchBinary() }
 
 let fpStart = physFootprintMB()
 // --no-extra: 標準アプリ以外の説明の材料（AppExtra）を使わない（前の作りと比べる用）
@@ -162,6 +166,12 @@ print("モデル \(embedder.identifier)  読み込み \(String(format: "%.2f", D
 // --watch-test --store <path>: FSEvents で変化が検索にすぐ出るかを確かめる（WatchTest.swift）
 if args.contains("--watch-test") {
     try runWatchTest(embedder: embedder)
+    exit(0)
+}
+
+// --scope-run --roots ~/Project --file-store <コピー>: 広い範囲を丸ごと入れてみる（BenchEmbed.swift）
+if args.contains("--scope-run") {
+    try runScopeRun(embedder: embedder)
     exit(0)
 }
 

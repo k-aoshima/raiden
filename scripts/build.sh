@@ -7,7 +7,7 @@
 #   scripts/build.sh --install  ~/Applications/Raiden.app に入れて起動し直す
 #
 # モデル: RAIDEN_MODEL_DIR（既定 /Volumes/SSD/raiden-models）の中から
-#   vocab.bin, embed_int8.bin, embed_scale.bin, meta.json, body_${RAIDEN_BODY:-int4}.mlpackage を同梱する。
+#   vocab.bin, embed_int8.bin, embed_scale.bin, meta.json, center.bin（2 値のベクトルの中心）, body_${RAIDEN_BODY:-int4}.mlpackage を同梱する。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 MODEL_DIR="${RAIDEN_MODEL_DIR:-/Volumes/SSD/raiden-models}"
@@ -30,7 +30,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/model"
 cp build/Raiden "$APP/Contents/MacOS/Raiden"
 cp app/Resources/Info.plist "$APP/Contents/Info.plist"
-for f in vocab.bin embed_int8.bin embed_scale.bin meta.json; do cp "$MODEL_DIR/$f" "$APP/Contents/Resources/model/"; done
+for f in vocab.bin embed_int8.bin embed_scale.bin meta.json center.bin; do cp "$MODEL_DIR/$f" "$APP/Contents/Resources/model/"; done
 # 本体はコンパイル済み（.mlmodelc）で入れる。コンパイルは raiden-eval --compile（MLModel.compileModel）で行う
 ./build/raiden-eval --compile "$MODEL_DIR/body_$BODY.mlpackage" "$APP/Contents/Resources/model/body.mlmodelc"
 codesign --force --deep --sign - --identifier com.kosuke.raiden "$APP"

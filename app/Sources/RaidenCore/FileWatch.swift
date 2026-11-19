@@ -208,7 +208,8 @@ public final class FileIndex {
         shortTotal = shortQueue.count; shortDone = 0
         fullTotal = fullQueue.count; fullDone = 0
         if !background || shortQueue.count + fullQueue.count <= Self.inlineLimit {
-            st.embedded = embedAll(progress: progress)
+            embedAll(progress: progress)
+            st.embedded = Set(p.short).union(p.full).count   // 短い説明と中身ありの 2 回作った物も 1 件と数える
         } else {
             st.embedded = 0
             if shortTotal > 0 { progress?(0, shortTotal) }
@@ -285,7 +286,7 @@ public final class FileIndex {
 
 /// 短い文（入力文・例）のベクトルを覚えておく Embedder。一覧を作り直すたびに例を入れ直すので、そのたびに作り直さないため。
 /// 長い文（ファイルの説明文）は覚えない。
-public final class CachedEmbedder: Embedder {
+public final class CachedEmbedder: UrgentEmbedder {
     public let base: Embedder
     private let lock = NSLock()
     private var cache: [String: [Float]] = [:]
@@ -299,6 +300,9 @@ public final class CachedEmbedder: Embedder {
 
     /// 長い文（ファイルの説明文）用。覚えずにそのまま渡す
     public func embedBatch(_ texts: [String], batch: Int) -> [[Float]] { base.embedBatch(texts, batch: batch) }
+    public func embedUrgent(_ texts: [String], batch: Int) -> [[Float]] {
+        (base as? UrgentEmbedder)?.embedUrgent(texts, batch: batch) ?? base.embedBatch(texts, batch: batch)
+    }
 
     public func embed(_ text: String) -> [Float] {
         guard text.count <= maxLength else { return base.embed(text) }
