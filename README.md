@@ -16,7 +16,7 @@ scripts/build.sh            # build/Raiden.app と build/raiden-eval を作る
 scripts/build.sh --install  # ~/Applications/Raiden.app に入れて起動
 ```
 
-モデル一式は `RAIDEN_MODEL_DIR`（既定 `/Volumes/SSD/raiden-models`）から同梱する。本体の量子化は `RAIDEN_BODY`（既定 `int4`）。
+モデル一式は `RAIDEN_MODEL_DIR`（既定 `/Volumes/SSD/raiden-models-ane`）から同梱する。本体は `RAIDEN_BODY`（既定 `ane_pal6`。ANE で動かす版、下の「ANE で動かす」）。前の CPU 版に戻すときは `RAIDEN_MODEL_DIR=/Volumes/SSD/raiden-models RAIDEN_BODY=int4`。
 
 ### モデルを作り直すとき（開発用、Python）
 
@@ -24,6 +24,8 @@ scripts/build.sh --install  # ~/Applications/Raiden.app に入れて起動
 cd tools/convert
 HF_HOME=/Volumes/SSD/hf uv run python convert.py --out /Volumes/SSD/raiden-models     # 本体 fp16/int8/pal4/int4 と埋め込み表（--batches 1,8,16,32,64）
 HF_HOME=/Volumes/SSD/hf uv run python export_tokenizer.py --out /Volumes/SSD/raiden-models  # vocab.bin
+HF_HOME=/Volumes/SSD/hf uv run python convert_ane.py --out /Volumes/SSD/raiden-models-ane --quant pal6   # ANE 版の本体と meta.json（埋め込み表・vocab.bin は上の物をリンクする）
+uv run python ane_plan.py /Volumes/SSD/raiden-models-ane/body_ane_pal6.mlpackage                       # どの演算が ANE に載るか（既定の関数だけ。全部の関数は raiden-eval --plan）
 ```
 
 ## しくみ
@@ -35,7 +37,7 @@ HF_HOME=/Volumes/SSD/hf uv run python export_tokenizer.py --out /Volumes/SSD/rai
 | 部分 | 置き方 |
 |---|---|
 | 単語の埋め込み表（25 万語 × 1024） | Core ML に入れず int8＋行ごとの尺度で `embed_int8.bin`（256MB）。**mmap して使う行だけ読む**ので、メモリ（footprint）にほぼ乗らない |
-| 本体（位置埋め込み〜24 層〜CLS、正規化まで） | Core ML（`body.mlmodelc`）。重みを int4（32 個ずつのブロック量子化）にして 168MB。CPU で動かす。入力の形は（件数, 長さ）で、件数は 1/8/16/32/64、長さは 16/32/64/128 トークンの組（件数 1 は入力 1 文、8 はファイルの説明文をまとめて作る用。下の「ベクトル化の速さ」） |
+| 本体（位置埋め込み〜24 層〜CLS、正規化まで） | Core ML（`body.mlmodelc`）。ANE 版（既定）は重みを 6bit のパレット化にして 223MB、形を固定した 8 つの関数（件数 1/8 × 長さ 16/32/64/128 トークン）を 1 つのモデルにまとめ、ANE で動かす（下の「ANE で動かす」）。前の CPU 版は int4（32 個ずつのブロック量子化）168MB で、入力の形は件数 1/8/16/32/64 × 長さ 16/32/64/128 の組（EnumeratedShapes）。件数 1 は入力 1 文、8 はファイルの説明文をまとめて作る用（下の「ベクトル化の速さ」） |
 | トークナイザ（XLM-RoBERTa の SentencePiece Unigram） | `Tokenizer.swift` に自前で実装。語彙は `vocab.bin` を mmap して二分探索 |
 
 トークナイザは swift-transformers 1.4.0（`Tokenizers`、XLMRobertaTokenizer → Unigram に対応）を使うつもりだったが、SwiftPM が使えずその依存（swift-jinja / swift-huggingface / swift-crypto / yyjson）を取り込めないため、必要な分だけ書いた。HF の tokenizer と 343 文（全アプリの説明文と答え合わせの文）で完全一致を確かめてある（`raiden-eval --dump-texts` → `export_tokenizer.py --check` → `raiden-eval --check-tokens`）。
@@ -103,7 +105,7 @@ Engine の `searchFiles` で探す。
 | 64 件ずつ | 13.5ms | 2.2 分 | 192MB / 839MB | 3.4 秒 |
 
 - まとめた結果は 1 件ずつと cos の差 0.00001 未満。入力 1 文の埋め込みは 17ms のまま。
-- ANE（`.cpuAndNeuralEngine`）は件数の次元を持つモデルで BNNS の中で落ちる（int4・fp16 とも）。1 件ずつでは CPU と同じ速さで、ANE は使われていない。GPU（`.cpuAndGPU`）は resident が 10GB を超え、`.all` は footprint 9.8GB・1 件 1.2 秒で、どちらも採らない。
+- 上の表は前の CPU 版。この形（EnumeratedShapes）のモデルは `.cpuAndNeuralEngine` でも ANE に 1 つも載らない（MLComputePlan で 1287 演算すべて CPU）。形を固定し直した ANE 版は下の「ANE で動かす」。GPU（`.cpuAndGPU`）は resident が 10GB を超え、`.all` は footprint 9.8GB・1 件 1.2 秒で、どちらも採らない。
 - 件数の次元なしの前のモデルに MLArrayBatchProvider で渡しても 12.5ms/件（同じくらい速い）だが、モデルに次元を持たせた方が 1 回の予測で済むので、こちらにした。
 - 検索の待ち: ベクトル化は入力 1 文の埋め込みが待っていれば次の組を後にする。アプリでは入力欄を開いている間はベクトル化を止める。
 - 最大トークン長: 64 にすると 989 件が 13.0 秒（128 は 17.6 秒）になるが、ファイルの 1 位が 138 → 132 に落ちるので 128 のまま。
@@ -118,6 +120,56 @@ Engine の `searchFiles` で探す。
 | 中身ありまで（2 段目まで） | 17.6 秒 | 138 / 156 / 164 | 142 / 167 / 173 |
 
 広い範囲: `~/Project` は前の除外で 191,600 件、新しい除外で 167,537 件（一覧づくり 170 秒）。残りの多くは docx-studio/out（11 万件の PNG・PDF）と Unity の Library など。8 件ずつで約 34 分（前は約 93 分）の見込み。
+
+### ANE で動かす（2026-11-20、tools/convert/convert_ane.py）
+
+本体を Apple Neural Engine で動かす版を既定にした。入力 1 文が 17ms → 2ms、ファイルの説明文は 8 件ずつで 1 件 12ms → 1.6ms、989 件のベクトル化は 3 秒ほど。
+
+作り方（`convert_ane.py`。Apple の「Deploying Transformers on the Apple Neural Engine」/ ml-ane-transformers の書き方）:
+
+- nn.Linear を 1x1 の Conv2d に、テンソルを (B, C, 1, S) に、注意は頭ごとに einsum と softmax（split_softmax）。LayerNorm はチャンネル方向に自前で書き、残差の値が fp16 で 2 乗すると溢れる（中ほどの層で 1000 近く）ので 1/64 に縮めてから分散を取る。PyTorch（fp32）で書き直した模型と元の模型の cos は 1.0000。
+- **形を固定する**のが効いた。件数 B と長さ S の組ごとに関数を作り、`ct.utils.save_multifunction` で 1 つの .mlpackage にまとめる（重みは関数の間で共有されるので、大きさは 1 関数分）。可変の形（EnumeratedShapes）のままだと、形を計算する演算（shape・gather・concat）と int32 のマスクの型変換が CPU にしか載らず、全体が CPU になる。
+- マスクは fp16 で受ける（int32 だと型変換が CPU に残り、頭の数演算が CPU に引きずられる）。
+- 関数名は `b{B}_s{S}`。meta.json の `functions` と `"units": "ane"` を見て、BGEEmbedder が関数ごとに MLModel を読む（`MLModelConfiguration.functionName`）。
+
+MLComputePlan（`raiden-eval --plan <body.mlmodelc>`）で数えた ANE に載った演算は、どの関数も 2327 中 2326〜2327（残るのは入力の転置 1 つ）。前の CPU 版は 1287 中 0。
+同じ固定の形なら、Conv2d に書き直さない元の模型（nn.Linear のまま）でも 99.5% 載り、速さも同じだった（件数 1・長さ 32 で 4.40ms / 4.38ms、件数 8 で 1.39 / 1.43ms/件）。この Mac（M6、macOS 27）では、効いたのは形の固定で、Conv2d 化ではない。
+
+| 本体（手元 256 件） | ファイル | ANE に載った演算 | 入力 1 文 | 1 件ずつ | 8 件ずつ | footprint / resident | CPU fp16 との cos 差（平均 / 最大） | PyTorch との cos 差（平均 / 最大） |
+|---|---|---|---|---|---|---|---|---|
+| CPU int4（前） | 168MB | 0% | 17.7ms | 28.4ms | 12.0ms | 45 / 668MB | 0.052 / 0.067 | 0.039 / 0.053 |
+| ANE fp16（件数 1/8/16） | 587MB | 100% | 4.3ms | 6.5ms | 2.6ms（16 件 2.4ms） | 285 / 298MB | 0.00007 / 0.0004 | 0.00001 / 0.00002 |
+| ANE int8（線形・チャンネルごと） | 296MB | 100% | 2.5ms | 3.1ms | 1.6ms | 83 / 332MB | 0.0008 / 0.0017 | 0.0006 / 0.0011 |
+| ANE pal8（8bit パレット） | 295MB | 100% | 2.6ms | 3.2ms | 1.7ms | 95 / 346MB | 0.0005 / 0.0018 | 0.0003 / 0.0005 |
+| **ANE pal6（採用）** | **223MB** | **100%** | **2.3ms** | **2.9ms** | **1.6ms** | **83 / 334MB** | **0.007 / 0.012** | **0.005 / 0.007** |
+
+- footprint はアクティビティモニタの「メモリ」。CPU 版は重みを mmap するので footprint は小さく resident が大きい。ANE 版は resident が半分になるが、モデルを読んだ直後の footprint は 18MB → 65MB ほどに増える。fp16 だけ footprint が大きい（285MB）。
+- CPU fp16 との差は手元 256 件の説明文で、PyTorch（sentence-transformers と同じ fp32 の模型）との差は 8 文（件数 8・長さ 64 の関数）で測った。
+- 前に採らなかった 4bit パレット化の代わりに 6bit・8bit を試した。int4（ブロックごと）の ANE 版は作っていない（Mac では GPU 向けの形式）。
+
+答え合わせ（2026-11-20、アプリ 133 個・ファイル 989 件、`--files --section final --now 2026-11-19`、空の SQLite から）:
+
+| 本体 | アプリ 例なし・辞書なし | 辞書あり | 例あり | 名前の一部 | 自作 例なし / 例あり | ファイル 例0（1位/3位/5位） | 例全部 | 989 件のベクトル化 |
+|---|---|---|---|---|---|---|---|---|
+| CPU int4（前） | 11 / 19 | 15 / 23 | 20 / 23 | 5 / 5 | 9 / 6 | 138 / 156 / 164 | 142 / 167 / 173 | 40.4s（裏で別の重い処理あり。単独では 17.6s） |
+| ANE fp16 | 11 / 20 | 17 / 23 | 19 / 23 | 5 / 5 | 8 / 5 | 134 / 157 / 164 | 141 / 168 / 172 | 3.4s |
+| ANE int8 | 11 / 20 | 16 / 22 | 19 / 23 | 5 / 5 | 8 / 5 | 134 / 158 / 164 | 142 / 168 / 172 | 4.1s |
+| ANE pal8 | 11 / 20 | 17 / 23 | 19 / 23 | 5 / 5 | 8 / 5 | 133 / 156 / 165 | 142 / 168 / 172 | 2.8s |
+| **ANE pal6（採用）** | 11 / 18 | 16 / 22 | **20 / 23** | 5 / 5 | 7 / 4 | **136 / 155 / 163** | **142 / 167 / 171** | **2.7s** |
+
+- 元の模型に近い fp16・int8・pal8 の方が、ファイルの 1 位は 4〜5 問少ない。前の int4 は元の模型から cos で 0.05 ずれていて、そのずれが答え合わせではたまたま有利に出ている（int4 は答え合わせの数字で選んだ）。pal6 は 1 位・3 位以内で前と 1〜2 問の差、アプリの例ありは同じ 20 なので、これを採った。
+- 保存済みのベクトルは作り直す。BGEEmbedder の名前（desc_hash に入る）に `:ane-<model.mil のハッシュ>` を付けたので、ANE 版に替えると説明文のベクトルを 1 回作り直す。
+
+読み込み（BGEEmbedder）:
+
+- ANE 向けのコンパイルは、そのモデルを初めて読んだときだけ 1 関数 17 秒〜3 分かかる（件数 8・長さ 128 が最長。8 関数で 5 分ほど、ANECompilerService が CPU を使う）。OS がキャッシュするので、2 回目からは 1 関数 0.3〜0.5 秒。
+- キャッシュは .mlmodelc の場所とファイルごと（同じ中身を別の場所にコピー・移動しても、同じ場所に置き直しても、コンパイルからやり直し）。アプリの中のモデルは入れ替えのたびに新しいファイルになるので、`~/Library/Application Support/Raiden/compiled/ane-<ハッシュ>-<大きさ>.mlmodelc` に 1 度だけハードリンクして、そこから読む（`BGEEmbedder.stableCopy`。中身が同じなら入れ替えてもキャッシュが効く）。
+- 待たせないよう、ANE の関数は裏で 1 つずつ読む（件数 1・長さ 128 → 件数 1 の残り → 件数 8 の順）。読み終わる前の入力 1 文は、長さ 128 の関数に詰めて通す（ANE で読めていれば ANE、まだなら CPU で 1 つだけ読む。CPU では 1 回 24ms）。まとめての組は、件数 8 の関数が全部 ANE に載るまで 1 件ずつに回す。CPU で読む関数を 1 つに絞るのは、CPU で読むと関数ごとに resident が約 500MB 増え、`~/Library/Caches/<アプリ>` にも約 500MB のキャッシュができるため（初回の読み込み中は resident が 1.2GB ほどになる）。ANE で読めなければ CPU で続ける。読み終えたら raiden.log に「ANE の読み込み 8/8 関数 …s」。
+- 初回の読み込み中（`raiden-eval --no-wait-ane`）でも、答え合わせの数字は読み終えた後と同じだった（アプリ例あり 20 / 23）。
+- キャッシュは OS（aned）が持ち、大きさは見えない。5 つのモデルを続けてコンパイルした後、先にコンパイルしたモデルがもう一度コンパイルされたことが 1 回あった。アプリのモデルが 1 つなら起きにくいはずだが、確かめてはいない。
+- 可変の形（EnumeratedShapes で 8 つの形を 1 つのモデルに）にして位置埋め込みを入力に足す形も試した。MLComputePlan では 100% ANE に載るが、読み込みが毎回 7〜8 分かかり（キャッシュが効かない）、採らなかった。
+- 件数 16 の関数は 8 件ずつと 1 件あたりの差が小さく（2.6 → 2.4ms）、コンパイルが長い（長さ 128 で 6 分）ので入れていない。
+- 消費電力は測っていない（powermetrics は sudo が必要）。
 
 ### 入力欄の見た目（app/Sources/Raiden/SearchPanel.swift）
 

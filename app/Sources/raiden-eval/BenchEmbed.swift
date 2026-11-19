@@ -1,6 +1,7 @@
 // ベクトル化の速さとメモリを測る（ファイルの説明文をまとめてベクトル化するときの比べ）。
 //
-//   raiden-eval --bench-embed [--model-dir <dir>] [--body body.mlmodelc] [--units cpu|ane|gpu|all]
+//   raiden-eval --bench-embed [--model-dir <dir>] [--body body.mlmodelc] [--units cpu|ane|gpu|all（無ければ meta.json の units）]
+//               [--vs-model-dir <dir> --vs-body <body> --vs-units cpu]
 //               [--roots ~/Project,~/Documents] [--n 384] [--batches 1,8,16,32,64] [--provider] [--short]
 //
 // 範囲の中の物から n 件を等間隔に選び、アプリと同じ説明文（名前・場所・種類＋中身の頭）を作って、
@@ -67,12 +68,18 @@ func runBenchEmbed() throws {
     print("説明文 \(texts.count) 件（\(short ? "短い説明だけ" : "中身あり")、作る \(String(format: "%.1f", Date().timeIntervalSince(t)))s）")
 
     let dir = URL(fileURLWithPath: opt("--model-dir") ?? "/Volumes/SSD/raiden-models")
-    let unitName = opt("--units") ?? "cpu"
-    let units: MLComputeUnits = ["cpu": .cpuOnly, "gpu": .cpuAndGPU, "all": .all, "ane": .cpuAndNeuralEngine][unitName] ?? .cpuOnly
+    let unitName = opt("--units") ?? "auto"
+    let units: MLComputeUnits? = ["cpu": .cpuOnly, "gpu": .cpuAndGPU, "all": .all, "ane": .cpuAndNeuralEngine][unitName]
     let fp0 = physFootprintMB(), rs0 = residentMB()
     let b = try BGEEmbedder(modelDir: dir, body: opt("--body") ?? "body.mlmodelc", computeUnits: units)
     t = Date()
     try b.load()
+    if b.aneProgress.total > 0 {
+        // ANE は裏で読む。測るのは全部の関数が ANE に載ってから
+        let tw = Date()
+        let ok = b.waitForANE()
+        print(String(format: "ANE の読み込み %@ %.1fs（%d/%d 関数）", ok ? "済み" : "失敗", Date().timeIntervalSince(tw), b.aneProgress.loaded, b.aneProgress.total))
+    }
     let toks = texts.map { b.tokenize($0).count }
     print(String(format: "モデル %@ %@ 件数の次元 %@  読み込み %.2fs  footprint %.0f→%.0fMB resident %.0f→%.0fMB  トークン数 平均 %.0f 最大 %d（%d 以上 %d 件）",
                  dir.lastPathComponent, unitName, b.batchSizes.description, Date().timeIntervalSince(t), fp0, physFootprintMB(), rs0, residentMB(),
@@ -97,6 +104,17 @@ func runBenchEmbed() throws {
     let single = Date().timeIntervalSince(t) * 1000 / Double(texts.count)
     meter.stop()
     print(String(format: "  B=1（1 件ずつ）: %.1fms/件  1 万件 %.1f 分  山 footprint %.0fMB resident %.0fMB", single, single * 10000 / 60000, meter.footprint, meter.resident))
+
+    // --vs-model-dir <dir> [--vs-body <body>] [--vs-units cpu]: 別のモデル（今の CPU 版など）と 1 件ずつの結果の cos を比べる
+    if let vd = opt("--vs-model-dir") {
+        let vb = try BGEEmbedder(modelDir: URL(fileURLWithPath: vd), body: opt("--vs-body") ?? "body.mlmodelc",
+                                 computeUnits: ["cpu": .cpuOnly, "ane": .cpuAndNeuralEngine][opt("--vs-units") ?? "cpu"])
+        let other = texts.map { vb.embed($0) }
+        let d = zip(ref, other).map { Double(1 - Vec.dot($0, $1)) }
+        print(String(format: "  別のモデル（%@ %@）との cos 差: 平均 %.5f 最大 %.5f", vd, opt("--vs-body") ?? "body.mlmodelc",
+                     d.reduce(0, +) / Double(max(d.count, 1)), d.max() ?? 0))
+        vb.unload()
+    }
 
     let batches = (opt("--batches") ?? "8,16,32,64").split(separator: ",").compactMap { Int($0) }
     b.useBatchProvider = args.contains("--provider")

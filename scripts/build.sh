@@ -6,12 +6,14 @@
 #   scripts/build.sh            ビルドだけ（build/Raiden.app, build/raiden-eval）
 #   scripts/build.sh --install  ~/Applications/Raiden.app に入れて起動し直す
 #
-# モデル: RAIDEN_MODEL_DIR（既定 /Volumes/SSD/raiden-models）の中から
-#   vocab.bin, embed_int8.bin, embed_scale.bin, meta.json, body_${RAIDEN_BODY:-int4}.mlpackage を同梱する。
+# モデル: RAIDEN_MODEL_DIR（既定 /Volumes/SSD/raiden-models-ane）の中から
+#   vocab.bin, embed_int8.bin, embed_scale.bin, meta.json, body_${RAIDEN_BODY:-ane_pal6}.mlpackage を同梱する。
+#   既定は ANE 版（tools/convert/convert_ane.py）。前の CPU 版に戻すときは
+#   RAIDEN_MODEL_DIR=/Volumes/SSD/raiden-models RAIDEN_BODY=int4 scripts/build.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
-MODEL_DIR="${RAIDEN_MODEL_DIR:-/Volumes/SSD/raiden-models}"
-BODY="${RAIDEN_BODY:-int4}"
+MODEL_DIR="${RAIDEN_MODEL_DIR:-/Volumes/SSD/raiden-models-ane}"
+BODY="${RAIDEN_BODY:-ane_pal6}"
 OV="-vfsoverlay scripts/clt-overlay.yaml -Xcc -ivfsoverlay -Xcc scripts/clt-overlay.yaml"
 TARGET="-target arm64-apple-macosx15.0"
 

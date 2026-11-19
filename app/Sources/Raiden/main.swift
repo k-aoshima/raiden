@@ -136,7 +136,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let t0 = Date()
         do {
             let dir = Bundle.main.resourceURL!.appendingPathComponent("model")
-            let b = try BGEEmbedder(modelDir: dir, body: "body.mlmodelc", computeUnits: .cpuOnly)
+            // 使う装置はモデルの meta.json に従う（ANE 版は ANE、前の版は CPU）
+            let b = try BGEEmbedder(modelDir: dir, body: "body.mlmodelc")
             try b.load()
             let store = try Store()
             // 入力文と例のベクトルは覚えておく（ファイル一覧を作り直すたびに例を入れ直すため）
