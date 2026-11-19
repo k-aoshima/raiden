@@ -14,6 +14,10 @@ public struct QueryIntent: Sendable {
     public var hasRelation: Bool { !anchor.isEmpty }
     /// true: 「A の中の B」（contains をたどる）、false: 「A と同じ日の B」（co_used / co_time をたどる）
     public var inside = false
+    /// 一番後ろに出てきた種類の言葉の families（「〜フォルダの画像」なら image。答えの種類はふつう後ろに来る）
+    public var head: String?
+    /// 探しているのがフォルダか（一番後ろの種類の言葉がフォルダの言葉）
+    public var wantsFolder: Bool { head == "folder" }
 
     public var isEmpty: Bool { families.isEmpty && range == nil && !download }
 
@@ -62,11 +66,14 @@ public struct QueryIntent: Sendable {
                 break
             }
         }
-        for (w, f) in typeWords where typeScope.contains(w) {
+        var headPos: String.Index? = nil
+        for (w, f) in typeWords {
+            guard let r = typeScope.range(of: w, options: .backwards) else { continue }
             it.families.insert(f)
             rest = rest.replacingOccurrences(of: w, with: " ")
+            if headPos == nil || r.upperBound > headPos! { headPos = r.upperBound; it.head = f }
         }
-        if it.families.contains("screenshot") { it.families.remove("image") }
+        if it.families.contains("screenshot") { it.families.remove("image"); if it.head == "image" { it.head = "screenshot" } }
         for w in downloadWords where q.contains(w) { it.download = true; rest = rest.replacingOccurrences(of: w, with: " ") }
 
         let cal = Calendar.current

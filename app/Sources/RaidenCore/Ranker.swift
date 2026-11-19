@@ -26,6 +26,13 @@ public struct Mix: Sendable, CustomStringConvertible {
     public var timeBonus: Float = 0.3
     public var timeFilter = true     // 時間の言葉があれば範囲外を下げる（-1）
     public var folderBonus: Float = 0.15  // 「〜のとこ」「フォルダ」などでフォルダを上げる
+    // フォルダの扱い（入力の一番後ろの種類の言葉がフォルダの言葉のとき = QueryIntent.wantsFolder）
+    public var folderHeadOnly = true       // フォルダ加点・下記の加点は wantsFolder のときだけ（「〜フォルダの画像」では上げない）
+    public var emptyFolderBonus = false    // false: 下にファイルが 1 個も無いフォルダには加点しない
+    public var folderTypeBonus: Float = 0.2  // 「PDFが入ってるとこ」: 下のファイルのうち種類が合う割合 × これ（スクショは画像でも当たり）
+    public var folderCrowd: Float = 0.01   // 子が crowdMin 件以上、近さの上位 crowdTop にいれば、1 件ごとにこれを親に足す
+    public var crowdTop = 20, crowdMin = 2
+    public var folderTimeByChildren = true // 時間の言葉は、フォルダなら中の物の日付でも当たりにする
     // つながりの言い方（QueryIntent.anchor/target）があるとき: anchor のベクトルで入口を選び、線をたどった点数 ＋ target との近さで並べる
     public var relation = false
     public var relAlpha: Float = 1.0
@@ -81,6 +88,10 @@ public struct Corpus {
     var grams: [Set<String>] = []
     public var meta: [Meta?] = []
     public var adj: [[Edge]] = []
+    /// 下（何段でも）にあるファイルの数。フォルダでない点は 0
+    public private(set) var filesBelow: [Int] = []
+    /// フォルダの下（何段でも）のファイルの種類ごとの数
+    public private(set) var familiesBelow: [Int: [String: Int]] = [:]
     // 例（入力文 → 選んだ点）
     public private(set) var exText: [String] = []
     public private(set) var exVecs: [[Float]] = []
@@ -99,6 +110,7 @@ public struct Corpus {
         grams = names.map { Lexical.bigrams($0.joined(separator: " ")) }
         self.meta = meta ?? Array(repeating: nil, count: vecs.count)
         adj = Array(repeating: [], count: vecs.count)
+        filesBelow = Array(repeating: 0, count: vecs.count)
     }
 
     public mutating func addEdges(contains: [(Int, Int)], coUsed: [(Int, Int, Float)], coTime: [(Int, Int, Float)] = []) {
@@ -109,6 +121,22 @@ public struct Corpus {
         for (a, b) in contains {
             adj[a].append(Edge(to: Int32(b), w: 1, kind: 0))
             adj[b].append(Edge(to: Int32(a), w: 1, kind: 1))
+        }
+        // フォルダの下（何段でも）のファイルの数と種類の内訳
+        var kids = [[Int]](repeating: [], count: count)
+        for (a, b) in contains { kids[a].append(b) }
+        func isFolder(_ i: Int) -> Bool { meta[i]?.families.contains("folder") ?? false }
+        func walk(_ i: Int, _ depth: Int, _ n: inout Int, _ fam: inout [String: Int]) {
+            guard depth < 64 else { return }
+            for k in kids[i] {
+                if isFolder(k) { walk(k, depth + 1, &n, &fam) } else { n += 1; for f in meta[k]?.families ?? [] { fam[f, default: 0] += 1 } }
+            }
+        }
+        for i in 0..<count where isFolder(i) && !kids[i].isEmpty {
+            var n = 0, fam: [String: Int] = [:]
+            walk(i, 0, &n, &fam)
+            filesBelow[i] = n
+            if n > 0 { familiesBelow[i] = fam }
         }
         // co_used の重みはその点の最大の回数で割って 0〜1 にする
         var mx = [Float](repeating: 0, count: count)
@@ -225,18 +253,43 @@ public enum Ranker {
         // 時間・種類
         var adjust = [Float](repeating: 0, count: n)
         if m.intents, let it = intent, !it.isEmpty {
+            let folderOK = !m.folderHeadOnly || it.wantsFolder
             for i in 0..<n {
                 guard let md = c.meta[i] else { continue }
+                let isFolder = md.families.contains("folder")
                 if !it.families.isEmpty {
                     if !it.families.isDisjoint(with: md.families) {
-                        adjust[i] += md.families.contains("folder") ? m.folderBonus : m.typeBonus
+                        if !isFolder { adjust[i] += m.typeBonus }
+                        else if folderOK && (m.emptyFolderBonus || c.filesBelow[i] > 0) { adjust[i] += m.folderBonus }
+                    }
+                }
+                // フォルダの中身の種類（「PDFが入ってるとこ」「スクショを分けてるフォルダ」）
+                if isFolder && m.folderTypeBonus > 0 && folderOK, let fb = c.familiesBelow[i] {
+                    var want = it.families.subtracting(["folder"])
+                    if want.contains("screenshot") { want.insert("image") }  // スクショは名前で見分けているだけなので
+                    if let hit = want.map({ fb[$0] ?? 0 }).max(), hit > 0 {
+                        adjust[i] += m.folderTypeBonus * Float(hit) / Float(c.filesBelow[i])
                     }
                 }
                 if it.download && !md.downloaded { adjust[i] -= m.timeFilter ? 1 : 0 }
                 if let r = it.range {
-                    let hit = it.download ? r.contains(md.added) : md.times.contains { r.contains($0) }
+                    var hit = it.download ? r.contains(md.added) : md.times.contains { r.contains($0) }
+                    if !hit && isFolder && m.folderTimeByChildren {
+                        hit = c.adj[i].contains { e in
+                            guard e.kind == 0, let cm = c.meta[Int(e.to)] else { return false }
+                            return it.download ? r.contains(cm.added) : cm.times.contains { r.contains($0) }
+                        }
+                    }
                     if hit { adjust[i] += m.timeBonus } else if m.timeFilter { adjust[i] -= 1 }
                 }
+            }
+        }
+        // 子が何件もそろって上位にいるフォルダを上げる（フォルダを探す言い方のときだけ）
+        if m.v && m.folderCrowd > 0, let it = intent, it.wantsFolder || (!m.folderHeadOnly && it.families.contains("folder")) {
+            let inTop = Set(topIndices(V, m.crowdTop))
+            for i in 0..<n where c.meta[i]?.families.contains("folder") == true {
+                let k = c.adj[i].filter { $0.kind == 0 && inTop.contains(Int($0.to)) }.count
+                if k >= m.crowdMin { adjust[i] += m.folderCrowd * Float(k) }
             }
         }
         // 足し合わせ
