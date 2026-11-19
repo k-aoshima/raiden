@@ -190,24 +190,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 点数はアプリとファイルで付け方が違う（アプリは k近傍法の重み 1.0、ファイルは時間・種類・フォルダの加点）ので混ぜない。
     /// ふだんはアプリの節が先。時間・種類・つながりの言葉（「先週のPDF」「〜のとこ」）があればファイルの節を先にする。
     /// 先の節は最大 4 件、残りを後の節に回す（後の節が少なければ先の節に戻す）。
-    /// 返り値の notFound は「見つからない」（パネルは「見つかりません」を出し、候補を薄く下に並べる）。
-    /// 判定は Engine の点数しきい値の担当が足す印を使う予定。まだ無いので、いまは常に false。
+    /// 「見つからない」は Engine の印（searchJudged / searchFilesJudged）を節ごとに見る。
+    /// 印の立った節は候補を薄くし、見出しに「見つかりません」を添える。
+    /// 片方の節だけ印が立ったら、当たった節を先にする（「先週のPDF」でアプリが見つからないのは普通なので、全体は「見つかりません」にしない）。
+    /// 出している節が全部見つからないときだけ、返り値の notFound を true にする（パネルは上に「見つかりません」を大きく出す）。
     static func sections(_ q: String, engine e: Engine, withFiles: Bool) -> ([ResultSection], Bool) {
         let total = SearchPanelController.maxRows
-        let apps = e.search(q, limit: total).map { RowItem(.app($0)) }
-        let appSec = ResultSection(title: "アプリ", symbol: "app.badge", items: apps)
-        let notFound = false
-        guard withFiles else { return ([appSec], notFound) }
-        let files = e.searchFiles(q, limit: total).map { RowItem(.file($0)) }
+        let aj = e.searchJudged(q, limit: total)
+        var appSec = ResultSection(title: "アプリ", symbol: "app.badge", items: aj.results.map { RowItem(.app($0)) })
+        appSec.faded = aj.noMatch
+        guard withFiles else { return ([appSec], aj.noMatch && !appSec.items.isEmpty) }
+        let fj = e.searchFilesJudged(q, limit: total)
+        var fileSec = ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: fj.results.map { RowItem(.file($0)) })
+        fileSec.faded = fj.noMatch
         let it = QueryIntent.parse(q)
-        let fileFirst = !it.isEmpty || it.hasRelation
-        let fileSec = ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: files)
+        var fileFirst = !it.isEmpty || it.hasRelation
+        if aj.noMatch != fj.noMatch { fileFirst = aj.noMatch }
         var first = fileFirst ? fileSec : appSec, second = fileFirst ? appSec : fileSec
         let firstMax = 4
         let nSecond = min(second.items.count, total - min(first.items.count, firstMax))
         let nFirst = min(first.items.count, total - nSecond)
         first.items = Array(first.items.prefix(nFirst))
         second.items = Array(second.items.prefix(nSecond))
+        let shown = [first, second].filter { !$0.items.isEmpty }
+        let notFound = !shown.isEmpty && shown.allSatisfy(\.faded)
         return ([first, second], notFound)
     }
 

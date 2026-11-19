@@ -190,6 +190,8 @@ struct ResultSection {
     var title: String
     var symbol: String
     var items: [RowItem]
+    /// Engine が「見つからない」の印を付けた節。候補を薄くし、見出しに「見つかりません」を添える
+    var faded = false
 }
 
 /// 中央に出る入力欄と候補の一覧（Liquid Glass・白基調）
@@ -358,7 +360,8 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     }
 
     /// 節ごとに並べる。中身のある節が 1 つだけなら見出しは出さない。
-    /// notFound: 見つからない（Engine の判定）。「見つかりません」を出し、候補は薄く下に並べる
+    /// notFound: 出している節が全部見つからない（Engine の判定）。「見つかりません」を出し、候補は薄く下に並べる。
+    /// 節ごとの印（ResultSection.faded）は、その節の候補だけ薄くして見出しに「見つかりません」を添える
     func setResults(_ sections: [ResultSection], query: String, notFound: Bool = false) {
         guard query == field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
         let secs = sections.filter { !$0.items.isEmpty }
@@ -383,7 +386,9 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
                     Self.messageHeight)
         }
         for sec in secs {
-            if showHeaders { addLine(LabelLine(sec.title, symbol: sec.symbol), Self.headerHeight) }
+            // 全体が見つからないときは上に大きく出しているので、節の見出しには添えない
+            let fadeNote = sec.faded && !notFound ? "見つかりません" : nil
+            if showHeaders || fadeNote != nil { addLine(LabelLine(sec.title, symbol: sec.symbol, detail: fadeNote), Self.headerHeight) }
             for item in sec.items {
                 let i = results.count
                 results.append(item)
@@ -393,7 +398,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
                 row.sub.stringValue = item.sub
                 row.hint.stringValue = item.hint
                 row.icon.image = item.iconImage ?? item.iconPath.map(icon)
-                row.alphaValue = notFound ? 0.5 : 1
+                row.alphaValue = notFound || sec.faded ? 0.5 : 1
                 row.onClick = { [weak self] in self?.selected = i; self?.openSelected(reveal: false) }
                 stack.addArrangedSubview(row)
                 row.widthAnchor.constraint(equalToConstant: Self.width).isActive = true
