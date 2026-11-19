@@ -46,6 +46,8 @@ public final class Store {
         """)
         try exec(Store.searchLogSchema)
         migratedFiles = migrateFileVectorsToBinary()
+        // 前の起動の VACUUM や書き込みが -wal に残っていると本体が大きいままなので、起動のたびに書き戻す（変換済みの DB も）
+        try? exec("PRAGMA wal_checkpoint(TRUNCATE)")
     }
 
     /// 起動時に float32 から 2 値へ変換したファイル・フォルダの点の数（0 なら変換済み・新しい DB）
