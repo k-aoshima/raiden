@@ -46,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.onQuery = { [weak self] q in self?.query(q) }
         panel.onOpen = { [weak self] q, c, reveal in self?.open(q, c, reveal: reveal) }
         panel.onHide = { [weak self] in self?.scheduleUnload() }
+        panel.filterInput.context = { [weak self] in self?.filesReady == true ? self?.engine?.filterContext : nil }
         panel.setStatus("準備中…", symbol: "hourglass")
         work.async { [weak self] in self?.boot() }
         // 取りこぼしの保険（1 日 1 回、アプリもファイルも全体を見直す）

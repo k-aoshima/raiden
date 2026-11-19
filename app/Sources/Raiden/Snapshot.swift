@@ -36,6 +36,7 @@ enum Snapshot {
         shoot(dir + "/panel-notfound.png", query: "ふわふわのやつ", sections: [weakApps, weakFiles], notFound: true)
         shoot(dir + "/panel-preparing.png", query: "PDFを見るやつ", sections: [appSec],
               status: ("ファイル準備中… 300", "hourglass"))
+        FilterSnapshots.run(dir: dir)
     }
 
     static func shoot(_ path: String, query: String, sections: [ResultSection], select: Int = 0,
@@ -45,7 +46,12 @@ enum Snapshot {
         if let (s, sym) = status { c.setStatus(s, symbol: sym) }
         c.setResults(sections, query: query, notFound: notFound)
         c.select(select)
+        capture(c, path)
+    }
+
+    static func capture(_ c: SearchPanelController, _ path: String) {
         c.panel.contentView?.layoutSubtreeIfNeeded()
+        c.filterInput.updateGhost()   // ゴーストテキストは入力欄の位置が決まってから置く
         let v = c.content
         v.layoutSubtreeIfNeeded()
         let b = v.bounds

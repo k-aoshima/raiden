@@ -6,6 +6,7 @@
 //   --show-desc   説明の材料が付いたアプリの説明文を並べる
 //   --apps-own <path>  自作アプリの問題（既定 ~/Library/Application Support/Raiden/evals/apps-own.json）
 //   --open-bonus <x> / --sweep-open  いつも開くアプリの加点（Engine.openBonus）を変える / 振って比べる
+//   --test-filters / --filters / --dump-entries <file>  入力欄の絞り込みコマンド（FilterEval.swift）
 //   --knn-w <x> / --knn-min <x> / --knn-pow <x> / --sweep-knn  アプリの k近傍法（例の重み・最低の近さ・近さの何乗）
 //
 // 保存済みの例（raiden.sqlite）は読まない。例はこのファイルの EX だけ。
@@ -84,6 +85,10 @@ if let i = args.firstIndex(of: "--compile"), i + 2 < args.count {
     print("compiled \(dst.path)")
     exit(0)
 }
+
+// --test-filters / --dump-entries: 入力欄の絞り込みコマンドの確かめ（モデル不要。FilterEval.swift）
+if args.contains("--test-filters") { runFilterTests() }
+if let p = opt("--dump-entries") { try dumpEntries(p); exit(0) }
 
 let fpStart = physFootprintMB()
 // --no-extra: 標準アプリ以外の説明の材料（AppExtra）を使わない（前の作りと比べる用）
@@ -194,6 +199,10 @@ if let x = opt("--knn-w").flatMap(Float.init) { rich.appMix.wK = x }
 if let x = opt("--knn-min").flatMap(Float.init) { rich.appMix.knnMinSim = x }
 if let x = opt("--knn-pow").flatMap(Float.init) { rich.appMix.knnSimPow = x }
 
+if args.contains("--filters") {
+    try runFilterEval(embedder: embedder, appEngine: rich)
+    exit(0)
+}
 if args.contains("--files") {
     try runFileEval(embedder: embedder, appQs: Q, appEngine: rich)
     exit(0)

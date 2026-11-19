@@ -69,6 +69,8 @@ public struct Judged<R: Sendable>: Sendable {
     public let results: [R]          // 弾いたときも点数の順に残す（画面で薄く出す用）
     public let noMatch: Bool         // true なら「見つからない」と出し、results は控えめに見せる
     public let signals: MatchSignals
+    /// 入力欄のコマンドの読み取り結果（コマンドが無い入力では nil）。検索の記録（SearchLog）に残す用
+    public var filters: QueryFilters? = nil
 }
 
 public enum NoMatch {
@@ -76,7 +78,7 @@ public enum NoMatch {
     /// rankedNoEx は例（k近傍法）を抜いて並べた結果（例が無ければ nil で ranked を使う）
     public static func signals(_ c: Corpus, query q: String, vec v: [Float], mix m: Mix,
                                ranked: [(Int, Float)], rankedNoEx: [(Int, Float)]?,
-                               intent: QueryIntent?, relation: Bool) -> MatchSignals {
+                               intent: QueryIntent?, relation: Bool, allow: [Bool]? = nil) -> MatchSignals {
         var s = MatchSignals()
         guard let first = ranked.first else { return s }
         s.top1 = first.1
@@ -85,9 +87,11 @@ public enum NoMatch {
         s.gapNoEx = r0.count > 1 ? r0[0].1 - r0[1].1 : 1
         s.relation = relation
         s.hasIntent = !(intent?.isEmpty ?? true)
-        let V = c.dots(v)
+        let V0 = c.dots(v)
+        // 絞り込みがあるときは、残った物の中で見る
+        let V = allow.map { a in V0.indices.filter { a[$0] }.map { V0[$0] } } ?? V0
         if !V.isEmpty {
-            s.rawV = V[first.0]
+            s.rawV = V0[first.0]
             var a: Float = -9, b: Float = -9, sum: Float = 0
             for x in V { sum += x; if x > a { b = a; a = x } else if x > b { b = x } }
             s.maxV = a
