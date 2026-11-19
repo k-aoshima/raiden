@@ -208,11 +208,26 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     private let field = NSTextField()
     private let statusIcon = NSImageView()
     private let status = NSTextField(labelWithString: "")
+    /// 一覧の上に固定で出す行（チップ・知らせ・絞り込みの一覧の見出し）
+    private let topStack = NSStackView()
+    /// 候補の行（スクロールの中身）
     private let stack = NSStackView()
+    private let scroll = NSScrollView()
+    private let listView = FlippedView()
+    /// 作った行（results の先頭から。数が多いときは見える分から少しずつ作る）
     private var rows: [ResultRow] = []
     private var lines: [NSView] = []
     private var results: [RowItem] = []
+    /// 並べる順の中身（節の見出しか、results の番号）。entries[..<built] まで作った
+    private enum Entry { case header(String, String, String?); case row(Int) }
+    private var entries: [Entry] = []
+    private var built = 0
+    private var rowAlpha: [CGFloat] = []
+    private var paletteRows = false
     private var selected = 0
+    private var topHeightConstraint: NSLayoutConstraint!
+    /// 行を一度に作る数（数千件でも最初はこれだけ作り、スクロールで足す）
+    static let rowBatch = 200
     private var iconCache: [String: NSImage] = [:]
     private var heightConstraint: NSLayoutConstraint!
     private var glassView: NSView?
@@ -285,9 +300,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         field.focusRingType = .none
         field.font = .systemFont(ofSize: 24, weight: .regular)
         field.textColor = PanelStyle.text
-        field.placeholderAttributedString = NSAttributedString(
-            string: "アプリ・ファイルを探す（例: PDFを見るやつ）",
-            attributes: [.foregroundColor: PanelStyle.faint, .font: NSFont.systemFont(ofSize: 24)])
+        // 入力欄が空のときの案内文は出さない（虫めがねのアイコンだけ）
         field.delegate = self
         field.cell?.usesSingleLineMode = true
         statusIcon.contentTintColor = PanelStyle.faint
@@ -295,15 +308,42 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         status.textColor = PanelStyle.subText
         status.alignment = .right
         let sep = HairlineView()
-        stack.orientation = .vertical
-        stack.spacing = 0
-        stack.alignment = .leading
+        for st in [stack, topStack] {
+            st.orientation = .vertical
+            st.spacing = 0
+            st.alignment = .leading
+        }
+        // 候補の場所はスクロールできる（絞り込みで全部出すとき）。中身は上から並べる
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.borderType = .noBorder
+        scroll.contentView.drawsBackground = false
+        listView.translatesAutoresizingMaskIntoConstraints = false
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        listView.addSubview(stack)
+        scroll.documentView = listView
+        NSLayoutConstraint.activate([
+            listView.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            listView.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            listView.widthAnchor.constraint(equalToConstant: Self.width),
+            stack.topAnchor.constraint(equalTo: listView.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: listView.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: listView.trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: listView.bottomAnchor),
+        ])
+        scroll.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(listScrolled(_:)),
+                                               name: NSView.boundsDidChangeNotification, object: scroll.contentView)
 
-        for v in [veil, glyph, field, statusIcon, status, sep, stack] as [NSView] {
+        for v in [veil, glyph, field, statusIcon, status, sep, topStack, scroll] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(v)
         }
-        heightConstraint = stack.heightAnchor.constraint(equalToConstant: 0)
+        heightConstraint = scroll.heightAnchor.constraint(equalToConstant: 0)
+        topHeightConstraint = topStack.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
             veil.topAnchor.constraint(equalTo: content.topAnchor), veil.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             veil.leadingAnchor.constraint(equalTo: content.leadingAnchor), veil.trailingAnchor.constraint(equalTo: content.trailingAnchor),
@@ -321,9 +361,13 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             sep.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
             sep.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
             sep.heightAnchor.constraint(equalToConstant: 1),
-            stack.topAnchor.constraint(equalTo: sep.bottomAnchor, constant: 4),
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            topStack.topAnchor.constraint(equalTo: sep.bottomAnchor, constant: 4),
+            topStack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            topStack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            topHeightConstraint,
+            scroll.topAnchor.constraint(equalTo: topStack.bottomAnchor),
+            scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             heightConstraint,
         ])
         status.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -379,11 +423,35 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     /// 見本を撮るとき用（入力欄の文字を入れる）
     func setQueryText(_ s: String) { field.stringValue = s }
 
-    private func layoutPanel(height inner: CGFloat) {
-        heightConstraint.constant = inner
+    /// 入力欄をいつでも打てる状態に戻す（一覧を選んだ・チップを押した・行を押した後）。
+    /// caretToEnd: カーソルを末尾に。すでに編集中なら makeFirstResponder は呼ばない（呼ぶと全選択になる）
+    func focusField(caretToEnd: Bool = true) {
+        if field.currentEditor() == nil { panel.makeFirstResponder(field) }
+        guard caretToEnd, let ed = field.currentEditor() else { return }
+        ed.selectedRange = NSRange(location: (field.stringValue as NSString).length, length: 0)
+    }
+
+    /// 入力欄の文字（確かめ用）
+    var queryText: String { field.stringValue }
+
+    /// 入力欄の編集部品（確かめ用）
+    var fieldEditor: NSText? { field.currentEditor() }
+
+    private static var visibleFrame: NSRect {
+        (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+    }
+
+    /// パネル全体の高さの上限（画面の高さの 65%）
+    static var maxPanelHeight: CGFloat { visibleFrame.height * 0.65 }
+
+    private func layoutPanel(top: CGFloat, list: CGFloat) {
+        topHeightConstraint.constant = top
+        let maxList = max(Self.rowHeight * 3, Self.maxPanelHeight - Self.fieldHeight - 16 - top)
+        let listH = min(list, maxList)
+        heightConstraint.constant = listH
+        let inner = top + listH
         let h = Self.fieldHeight + (inner > 0 ? inner + 16 : 0)
-        let screen = NSScreen.main ?? NSScreen.screens.first
-        let vf = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let vf = Self.visibleFrame
         // 上端の位置を固定して下に伸ばす（候補の数で入力欄が動かないように）
         let top = vf.maxY - vf.height * 0.22
         panel.setFrame(NSRect(x: vf.midX - Self.width / 2, y: top - h, width: Self.width, height: h), display: true)
@@ -397,59 +465,146 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
                     extra: [(NSView, CGFloat)] = [], palette: Bool = false) {
         guard query == filterInput.currentQuery, palette || filterInput.palette == nil else { return }
         let secs = sections.filter { !$0.items.isEmpty }
-        let showHeaders = secs.count > 1 || notFound
+        // 絞り込みのコマンドが効いているときは全部出すので、節の見出しに件数を出す
+        let filtered = !palette && QueryFilters.parse(query, now: filterInput.now()).isActive
+        let showHeaders = secs.count > 1 || notFound || filtered
         results = []
+        rowAlpha = []
+        entries = []
+        built = 0
         selected = 0
+        paletteRows = palette
         rows.forEach { $0.removeFromSuperview() }
         lines.forEach { $0.removeFromSuperview() }
+        topStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         rows = []
         lines = []
-        var inner: CGFloat = 0
-        func addLine(_ v: NSView, _ h: CGFloat) {
+        var topH: CGFloat = 0
+        func addTop(_ v: NSView, _ h: CGFloat) {
             v.translatesAutoresizingMaskIntoConstraints = false
-            stack.addArrangedSubview(v)
+            topStack.addArrangedSubview(v)
             v.widthAnchor.constraint(equalToConstant: Self.width).isActive = true
             v.heightAnchor.constraint(equalToConstant: h).isActive = true
-            lines.append(v)
-            inner += h
+            topH += h
         }
         let top = palette ? extra : filterInput.topLines(sections: secs, query: query, preparing: !status.stringValue.isEmpty)
-        for (v, h) in top { addLine(v, h) }
+        for (v, h) in top { addTop(v, h) }
         if notFound && !query.isEmpty {
-            addLine(LabelLine("見つかりません", symbol: "magnifyingglass", detail: secs.isEmpty ? nil : "近いものを薄く出しています", big: true),
-                    Self.messageHeight)
+            addTop(LabelLine("見つかりません", symbol: "magnifyingglass", detail: secs.isEmpty ? nil : "近いものを薄く出しています", big: true),
+                   Self.messageHeight)
         }
+        var listH: CGFloat = 0
         for sec in secs {
             // 全体が見つからないときは上に大きく出しているので、節の見出しには添えない
             let fadeNote = sec.faded && !notFound ? "見つかりません" : nil
-            if showHeaders || fadeNote != nil { addLine(LabelLine(sec.title, symbol: sec.symbol, detail: fadeNote), Self.headerHeight) }
+            if showHeaders || fadeNote != nil {
+                let title = filtered ? "\(sec.title)  \(sec.items.count)件" : sec.title
+                entries.append(.header(title, sec.symbol, fadeNote))
+                listH += Self.headerHeight
+            }
             for item in sec.items {
-                let i = results.count
+                entries.append(.row(results.count))
                 results.append(item)
+                rowAlpha.append(notFound || sec.faded ? 0.5 : 1)
+                listH += Self.rowHeight
+            }
+        }
+        buildRows(upTo: Self.rowBatch - 1)
+        updateSelection()
+        layoutPanel(top: topH, list: listH)
+        scroll.contentView.scroll(to: .zero)
+        scroll.reflectScrolledClipView(scroll.contentView)
+        // 行を作り直しても入力欄は打てるままにする（カーソルの位置は動かさない）
+        if panel.isVisible { focusField(caretToEnd: false) }
+    }
+
+    /// results[index] の行まで作る（まだ作っていない見出し・行を順に足す）
+    private func buildRows(upTo index: Int) {
+        while built < entries.count && rows.count <= index {
+            switch entries[built] {
+            case .header(let title, let sym, let note):
+                let v = LabelLine(title, symbol: sym, detail: note)
+                v.translatesAutoresizingMaskIntoConstraints = false
+                stack.addArrangedSubview(v)
+                v.widthAnchor.constraint(equalToConstant: Self.width).isActive = true
+                v.heightAnchor.constraint(equalToConstant: Self.headerHeight).isActive = true
+                lines.append(v)
+            case .row(let i):
+                let item = results[i]
                 let row = ResultRow()
                 row.translatesAutoresizingMaskIntoConstraints = false
                 row.title.stringValue = item.title
                 row.sub.stringValue = item.sub
                 row.hint.stringValue = item.hint
                 row.icon.image = item.iconImage ?? item.iconPath.map(icon)
-                row.alphaValue = notFound || sec.faded ? 0.5 : 1
-                row.onClick = { [weak self] in self?.selected = i; self?.openSelected(reveal: false) }
+                row.alphaValue = rowAlpha[i]
+                row.onClick = { [weak self] in self?.clickRow(i) }
                 stack.addArrangedSubview(row)
                 row.widthAnchor.constraint(equalToConstant: Self.width).isActive = true
                 row.heightAnchor.constraint(equalToConstant: Self.rowHeight).isActive = true
                 rows.append(row)
-                inner += Self.rowHeight
             }
+            built += 1
         }
-        updateSelection()
-        layoutPanel(height: inner)
+    }
+
+    /// 下の端に近づいたら次の行を作る
+    @objc private func listScrolled(_ n: Notification) {
+        guard built < entries.count else { return }
+        let visible = scroll.contentView.bounds
+        if visible.maxY > listView.frame.height - visible.height {
+            buildRows(upTo: rows.count + Self.rowBatch - 1)
+        }
+    }
+
+    private func clickRow(_ i: Int) {
+        if paletteRows {
+            selected = i
+            updateSelection()
+            filterInput.acceptRow(i)
+            return
+        }
+        selected = i
+        openSelected(reveal: false)
     }
 
     /// 見本を撮るとき用（選択を動かす）
     func select(_ i: Int) {
-        guard rows.indices.contains(i) else { return }
+        guard results.indices.contains(i) else { return }
         selected = i
+        buildRows(upTo: i)
         updateSelection()
+        scrollToSelected()
+    }
+
+    /// 候補の数（確かめ用）
+    var resultCount: Int { results.count }
+    var builtRowCount: Int { rows.count }
+    var scrollOffset: CGFloat { scroll.contentView.bounds.minY }
+
+    private func moveSelection(_ d: Int) {
+        guard !results.isEmpty else { return }
+        var n = selected + d
+        if n < 0 || n >= results.count {
+            // 全部作ってある（ふつうの検索の数件）ときだけ端で回る。数が多いときは端で止める
+            guard built >= entries.count else { return }
+            n = (n + results.count) % results.count
+        }
+        selected = n
+        buildRows(upTo: n + 20)
+        updateSelection()
+        scrollToSelected()
+    }
+
+    /// 選んだ行が見える位置までスクロールする
+    private func scrollToSelected() {
+        guard rows.indices.contains(selected) else { return }
+        listView.layoutSubtreeIfNeeded()
+        let row = rows[selected]
+        var r = row.convert(row.bounds, to: listView)
+        // 先頭の行なら節の見出しまで見せる
+        if selected == 0 { r.origin.y = 0; r.size.height += Self.headerHeight }
+        listView.scrollToVisible(r)
     }
 
     private func icon(_ path: String) -> NSImage {
@@ -463,7 +618,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     }
 
     private func updateSelection() {
-        for (i, r) in rows.enumerated() { r.selected = i == selected }
+        for (i, r) in rows.enumerated() where r.selected != (i == selected) { r.selected = i == selected }
     }
 
     private func openSelected(reveal: Bool) {
@@ -483,10 +638,10 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         if filterInput.handle(sel) { return true }
         switch sel {
         case #selector(NSResponder.moveDown(_:)):
-            if !rows.isEmpty { selected = (selected + 1) % rows.count; updateSelection() }
+            moveSelection(1)
             return true
         case #selector(NSResponder.moveUp(_:)):
-            if !rows.isEmpty { selected = (selected - 1 + rows.count) % rows.count; updateSelection() }
+            moveSelection(-1)
             return true
         case #selector(NSResponder.insertNewline(_:)):
             // 日本語入力の変換中の Enter は確定に使う（ここには来ない）

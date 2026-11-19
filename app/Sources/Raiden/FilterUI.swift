@@ -107,6 +107,7 @@ final class FilterInput {
         if sel == #selector(NSResponder.deleteBackward(_:)), field.stringValue.isEmpty, !committed.isEmpty {
             committed.removeLast()
             refresh()
+            panel.focusField()
             return true
         }
         return false
@@ -117,14 +118,23 @@ final class FilterInput {
         let r = FilterCompletion.accept(item, palette: p, text: field.stringValue)
         if let c = r.commit { committed.append(c) }
         field.stringValue = r.text
-        moveCaretToEnd()
         refresh()
+        // 決めた後も入力欄で続けて打てるように（行を押して決めたときも）
+        panel?.focusField()
+    }
+
+    /// 一覧の行を押したとき（Enter と同じ）
+    func acceptRow(_ i: Int) {
+        guard let p = palette else { return }
+        let items = displayed(p)
+        if items.indices.contains(i) { accept(items[i], p) }
     }
 
     /// 次に付けそうなコマンドを押したとき
     func acceptNext(_ insert: String) {
         committed.append(insert)
         refresh()
+        panel?.focusField()
     }
 
     private func moveCaretToEnd() {
@@ -135,7 +145,7 @@ final class FilterInput {
     // MARK: 見た目
 
     /// 件数のある値を先に、0 件は下に回す（行数は検索の候補と同じ 9 まで）
-    private func displayed(_ p: FilterCompletion.Palette) -> [FilterCompletion.Item] {
+    func displayed(_ p: FilterCompletion.Palette) -> [FilterCompletion.Item] {
         Array((p.items.filter { $0.count != 0 } + p.items.filter { $0.count == 0 }).prefix(SearchPanelController.maxRows))
     }
 
@@ -319,5 +329,113 @@ enum FilterSnapshots {
         let q = c.filterInput.currentQuery
         c.setResults([ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: Array(rows))], query: q)
         Snapshot.capture(c, dir + "/option-chips.png")
+
+        // -type app で全部出してスクロールした状態。アプリは OS 付属のもの（私的な名前は使わない）
+        let appDirs = ["/System/Applications", "/System/Applications/Utilities"]
+        let appPaths = appDirs.flatMap { d in
+            ((try? FileManager.default.contentsOfDirectory(atPath: d)) ?? []).filter { $0.hasSuffix(".app") }.map { d + "/" + $0 }
+        }.sorted { ($0 as NSString).lastPathComponent < ($1 as NSString).lastPathComponent }
+        let all = panel("", committed: ["-type app"])
+        let appRows = appPaths.map {
+            RowItem(title: (($0 as NSString).lastPathComponent as NSString).deletingPathExtension, sub: $0, iconPath: $0, hint: RowItem.appHint)
+        }
+        all.setResults([ResultSection(title: "アプリ", symbol: "app.badge", items: appRows)], query: all.filterInput.currentQuery)
+        all.select(min(18, max(0, appRows.count - 1)))
+        Snapshot.capture(all, dir + "/option-all.png")
+    }
+}
+
+/// 入力欄が一覧を選んだ後も打てるかの確かめ（Raiden --test-focus）。パネルは画面に出さない
+enum FocusTest {
+    static func run() -> Bool {
+        var fails = 0, checks = 0
+        func expect(_ ok: Bool, _ what: String) {
+            checks += 1
+            if !ok { fails += 1 }
+            print((ok ? "  ok  " : "  NG  ") + what)
+        }
+        let ctx = FilterContext(files: [FileEntry(path: NSHomeDirectory() + "/Desktop/見本.png", mtime: Int(Date().timeIntervalSince1970))], appCount: 5)
+        func make() -> SearchPanelController {
+            let c = SearchPanelController()
+            c.filterInput.context = { ctx }
+            c.focusField()
+            return c
+        }
+        func tv(_ c: SearchPanelController) -> NSTextView? { c.fieldEditor as? NSTextView }
+        func type(_ c: SearchPanelController, _ s: String) {
+            for ch in s { tv(c)?.insertText(String(ch), replacementRange: NSRange(location: NSNotFound, length: 0)) }
+        }
+        func key(_ c: SearchPanelController, _ sel: Selector) { tv(c)?.doCommand(by: sel) }
+        func focused(_ c: SearchPanelController) -> Bool {
+            guard let ed = c.fieldEditor else { return false }
+            return c.panel.firstResponder === ed
+        }
+
+        // 1) 「-t 」→ ↓↓ でアプリ → Enter → 続けて「sa」
+        var c = make()
+        expect(focused(c), "最初から入力欄が打てる")
+        type(c, "-t ")
+        expect(c.filterInput.palette?.mode == .values(.type), "「-t 」で値の候補")
+        let appRow = c.filterInput.palette.map { c.filterInput.displayed($0).firstIndex { $0.insert == "app" } ?? 0 } ?? 0
+        for _ in 0..<appRow { key(c, #selector(NSResponder.moveDown(_:))) }
+        key(c, #selector(NSResponder.insertNewline(_:)))
+        expect(c.filterInput.committed == ["-type app"] && c.queryText.isEmpty, "Enter で -type app のチップ \(c.filterInput.committed) 「\(c.queryText)」")
+        expect(focused(c), "Enter の後も入力欄が first responder")
+        type(c, "sa")
+        expect(c.queryText == "sa" && c.filterInput.currentQuery == "-type app sa", "続けて打てる「\(c.queryText)」→ \(c.filterInput.currentQuery)")
+
+        // 2) 一覧の行を押して決める（フォーカスを外してから）
+        c = make()
+        type(c, "-t ")
+        c.panel.makeFirstResponder(nil)
+        c.filterInput.acceptRow(c.filterInput.palette.map { c.filterInput.displayed($0).firstIndex { $0.insert == "app" } ?? 0 } ?? 0)
+        expect(c.filterInput.committed == ["-type app"], "行を押して決める \(c.filterInput.committed)")
+        expect(focused(c), "行を押した後も入力欄が first responder")
+        type(c, "s")
+        expect(c.queryText == "s", "行を押した後に打てる「\(c.queryText)」")
+
+        // 3) 「-t -app」と打つ（前の版の名前）→ 空白でチップ → 続けて打てる
+        c = make()
+        type(c, "-t -ap")
+        expect(c.filterInput.palette?.mode == .values(.type), "「-t -ap」は -type の値の候補")
+        type(c, "p ")
+        expect(c.filterInput.committed == ["-type app"] && c.queryText.isEmpty, "「-t -app 」→ -type app \(c.filterInput.committed) 「\(c.queryText)」")
+        type(c, "sa")
+        expect(c.queryText == "sa" && focused(c), "「-t -app」の後に打てる「\(c.queryText)」")
+
+        // 4) 「-t -ap」で Tab（ゴースト）→ 決まる
+        c = make()
+        type(c, "-t -ap")
+        key(c, #selector(NSResponder.insertTab(_:)))
+        expect(c.filterInput.committed == ["-type app"] && focused(c), "「-t -ap」で Tab → \(c.filterInput.committed)")
+        type(c, "x")
+        expect(c.queryText == "x", "Tab の後に打てる")
+
+        // 5) 次のコマンドの札を押す・Backspace でチップを消す
+        c = make()
+        c.panel.makeFirstResponder(nil)
+        c.filterInput.acceptNext("-kind ss")
+        expect(focused(c), "札を押した後も入力欄が first responder")
+        key(c, #selector(NSResponder.deleteBackward(_:)))
+        expect(c.filterInput.committed.isEmpty && focused(c), "Backspace でチップを消した後も打てる")
+        type(c, "y")
+        expect(c.queryText == "y", "チップを消した後に打てる「\(c.queryText)」")
+
+        // 6) 候補が多いとき: 行は一度に全部作らず、↓ で選ぶとスクロールする
+        c = make()
+        type(c, "-type app ")
+        let many = (0..<1500).map { RowItem(title: "見本アプリ \($0)", sub: "/Applications/見本\($0).app", iconImage: NSImage(), hint: RowItem.appHint) }
+        c.setResults([ResultSection(title: "アプリ", symbol: "app.badge", items: many)], query: c.filterInput.currentQuery)
+        expect(c.resultCount == 1500 && c.builtRowCount <= SearchPanelController.rowBatch, "1500 件で作った行は \(c.builtRowCount)")
+        expect(c.panel.frame.height > 600, "候補が多いとパネルが伸びる")
+        expect(c.panel.frame.height <= SearchPanelController.maxPanelHeight + 1, "パネルの高さ \(Int(c.panel.frame.height)) は上限 \(Int(SearchPanelController.maxPanelHeight)) まで")
+        for _ in 0..<30 { key(c, #selector(NSResponder.moveDown(_:))) }
+        expect(c.selectedRow == 30 && c.scrollOffset > 0, "↓ 30 回で選択 \(c.selectedRow)・スクロール \(Int(c.scrollOffset))")
+        for _ in 0..<300 { key(c, #selector(NSResponder.moveDown(_:))) }
+        expect(c.selectedRow == 330 && c.builtRowCount > 330, "↓ 330 回で行を足す（作った行 \(c.builtRowCount)）")
+        expect(focused(c), "一覧を動かしても入力欄が first responder")
+
+        print("確かめ \(checks - fails)/\(checks)")
+        return fails == 0
     }
 }

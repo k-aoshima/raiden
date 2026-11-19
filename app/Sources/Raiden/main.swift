@@ -415,8 +415,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// 印の立った節は候補を薄くし、見出しに「見つかりません」を添える。
     /// 自動のとき、片方の節だけ印が立ったら当たった節を先にする（「先週のPDF」でアプリが見つからないのは普通なので、全体は「見つかりません」にしない）。
     /// 出している節が全部見つからないときだけ notFound を true にする（パネルは上に「見つかりません」を大きく出す）。
+    /// 絞り込みで全部出すときの上限（実質なし）
+    static let allLimit = 100_000
+
     static func sections(_ q: String, engine e: Engine, withFiles: Bool, order: SectionOrder = .auto) -> Sections {
-        let total = SearchPanelController.maxRows
+        // 絞り込みのコマンド（-type -kind -ext -date -path -name）が効いているときは上限で切らず全部出す（パネルはスクロール）
+        let filtered = QueryFilters.parse(q).isActive
+        let total = filtered ? allLimit : SearchPanelController.maxRows
         let aj = e.searchJudged(q, limit: total)
         var appSec = ResultSection(title: "アプリ", symbol: "app.badge", items: aj.results.map { RowItem(.app($0)) })
         appSec.faded = aj.noMatch
@@ -436,6 +441,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if aj.noMatch != fj.noMatch { fileFirst = aj.noMatch }
         }
         var first = fileFirst ? fileSec : appSec, second = fileFirst ? appSec : fileSec
+        if filtered {
+            let shown = [first, second].filter { !$0.items.isEmpty }
+            let notFound = !shown.isEmpty && shown.allSatisfy(\.faded)
+            return Sections(sections: [first, second], notFound: notFound, appsNoMatch: aj.noMatch, filesNoMatch: fj.noMatch)
+        }
         let firstMax = 4
         let nSecond = min(second.items.count, total - min(first.items.count, firstMax))
         let nFirst = min(first.items.count, total - nSecond)
@@ -760,6 +770,12 @@ if let i = CommandLine.arguments.firstIndex(of: "--snapshot") {
     let dir = CommandLine.arguments.count > i + 1 ? CommandLine.arguments[i + 1] : "docs/ui"
     Snapshot.run(dir: dir)
     exit(0)
+}
+
+// Raiden --test-focus: 入力欄が一覧を選んだ後も打てるかを確かめて終わる（画面には出さない。失敗なら exit 1）
+if CommandLine.arguments.contains("--test-focus") {
+    _ = NSApplication.shared
+    exit(FocusTest.run() ? 0 : 1)
 }
 
 let app = NSApplication.shared

@@ -101,6 +101,31 @@ public struct QueryFilters: Sendable {
         ("help", .help), ("h", .help), ("?", .help), ("ヘルプ", .help),
     ]
 
+    /// -type の別名（前の版の名前）。-app → -type app、-folder → -type d、-file → -type f。
+    /// 「-t -app」のように -type の値の位置に来たら値として読む
+    public static let typeShorthands: [(String, String)] = [("app", "app"), ("folder", "d"), ("file", "f")]
+
+    static func shorthand(_ token: String) -> String? {
+        guard let n = commandName(token) else { return nil }
+        return typeShorthands.first { $0.0 == n }?.1
+    }
+
+    /// 打ちかけの別名（「-ap」「-fol」）か
+    static func isShorthandPrefix(_ name: String) -> Bool {
+        !name.isEmpty && typeShorthands.contains { $0.0.hasPrefix(name) }
+    }
+
+    /// トークンの別名を -type の形に直す（-app → -type app、-t -app → -t app）
+    public static func expandShorthands(_ toks: [String]) -> [String] {
+        var out: [String] = []
+        for t in toks {
+            if let v = shorthand(t) {
+                if let p = out.last, let pn = commandName(p), command(named: pn) == .type { out.append(v) } else { out += ["-type", v] }
+            } else { out.append(t) }
+        }
+        return out
+    }
+
     public static func command(named n: String) -> Command? {
         let k = Describe.normalize(n)
         return aliases.first { Describe.normalize($0.0) == k }?.1
@@ -174,7 +199,7 @@ public struct QueryFilters: Sendable {
 
     public static func parse(_ query: String, now: Date = Date()) -> QueryFilters {
         var f = QueryFilters()
-        let toks = tokenize(query)
+        let toks = expandShorthands(tokenize(query))
         let trailingSpace = query.last?.isWhitespace ?? false
         var rest: [String] = []
         var i = 0
@@ -186,7 +211,8 @@ public struct QueryFilters: Sendable {
             if name.isEmpty { if isLast && !trailingSpace { f.pending = "" }; i += 1; continue }
             guard let cmd = command(named: name) else {
                 // 打ちかけ（「-da」）は知らせない。空白を打った後や途中にあれば知らせる
-                if isLast && !trailingSpace && aliases.contains(where: { Describe.normalize($0.0).hasPrefix(Describe.normalize(name)) }) {
+                if isLast && !trailingSpace && (aliases.contains(where: { Describe.normalize($0.0).hasPrefix(Describe.normalize(name)) })
+                                                || isShorthandPrefix(name)) {
                     f.pending = name
                 } else {
                     f.notes.append("-\(name) は使えません")
@@ -201,6 +227,11 @@ public struct QueryFilters: Sendable {
             }
             // 値: 次のトークン（コマンドの形でなければ）
             guard i + 1 < toks.count, commandName(toks[i + 1]) == nil else {
+                // 「-t -ap」（-type の値の位置で別名を打ちかけ）は待つ
+                if cmd == .type, i + 2 == toks.count, !trailingSpace, let n = commandName(toks[i + 1]), isShorthandPrefix(n) {
+                    f.pending = cmd.rawValue
+                    i += 2; continue
+                }
                 if isLast { f.pending = cmd.rawValue } else { f.notes.append("\(cmd.name) の後に値がありません") }
                 i += 1; continue
             }

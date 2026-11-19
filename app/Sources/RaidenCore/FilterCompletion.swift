@@ -98,6 +98,8 @@ public enum FilterCompletion {
         ("zip", "圧縮", "archivebox", ["archive", "圧縮"]), ("3d", "3Dモデル", "cube", []),
         ("folder", "フォルダ", "folder", ["フォルダ"]), ("app", "アプリ", "app", ["application", "アプリ"]),
     ]
+    /// -type の値の別の言い方（「-t -folder」「-type fol」でも当たるように）
+    static let typeAlso: [String: [String]] = ["f": ["file"], "d": ["folder", "dir"], "app": ["application"]]
     static let typeValues: [(String, String, String)] = [("f", "ファイル", "doc"), ("d", "フォルダ", "folder"), ("app", "アプリ", "app")]
 
     static func hit(_ q: String, _ cands: [String]) -> Bool {
@@ -120,6 +122,19 @@ public enum FilterCompletion {
            h == toks.count - 1, text.last?.isWhitespace == true,
            let r = text.range(of: toks[h], options: .backwards) {
             return Palette(mode: .commands, items: commands(matching: ""), start: text.distance(from: text.startIndex, to: r.lowerBound), partial: "")
+        }
+        // 「-t -ap」: -type の値の位置に別名（-app -folder -file）を打っているなら、-type の値の候補にする
+        if !last.isEmpty, let name = QueryFilters.commandName(last), !name.isEmpty {
+            var e = s
+            while e > 0 && chars[e - 1].isWhitespace { e -= 1 }
+            var b = e
+            while b > 0 && !chars[b - 1].isWhitespace { b -= 1 }
+            if b < e, let cn = QueryFilters.commandName(String(chars[b..<e])), QueryFilters.command(named: cn) == .type,
+               QueryFilters.isShorthandPrefix(name) {
+                let base = QueryFilters.parse((committed + [String(chars[..<b])]).joined(separator: " "), now: now)
+                let items = values(for: .type, partial: name, base: base, context: context, now: now)
+                if !items.isEmpty { return Palette(mode: .values(.type), items: items, start: b, partial: name) }
+            }
         }
         // コマンドの一覧: 最後のトークンが「-」「-da」（入力の先頭か空白の直後の「-」だけ）
         if !last.isEmpty, let name = QueryFilters.commandName(last) {
@@ -144,10 +159,11 @@ public enum FilterCompletion {
 
     public static func commands(matching name: String) -> [Item] {
         commandItems.filter { c in
-            hit(name, QueryFilters.aliases.filter { $0.1 == c.0 }.map(\.0))
+            hit(name, QueryFilters.aliases.filter { $0.1 == c.0 }.map(\.0) + (c.0 == .type ? QueryFilters.typeShorthands.map(\.0) : []))
         }.map { c in
             let ja = QueryFilters.aliases.filter { $0.1 == c.0 && $0.0.unicodeScalars.contains { $0.value > 0x2FFF } }.map { "-" + $0.0 }
-            let alias = ([c.0.short].compactMap { $0 } + (c.0 == .path ? ["-in"] : []) + ja.prefix(1)).joined(separator: " ")
+            let sh = c.0 == .type ? QueryFilters.typeShorthands.map { "-" + $0.0 } : []
+            let alias = ([c.0.short].compactMap { $0 } + (c.0 == .path ? ["-in"] : []) + ja.prefix(1) + sh).joined(separator: " ")
             return Item(title: c.0.name, detail: c.3.isEmpty ? c.2 : c.2 + "  " + c.3, symbol: c.1, insert: c.0.name, alias: alias)
         }
     }
@@ -206,7 +222,9 @@ public enum FilterCompletion {
             }
             sortByCount = true
         case .type:
-            out = typeValues.filter { hit(partial, [$0.0, $0.1]) }.map { Item(title: $0.1, detail: $0.0, symbol: $0.2, insert: $0.0, count: count($0.0)) }
+            out = typeValues.filter { hit(partial, [$0.0, $0.1] + (typeAlso[$0.0] ?? [])) }.map {
+                Item(title: $0.1, detail: $0.0, symbol: $0.2, insert: $0.0, count: count($0.0), also: typeAlso[$0.0] ?? [])
+            }
         case .path:
             out = placeItems(partial: partial, others: others, pool: pool, ctx: ctx)
         case .name, .help:
@@ -295,7 +313,7 @@ public enum FilterCompletion {
     /// 最後が空白でなければ何もしない（打ちかけを消さない）。読めない値のコマンドは残す（入力欄の下に知らせる）
     public static func extractCommitted(_ text: String, now: Date = Date()) -> (commands: [String], text: String)? {
         guard text.last?.isWhitespace == true else { return nil }
-        let toks = QueryFilters.tokenize(text)
+        let toks = QueryFilters.expandShorthands(QueryFilters.tokenize(text))
         var cmds: [String] = [], rest: [String] = []
         var i = 0
         while i < toks.count {

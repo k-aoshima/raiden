@@ -146,6 +146,27 @@ func runFilterTests() {
     expect(FilterCompletion.extractCommitted("-date 2026-1", now: testNow) == nil, "打ちかけはチップにしない")
     expect(FilterCompletion.extractCommitted("-date あした ", now: testNow) == nil, "読めない値はチップにしない")
 
+    // -type の別名（前の版の -app -folder -file）
+    for (q, t) in [("-app", "app"), ("-folder", "d"), ("-file", "f"), ("-t -app", "app"), ("-type -folder", "d"), ("-t -app s", "app"), ("-app ", "app")] {
+        let g = p(q)
+        expect(g.types == [t] && g.notes.isEmpty, "別名「\(q)」→ \(g.types) \(g.notes)")
+    }
+    for q in ["-ap", "-t -ap", "-t -fol"] {
+        let g = p(q)
+        expect(g.notes.isEmpty, "打ちかけ「\(q)」は知らせない \(g.notes)")
+    }
+    expect(p("-t -app sa").text == "sa", "「-t -app sa」の残りは sa")
+    expect(pal("-ap")?.items.first?.title == "-type", "-ap → -type の行")
+    expect(FilterCompletion.commands(matching: "").first { $0.title == "-type" }?.alias.contains("-app") == true, "一覧の -type に別名 -app")
+    expect(pal("-t -ap")?.mode == .values(.type) && pal("-t -ap")?.items.first?.insert == "app", "「-t -ap」は -type の値の候補")
+    expect(pal("-t -fol")?.items.first?.insert == "d", "「-t -fol」→ d")
+    if let p3 = pal("-t -ap") {
+        let r = FilterCompletion.accept(p3.items[0], palette: p3, text: "-t -ap")
+        expect(r.text == "" && r.commit == "-type app", "「-t -ap」で決める → 「\(r.text)」 \(r.commit ?? "nil")")
+    }
+    expect(FilterCompletion.extractCommitted("-t -app ", now: testNow)?.commands == ["-type app"], "「-t -app 」をチップに")
+    expect(FilterCompletion.extractCommitted("-folder ", now: testNow)?.commands == ["-type d"], "「-folder 」をチップに")
+
     // 件数（見本の一覧）
     let sample = [ss, pdf, dir, md,
                   FileEntry(path: home + "/Desktop/スクリーンショット 2026-11-19 08.00.00.png", mtime: ts("2026-11-19 08:00")),
