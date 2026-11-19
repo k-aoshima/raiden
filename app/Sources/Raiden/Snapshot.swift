@@ -1,4 +1,5 @@
 import AppKit
+import RaidenCore
 import UniformTypeIdentifiers
 
 /// 入力欄の見本を PNG に書き出す（Raiden --snapshot <dir>）。画面には出さず、画面外のパネルの中身を撮る。
@@ -35,7 +36,33 @@ enum Snapshot {
         weakApps.items = Array(apps.prefix(2)); weakFiles.items = Array(files.prefix(2))
         shoot(dir + "/panel-notfound.png", query: "ふわふわのやつ", sections: [weakApps, weakFiles], notFound: true)
         shoot(dir + "/panel-preparing.png", query: "PDFを見るやつ", sections: [appSec],
-              status: ("ファイル準備中… 300", "hourglass"))
+              status: ("ファイル準備中… 120/300", "hourglass"))
+        shootSettings(dir: dir)
+    }
+
+    /// 設定窓の各画面（settings-scope / general / learning / log.png）。中身はダミーと初期値だけ
+    static func shootSettings(dir: String) {
+        let host = DummySettingsHost()
+        let c = SettingsWindowController(host: host)
+        for t in SettingsWindowController.Tab.allCases {
+            host.status = t == .scope ? IndexStatus(count: 1024, embedding: (120, 300), scanning: true, ready: true) : IndexStatus(count: 1024, ready: true)
+            c.window.setContentSize(NSSize(width: SettingsStyle.width, height: SettingsStyle.height))
+            c.select(t)
+            // 中身が長い画面は窓を伸ばして全部写す
+            c.window.setContentSize(NSSize(width: SettingsStyle.width, height: max(SettingsStyle.height, min(1100, c.contentHeight()))))
+            guard let v = c.snapshotContent() else { continue }
+            v.layoutSubtreeIfNeeded()
+            c.refreshStatus()
+            let b = v.bounds
+            var shot: NSBitmapImageRep?
+            SettingsStyle.appearance.performAsCurrentDrawingAppearance {
+                guard let rep = v.bitmapImageRepForCachingDisplay(in: b) else { return }
+                v.cacheDisplay(in: b, to: rep)
+                shot = rep
+            }
+            guard let shot else { print("撮れませんでした: \(t.file)"); continue }
+            compose(shot, size: b.size, radius: 12, path: dir + "/settings-\(t.file).png")
+        }
     }
 
     static func shoot(_ path: String, query: String, sections: [ResultSection], select: Int = 0,
@@ -57,7 +84,11 @@ enum Snapshot {
         }
         guard let shot else { print("撮れませんでした: \(path)"); return }
 
-        // 明るい壁紙の代わりの背景に載せる（ガラスのぼかしは画面外では描かれないため、白い面だけが写る）
+        compose(shot, size: b.size, radius: 0, path: path)
+    }
+
+    /// 明るい壁紙の代わりの背景に載せて書き出す（ガラスのぼかしは画面外では描かれないため、白い面だけが写る）
+    static func compose(_ shot: NSBitmapImageRep, size b: NSSize, radius: CGFloat, path: String) {
         let pad: CGFloat = 48, scale: CGFloat = 2
         let size = NSSize(width: b.width + pad * 2, height: b.height + pad * 2)
         guard let out = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale), pixelsHigh: Int(size.height * scale),
@@ -73,13 +104,64 @@ enum Snapshot {
         sh.shadowBlurRadius = 24
         sh.shadowOffset = NSSize(width: 0, height: -6)
         sh.set()
-        let img = NSImage(size: b.size)
+        let img = NSImage(size: b)
         img.addRepresentation(shot)
-        img.draw(in: NSRect(x: pad, y: pad, width: b.width, height: b.height))
+        let r = NSRect(x: pad, y: pad, width: b.width, height: b.height)
+        if radius > 0 {
+            // 窓の形（角の丸い面）。中身は透ける白なので、下に薄い面を敷いて影を付ける
+            NSColor(white: 1, alpha: 0.35).setFill()
+            NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius).fill()
+            NSShadow().set()
+            NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius).addClip()
+        }
+        img.draw(in: r)
         NSGraphicsContext.restoreGraphicsState()
         if let png = out.representation(using: .png, properties: [:]) {
             try? png.write(to: URL(fileURLWithPath: path))
             print("書き出し \(path)  \(Int(b.width))×\(Int(b.height))")
         }
     }
+}
+
+/// 設定窓の見本用の口（私的なものは写さない。フォルダは初期値、例と記録はダミー）
+final class DummySettingsHost: SettingsHost {
+    var settings = RaidenSettings()
+    var status = IndexStatus(count: 1024, ready: true)
+    var indexStatus: IndexStatus { status }
+    func updateSettings(_ f: (inout RaidenSettings) -> Void) { f(&settings) }
+    func rebuildIndex() {}
+    func folderCount(_ path: String, then: @escaping (ScopeCounter.Result) -> Void) -> ScopeCounter.Result? {
+        let n = ["~/Documents": 642, "~/Downloads": 211, "~/Desktop": 37, "~/Documents/Obsidian Vault": 134][path] ?? 0
+        return ScopeCounter.Result(count: n, capped: false)
+    }
+    var hotKeyLabel: String { "⌥Space" }
+    func applyHotKey(_ hk: RaidenSettings.HotKeySetting?) -> String? { nil }
+    func suspendHotKey(_ on: Bool) {}
+    var loginOn: Bool { true }
+    func setLogin(_ on: Bool) {}
+    let now = Int(Date().timeIntervalSince1970)
+    func learnedExamples() -> [LearnedExample] {
+        [LearnedExample(query: "PDFを見るやつ", kind: "app", key: "com.apple.Preview", name: "プレビュー", count: 5, lastUsed: now - 3600),
+         LearnedExample(query: "黒い画面でコマンド", kind: "app", key: "com.apple.Terminal", name: "ターミナル", count: 3, lastUsed: now - 86400),
+         LearnedExample(query: "先週の見積書", kind: "file", key: "/dummy/見積書_サンプル.pdf", name: "見積書_サンプル.pdf", count: 2, lastUsed: now - 86400 * 2),
+         LearnedExample(query: "スクショ置き場", kind: "folder", key: "/dummy/スクリーンショット", name: "スクリーンショット", count: 1, lastUsed: now - 86400 * 5)]
+    }
+    func deleteLearned(_ e: LearnedExample) {}
+    func clearLearned() {}
+    func appNotes() -> [(String, String)] { [("com.example.sample", "声で文字を入力するアプリ（見本）")] }
+    func saveAppNotes(_ notes: [(String, String)]) {}
+    func recentSearches() -> [SearchLogEntry] {
+        [SearchLogEntry(ts: now - 120, query: "PDFを見るやつ", edits: [], candidates: [], chosenKind: "app", chosenKey: "com.apple.Preview",
+                        chosenName: "プレビュー", chosenRank: 1, dismissed: false, notFound: false, ms: 21),
+         SearchLogEntry(ts: now - 900, query: "先週の見積書", edits: [], candidates: [], chosenKind: "file", chosenKey: "/dummy",
+                        chosenName: "見積書_サンプル.pdf", chosenRank: 2, dismissed: false, notFound: false, ms: 24),
+         SearchLogEntry(ts: now - 4000, query: "ふわふわのやつ", edits: [], candidates: [], dismissed: true, notFound: true, ms: 19)]
+    }
+    func notFoundSearches() -> [SearchLogEntry] { recentSearches().filter(\.notFound) }
+    func searchLogCount() -> Int { 3 }
+    func clearSearchLog() {}
+    func openLogFolder() {}
+    var logFolderPath: String { "~/Library/Logs/Raiden" }
+    func teach(_ e: SearchLogEntry, completion: @escaping (String?) -> Void) { completion(nil) }
+    func previewTransparency(_ t: Double) {}
 }

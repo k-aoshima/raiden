@@ -17,27 +17,25 @@ public struct OpenWithIndex: Sendable {
 
     public init() {}
 
-    static let skipDirs: Set<String> = ["node_modules", ".venv", "venv", "__pycache__", ".git", "DerivedData", "Pods"]
-
-    /// 探す場所はファイル検索と同じ（FileCatalog.defaultRoots）
-    public static func build(roots: [String] = FileCatalog.defaultRoots) -> OpenWithIndex {
+    /// 探す場所はファイル検索と同じ（設定の検索範囲。既定は FileCatalog.defaultRoots）
+    public static func build(scope: ScanScope = .default) -> OpenWithIndex {
         var idx = OpenWithIndex()
-        idx.update(listFiles(roots: roots))
+        idx.update(listFiles(scope: scope))
         return idx
     }
 
     /// ファイルだけを軽く並べる（隠しファイル・パッケージの中・.app・node_modules などは除く）
-    public static func listFiles(roots: [String]) -> [String] {
+    public static func listFiles(scope: ScanScope) -> [String] {
         let fm = FileManager.default
         var out: [String] = []
         var seen = Set<String>()
-        for root in roots {
+        for root in scope.roots where !scope.excludesPath(root) {
             guard let en = fm.enumerator(at: URL(fileURLWithPath: root), includingPropertiesForKeys: [.isDirectoryKey, .isPackageKey],
                                          options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
             for case let url as URL in en {
                 let name = url.lastPathComponent
                 let rv = try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
-                if skipDirs.contains(name) || name.hasSuffix(".app") {
+                if scope.excludesName(name) || scope.excludesPath(url.path.precomposedStringWithCanonicalMapping) {
                     if rv?.isDirectory == true { en.skipDescendants() }
                     continue
                 }

@@ -223,7 +223,7 @@ public final class Engine {
     /// ファイル・フォルダの点を入れる。説明文が変わったものだけベクトルを作り直し（Store があれば保存）、
     /// contains（フォルダ → 中の物）と co_used（同じ日に使った物どうし）の線を張る。作り直した数を返す。
     @discardableResult
-    public func setFiles(_ entries: [FileEntry], progress: ((Int) -> Void)? = nil) -> Int {
+    public func setFiles(_ entries: [FileEntry], progress: ((Int, Int) -> Void)? = nil) -> Int {
         let cm = FileCatalog.childrenMap(entries)
         let bases = entries.map { FileCatalog.baseDescription($0, children: cm[$0.path] ?? []) }
         let model = embedder.identifier

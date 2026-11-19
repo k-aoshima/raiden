@@ -84,25 +84,56 @@ public final class FSWatcher {
 /// 同じ列（シリアルキュー）からだけ呼ぶこと。
 public final class FileIndex {
     public let engine: Engine
-    public let roots: [String]
+    /// 検索の対象範囲。変えるときは setScope（同じ列から）
+    private(set) public var scope: ScanScope
+    public var roots: [String] { scope.roots }
     private(set) public var entries: [String: FileEntry] = [:]
 
     public struct Stats: Sendable {
         public var changed = 0, removed = 0, embedded = 0, examples = 0
         public var seconds: Double = 0
+        /// FSEvents の履歴が途切れて中を見直した場所（全体を見直したときは roots）
+        public var rescanned: [String] = []
     }
 
-    public init(engine: Engine, roots: [String] = FileCatalog.defaultRoots) {
+    public init(engine: Engine, scope: ScanScope = .default) {
         self.engine = engine
-        self.roots = roots
+        self.scope = scope
     }
 
-    /// 全体を見直す（起動時・1 日 1 回・履歴が途切れて場所が分からないとき）。変わった物だけベクトルを作り直す
+    /// 対象範囲を差し替える。外れた物はすぐ一覧から外し、増えた場所だけ拾い直してから Engine に入れ直す。
+    /// 説明文が変わった（＝新しく入った）物だけベクトル化され、外れた物の点と線（例の chose の線も）は Store から消える。
+    /// Engine は commit まで前の一覧のままなので、その間の検索は止まらない
     @discardableResult
-    public func fullScan(progress: ((Int) -> Void)? = nil) -> Stats {
+    public func setScope(_ s: ScanScope, progress: ((Int, Int) -> Void)? = nil) -> Stats {
+        let t0 = Date()
+        let old = scope
+        scope = s
+        var st = Stats()
+        if old.excludeNames != s.excludeNames || old.excludeDirs != s.excludeDirs {
+            // 除外が変わったら、どこが増えるか分からないので全体を見直す（変わっていない物はベクトルを作り直さない）
+            return fullScan(progress: progress)
+        }
+        let before = entries.count
+        entries = entries.filter { FileCatalog.isIncluded($0.key, scope: s) }
+        st.removed = before - entries.count
+        let added = s.roots.filter { r in !old.roots.contains { r == $0 || r.hasPrefix($0 + "/") } }
+        for e in FileCatalog.collect(roots: added, scope: s) where entries[e.path] == nil && FileCatalog.isIncluded(e.path, scope: s) {
+            entries[e.path] = e; st.changed += 1
+        }
+        let s2 = commit(progress: progress)
+        st.embedded = s2.embedded; st.examples = s2.examples
+        st.seconds = Date().timeIntervalSince(t0)
+        return st
+    }
+
+    /// 全体を見直す（起動時・1 日 1 回・履歴が途切れて場所が分からないとき）。変わった物だけベクトルを作り直す。
+    /// progress は（作った数, 作る数）
+    @discardableResult
+    public func fullScan(progress: ((Int, Int) -> Void)? = nil) -> Stats {
         let t0 = Date()
         var es: [String: FileEntry] = [:]
-        for e in FileCatalog.collect(roots: roots) { es[e.path] = e }
+        for e in FileCatalog.collect(scope: scope) { es[e.path] = e }
         entries = es
         var st = commit(progress: progress)
         st.changed = es.count
@@ -118,12 +149,15 @@ public final class FileIndex {
         var st = Stats()
         // roots より上（"/" など）で履歴が途切れたら全体を見直す
         if c.rescan.contains(where: { r in roots.contains { $0 == r || $0.hasPrefix(r + "/") } }) {
-            return fullScan()
+            var full = fullScan()
+            full.rescanned = Array(c.rescan)
+            return full
         }
+        st.rescanned = Array(c.rescan)
         var touched = Set<String>()
         for r in c.rescan {
             removeTree(r, keepSelf: true, &st)
-            for e in FileCatalog.collect(roots: [r]) where FileCatalog.isIncluded(e.path, roots: roots) {
+            for e in FileCatalog.collect(roots: [r], scope: scope) where FileCatalog.isIncluded(e.path, scope: scope) {
                 entries[e.path] = e; st.changed += 1
             }
             touched.insert(r)
@@ -132,13 +166,13 @@ public final class FileIndex {
         var parents = Set<String>()
         for p in touched {
             parents.insert((p as NSString).deletingLastPathComponent)
-            guard FileCatalog.isIncluded(p, roots: roots) else { continue }
+            guard FileCatalog.isIncluded(p, scope: scope) else { continue }
             if let e = FileCatalog.entry(path: p) {
                 let isNew = entries[p] == nil
                 entries[p] = e; st.changed += 1
                 // 入ってきたフォルダ（移動・解凍）は中も拾う
                 if e.isDir && isNew {
-                    for x in FileCatalog.collect(roots: [p]) where FileCatalog.isIncluded(x.path, roots: roots) {
+                    for x in FileCatalog.collect(roots: [p], scope: scope) where FileCatalog.isIncluded(x.path, scope: scope) {
                         entries[x.path] = x; st.changed += 1
                     }
                 }
@@ -163,7 +197,7 @@ public final class FileIndex {
 
     /// Engine に入れ直す。説明文が変わった物だけベクトル化され、消えた物の点と線（例の chose の線も）は Store から消える。
     /// setFiles で Corpus が作り直されて例が消えるので、保存済みの「入力 → ファイル」の例を入れ直す
-    private func commit(progress: ((Int) -> Void)?) -> Stats {
+    private func commit(progress: ((Int, Int) -> Void)?) -> Stats {
         var st = Stats()
         let list = entries.values.sorted { $0.path < $1.path }
         st.embedded = engine.setFiles(list, progress: progress)

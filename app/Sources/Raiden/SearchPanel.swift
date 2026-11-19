@@ -13,8 +13,14 @@ enum PanelStyle {
     static let text = NSColor(white: 0.13, alpha: 1)        // 濃いグレー
     static let subText = NSColor(white: 0.42, alpha: 1)
     static let faint = NSColor(white: 0.55, alpha: 1)
-    static let glassTint = NSColor(white: 1, alpha: 0.55)   // ガラスの白寄りの色
-    static let veil = NSColor(white: 1, alpha: 0.62)        // ガラスが使えない／描かれない時も白く見せる面
+    /// 透け具合（設定の「一般 → 透明度」。0 = 白い、0.9 = いちばん透ける。既定 0.6）
+    static var transparency = RaidenSettings.defaultTransparency
+    /// ガラスの白寄りの色: 不透明度 0.65 ×（1 − 透け具合）。既定 0.6 で 0.26（前は 0.55 固定）
+    static var glassTint: NSColor { NSColor(white: 1, alpha: CGFloat(0.65 * (1 - transparency))) }
+    /// ガラスの上に重ねる白い面: 不透明度 0.75 ×（1 − 透け具合）。既定 0.6 で 0.30（前は 0.62 固定）
+    static var veil: NSColor { NSColor(white: 1, alpha: CGFloat(0.75 * (1 - transparency))) }
+    /// これ以上透けさせるときはガラスを .clear にする
+    static let clearGlassAbove = 0.75
     static let selection = NSColor(srgbRed: 0.0, green: 0.42, blue: 1.0, alpha: 0.12)
     static let separator = NSColor(white: 0, alpha: 0.08)
     static let radius: CGFloat = 22
@@ -209,10 +215,15 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     private var selected = 0
     private var iconCache: [String: NSImage] = [:]
     private var heightConstraint: NSLayoutConstraint!
+    private var glassView: NSView?
+    private var veilView: VeilView?
+    private var effectView: NSVisualEffectView?
 
     /// maxRows はアプリ＋ファイルの合計
     static let width: CGFloat = 660, fieldHeight: CGFloat = 60, rowHeight: CGFloat = 48, headerHeight: CGFloat = 26,
-               messageHeight: CGFloat = 52, maxRows = 9
+               messageHeight: CGFloat = 52
+    /// 候補の最大件数（アプリ＋ファイル。設定の「一般」）
+    static var maxRows = 9
 
     var onQuery: ((String) -> Void)?
     /// (入力, 候補, ⌘ を押していたか)。⌘Enter は Finder に表示
@@ -238,14 +249,15 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         let veil = VeilView()
         if #available(macOS 26.0, *) {
             let glass = NSGlassEffectView()
-            glass.style = .regular
+            glass.style = PanelStyle.transparency >= PanelStyle.clearGlassAbove ? .clear : .regular
             glass.cornerRadius = PanelStyle.radius
             glass.tintColor = PanelStyle.glassTint
             glass.contentView = content
             panel.contentView = glass
+            glassView = glass
         } else {
             let bg = NSVisualEffectView()
-            bg.material = .popover
+            bg.material = PanelStyle.transparency >= 0.5 ? .underWindowBackground : .popover
             bg.blendingMode = .behindWindow
             bg.state = .active
             bg.wantsLayer = true
@@ -258,7 +270,9 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
                 content.leadingAnchor.constraint(equalTo: bg.leadingAnchor), content.trailingAnchor.constraint(equalTo: bg.trailingAnchor),
             ])
             panel.contentView = bg
+            effectView = bg
         }
+        veilView = veil
         content.appearance = PanelStyle.appearance
 
         let glyph = NSImageView(image: symbol("magnifyingglass", size: 20, weight: .medium) ?? NSImage())
@@ -325,6 +339,17 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     }
 
     var isVisible: Bool { panel.isVisible }
+
+    /// 透け具合を当て直す（設定を変えたとき）。ガラスの tint と白い面の濃さ、透けるほうではガラスを .clear に
+    func applyTransparency() {
+        let t = PanelStyle.transparency
+        if #available(macOS 26.0, *), let g = glassView as? NSGlassEffectView {
+            g.tintColor = PanelStyle.glassTint
+            g.style = t >= PanelStyle.clearGlassAbove ? .clear : .regular
+        }
+        effectView?.material = t >= 0.5 ? .underWindowBackground : .popover
+        veilView?.needsDisplay = true
+    }
 
     func show() {
         field.stringValue = ""

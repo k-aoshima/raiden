@@ -32,18 +32,18 @@ public enum FileCatalog {
         ["Documents", "Downloads", "Desktop", "Documents/Obsidian Vault"].map { home + "/" + $0 }
     }
 
-    static let skipDirs: Set<String> = ["node_modules", ".venv", "venv", "__pycache__", ".git", "DerivedData", "Pods"]
-
     static let resourceKeys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .fileSizeKey, .contentModificationDateKey,
                                                  .creationDateKey, .addedToDirectoryDateKey]
 
-    /// 一覧を作る。隠しファイル・パッケージの中・アプリ本体・node_modules などは除く。roots 自体は点にしない。
-    public static func collect(roots: [String] = defaultRoots) -> [FileEntry] {
+    /// 一覧を作る。隠しファイル・パッケージの中・アプリ本体と、scope の除外（node_modules など・除くフォルダ）は除く。
+    /// roots を省くと scope.roots。roots 自体は点にしない。
+    public static func collect(roots: [String]? = nil, scope: ScanScope = .default) -> [FileEntry] {
+        let roots = roots ?? scope.roots
         let fm = FileManager.default
         let keys = resourceKeys
         var seen = Set(roots)
         var out: [FileEntry] = []
-        for root in roots {
+        for root in roots where !scope.excludesPath(root) {
             guard let en = fm.enumerator(at: URL(fileURLWithPath: root), includingPropertiesForKeys: keys,
                                          options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
             for case let url as URL in en {
@@ -51,7 +51,7 @@ public enum FileCatalog {
                 let name = url.lastPathComponent
                 let rv = try? url.resourceValues(forKeys: Set(keys))
                 let isDir = (rv?.isDirectory ?? false) && !(rv?.isPackage ?? false)
-                if skipDirs.contains(name) || name.hasSuffix(".app") {
+                if scope.excludesName(name) || scope.excludesPath(path) {
                     if rv?.isDirectory == true { en.skipDescendants() }
                     continue
                 }
@@ -71,13 +71,14 @@ public enum FileCatalog {
         return makeEntry(url: url, rv: rv, kindFallback: true)
     }
 
-    /// 探す対象に入るパスか（roots のどれかの中で、隠し・node_modules など・アプリやパッケージの中でない）。roots 自体は false
-    public static func isIncluded(_ path: String, roots: [String] = defaultRoots) -> Bool {
-        guard let root = roots.filter({ path.hasPrefix($0 + "/") }).max(by: { $0.count < $1.count }) else { return false }
+    /// 探す対象に入るパスか（scope.roots のどれかの中で、隠し・除く名前・除くフォルダ・アプリやパッケージの中でない）。roots 自体は false
+    public static func isIncluded(_ path: String, scope: ScanScope = .default) -> Bool {
+        guard let root = scope.roots.filter({ path.hasPrefix($0 + "/") }).max(by: { $0.count < $1.count }) else { return false }
+        if scope.excludesPath(path) { return false }
         let comps = path.dropFirst(root.count + 1).split(separator: "/").map(String.init)
         var cur = root
         for (i, c) in comps.enumerated() {
-            if c.hasPrefix(".") || skipDirs.contains(c) || c.hasSuffix(".app") { return false }
+            if scope.excludesName(c) { return false }
             cur += "/" + c
             // 途中のフォルダがパッケージ（.key・.photoslibrary など）なら、その中は見ない
             if i < comps.count - 1,
@@ -175,7 +176,8 @@ public enum FileCatalog {
         if e.isDir {
             var counts: [String: Int] = [:]
             for c in children { counts[c.isDir ? "フォルダ" : c.kind, default: 0] += 1 }
-            let summary = counts.sorted { $0.value > $1.value }.prefix(4).map { "\($0.key) \($0.value)個" }.joined(separator: " ")
+            // 同じ数の種類は名前順（辞書の順はプロセスごとに変わり、説明文が変わってベクトルを毎回作り直していた）
+            let summary = counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.prefix(4).map { "\($0.key) \($0.value)個" }.joined(separator: " ")
             let names = children.map(\.stem).sorted().prefix(10).map { String($0.prefix(24)) }.joined(separator: " ")
             return "\(e.name) フォルダ 場所: \(e.parentName) 中身: \(summary) 名前: \(names)"
         }

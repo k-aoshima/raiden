@@ -92,10 +92,10 @@ Engine の `searchFiles` で探す。
 
 ### 入力欄の見た目（app/Sources/Raiden/SearchPanel.swift）
 
-macOS 26 以降は Liquid Glass（`NSGlassEffectView`、白寄りの tint）、それより前は `NSVisualEffectView`。OS がダークモードでもパネルはライト（`.aqua`）で、文字は濃いグレー。選択中の行は面の色だけで示す。見本は `build/Raiden --snapshot docs/ui` で PNG に書き出す（画面には出さない。ガラスのぼかしは画面外では描かれないので、白い面だけが写る）。
+macOS 26 以降は Liquid Glass（`NSGlassEffectView`、白寄りの tint）、それより前は `NSVisualEffectView`。透け具合は設定の「一般 → 透明度」（0〜90%、既定 60%）で、ガラスの tint の不透明度 0.65×（1−透明度）、上に重ねる白い面 0.75×（1−透明度）（既定で 0.26 と 0.30。前は 0.55 と 0.62 で固定）。75% 以上はガラスを `.clear`、古い OS は 50% 以上で `.underWindowBackground`（未満は `.popover`）。OS がダークモードでもパネルはライト（`.aqua`）で、文字は濃いグレー。選択中の行は面の色だけで示す。見本は `build/Raiden --snapshot docs/ui` で PNG に書き出す（画面には出さない。ガラスのぼかしは画面外では描かれないので、白い面だけが写る）。
 - 選んだ「入力 → ファイル」は例の点から chose の線で残し（`Store.recordFileChoice`）、一覧を作り直すたびに `Engine.addFileExamples` で入れ直す。
 
-- 対象は `~/Documents`・`~/Downloads`・`~/Desktop`・`~/Documents/Obsidian Vault`。隠しファイル・パッケージの中・`.app`・node_modules / .venv などは除く。パスは NFC に揃える。
+- 対象は設定の「検索範囲」（初期値は `~/Documents`・`~/Downloads`・`~/Desktop`・`~/Documents/Obsidian Vault`、除外は node_modules / .venv / venv / __pycache__ / .git / DerivedData / Pods）。隠しファイル・パッケージの中・`.app` はいつも除く。パスは NFC に揃え、シンボリックリンクはたどった実際のパスにする。
 - 説明文: 名前・Spotlight の種類名（kMDItemKind）・種類の日本語と英語・親フォルダ名・中身の頭 260 字（PDF は PDFKit、txt / md / csv / html はそのまま、docx は AppKit）。フォルダは中の種類の数と名前 10 個。
 - 名前・種類・日付・大きさから作ったハッシュが変わったものだけ作り直す（約 1000 件の初回が 25〜33 秒、2 回目以降は SQLite から読むだけ）。
 - 並べ方の部品は `Ranker` に集め、`Mix` で組み合わせを選ぶ（V: 説明文との近さ、K: k近傍法、G: 線をたどる。足し方は重みつきの和か RRF）。
@@ -108,9 +108,29 @@ macOS 26 以降は Liquid Glass（`NSGlassEffectView`、白寄りの tint）、�
 - 「A と同じ日に撮った B」「A の中の B」のような言い方は A と B に分け、A に近い上位 5 件から co_used を 2 回たどった点数（×0.5）＋ B との近さで並べる。
 - 英数字だけの入力は、名前の読みのローマ字（CFStringTokenizer。ヘボン式・訓令式・長音を揃える）と 1 文字違いまで一致を見る（「seikyuu」「keycron」）。
 
+### 設定（app/Sources/Raiden/SettingsWindow.swift、app/Sources/RaidenCore/Settings.swift）
+
+メニューバーの「設定…」（⌘,）で開く。左の一覧で 4 つに分ける。見本は `build/Raiden --snapshot docs/ui` の `settings-*.png`（ダミーと初期値だけが写る）。
+保存は `~/Library/Application Support/Raiden/settings.json`（`RaidenSettings`。フォルダは `~/` の形、項目ごとに読めなければ初期値、無ければ全部初期値）。
+
+- **検索範囲**: 探すフォルダ（追加・削除・オンオフ、各行に中の件数）、除外するフォルダ、除外する名前（`*` `?` のパターンも可）、件数とベクトル化の状態、「今すぐ作り直す」（全体を見直し、変わった物だけベクトル化）。
+  - 変えたら 0.8 秒待ってまとめて当てる（`FileIndex.setScope`）。FSEvents の見張りを張り直し、外れた物はすぐ一覧から外し、増えた場所だけ拾ってベクトル化する（裏の列で。終わるまで検索は前の一覧のまま）。外した物の点と線（向いていた chose の線も）は SQLite から消える。除外を変えたときは全体を見直す（変わっていない物は作り直さない）。
+  - 足したフォルダは件数を数えてからオンにする。そのフォルダか合計が 5 万件を超えるときはオフのまま足し、メモリ（1 件約 15KB。`--files` の「ファイル数が増えた場合」で 49,450 件が +734MB）と初回のベクトル作成（1 件約 30ms）の目安を窓に出す。
+  - フォルダの説明文の「中身」は同じ数の種類を名前順に並べる（辞書の順がプロセスごとに変わって、十数個のフォルダを毎回作り直していた）。
+- **一般**: 入力欄を開くキー（押して登録。システムのショートカットと重なれば知らせ、ほかのアプリが持っていて登録できなければ前のキーに戻す）、候補の最大件数、アプリとファイルの節の並び（自動／アプリ先／ファイル先）、透明度、ログイン時に起動、モデルを解放するまでの時間。
+- **学習**: 選んだ結果を覚える オン・オフ、覚えた例の一覧（言い方 → 物・回数・最後に使った日）と 1 件ずつの削除・全部消す、`app-notes.json` の編集（保存するとアプリの説明文を作り直す）。
+- **記録**: 検索の記録を残す オン・オフ、残す日数（初期 90 日）、記録を全部消す、ログのフォルダを開く、最近の検索、見つからなかった言い方（「正解を教える…」で選んだ物を例として覚える）。
+
+### 記録（app/Sources/RaidenCore/SearchLog.swift, RaidenLog.swift）
+
+どちらも手元だけに残し、外へは送らない。
+
+- 検索の記録: raiden.sqlite の `search_log` 表。入力欄を開いてから閉じるまでを 1 行に、日時・入力の最終形・途中の打ち直し（`[{"q", "t": 開いてからの ms}]`）・出した候補（画面の並び順に種類・bundle id かパス・名前・点数・節）・選んだ物とその順位（教えた物は 0）・選ばずに閉じたか・「見つかりません」（全体・アプリの節・ファイルの節）・最後の検索にかかった時間。残す日数より古い行は起動時と 1 日 1 回消す。`raiden-eval --log-eval --store <コピー>` で、選んだ記録を今の並べ方で回し直して当時の順位と比べられる。
+- 動作の記録: `~/Library/Logs/Raiden/raiden.log`（起動・一覧の作り直し・ベクトル化の件数と時間・FSEvents の履歴が途切れて見直した場所・範囲や設定の変更・エラー）。1MB で `raiden.1.log`〜`raiden.5.log` に回し、それより古いものと 30 日より古いものは消す。
+
 ### メモリの設定
 
-メニューバーの「モデルを解放」で、入力欄を閉じてから 5 分 / 30 分でモデルを手放せる（既定は解放しない）。手放した後はホットキーを押した時点で読み直す。
+設定の「一般」か、メニューバーの「モデルを解放」で、入力欄を閉じてから 5 分 / 30 分でモデルを手放せる（既定は解放しない）。手放した後はホットキーを押した時点で読み直す。
 
 ### ログイン時に起動（app/Sources/Raiden/LoginItem.swift）
 
@@ -129,6 +149,7 @@ build/raiden-eval --body body_int8.mlpackage [--units ane|cpu] [--miss] [--reloa
 
 アプリと同じ `Engine.search` で 25 個の曖昧な言い方を回す。例は `raiden-eval` の中の EX だけを使い、保存済みの例は読まない。
 `--store <path>` で SQLite の道筋（覚える → 読み直す → 効く）も試せる。
+`--settings-test --store <コピー>` で、設定の読み書き・検索範囲の差し替え（足したフォルダの物が検索に出る・外したフォルダの物と線が SQLite から消える・除外）・検索の記録の書き込みと読み出しと古い記録の削除・raiden.log の回し方を確かめる。設定とログは一時フォルダ、範囲は `~/Documents/raiden-test-<pid>` と一時フォルダの中に作って最後に消す（本物の settings.json・ログ・DB には触らない）。
 
 2026-11-19 の結果（アプリ 129 個、CPU、1回は 1 文の埋め込み＋並べ替え）:
 

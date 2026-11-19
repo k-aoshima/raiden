@@ -146,6 +146,18 @@ if args.contains("--watch-test") {
     exit(0)
 }
 
+// --settings-test --store <path>: 設定の読み書き・検索範囲の差し替え・検索の記録・動作の記録を確かめる（SettingsTest.swift）
+if args.contains("--settings-test") {
+    try runSettingsTest(embedder: embedder)
+    exit(0)
+}
+
+// --log-eval --store <path>: 検索の記録（search_log）で答え合わせ（SettingsTest.swift）
+if args.contains("--log-eval") {
+    try runLogEval(embedder: embedder, apps: apps)
+    exit(0)
+}
+
 // PyTorch の答えとの突き合わせ（convert.py の reference.json）
 if let b = bge, let d = try? Data(contentsOf: b.modelDir.appendingPathComponent("reference.json")),
    let ref = try? JSONSerialization.jsonObject(with: d) as? [String: Any], let texts = ref["texts"] as? [String] {

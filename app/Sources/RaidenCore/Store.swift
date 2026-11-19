@@ -9,8 +9,8 @@ import SQLite3
 ///   edges  from_id, to_id, kind（example→app の chose、folder→中の物の contains、同じ日に使った物どうしの co_used）,
 ///          weight（選んだ回数など）, last_used
 public final class Store {
-    private var db: OpaquePointer?
-    private let lock = NSLock()
+    var db: OpaquePointer?
+    let lock = NSLock()
     public let url: URL
 
     public static var defaultURL: URL { RaidenPaths.support.appendingPathComponent("raiden.sqlite") }
@@ -44,13 +44,14 @@ public final class Store {
         CREATE INDEX IF NOT EXISTS edges_to ON edges(to_id, kind);
         CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
         """)
+        try exec(Store.searchLogSchema)
     }
 
     deinit { sqlite3_close(db) }
 
     // MARK: - 小道具
 
-    private func exec(_ sql: String) throws {
+    func exec(_ sql: String) throws {
         var err: UnsafeMutablePointer<CChar>?
         if sqlite3_exec(db, sql, nil, nil, &err) != SQLITE_OK {
             let m = err.map { String(cString: $0) } ?? "?"
@@ -61,31 +62,31 @@ public final class Store {
 
     private static let TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-    private func prepare(_ sql: String) -> OpaquePointer? {
+    func prepare(_ sql: String) -> OpaquePointer? {
         var st: OpaquePointer?
         sqlite3_prepare_v2(db, sql, -1, &st, nil)
         return st
     }
 
-    private func bind(_ st: OpaquePointer?, _ i: Int32, _ s: String) {
+    func bind(_ st: OpaquePointer?, _ i: Int32, _ s: String) {
         sqlite3_bind_text(st, i, s, -1, Store.TRANSIENT)
     }
 
-    private func bind(_ st: OpaquePointer?, _ i: Int32, _ v: [Float]) {
+    func bind(_ st: OpaquePointer?, _ i: Int32, _ v: [Float]) {
         _ = v.withUnsafeBytes { sqlite3_bind_blob(st, i, $0.baseAddress, Int32($0.count), Store.TRANSIENT) }
     }
 
-    private func text(_ st: OpaquePointer?, _ i: Int32) -> String {
+    func text(_ st: OpaquePointer?, _ i: Int32) -> String {
         sqlite3_column_text(st, i).map { String(cString: $0) } ?? ""
     }
 
-    private func blob(_ st: OpaquePointer?, _ i: Int32) -> [Float] {
+    func blob(_ st: OpaquePointer?, _ i: Int32) -> [Float] {
         let n = Int(sqlite3_column_bytes(st, i)) / MemoryLayout<Float>.size
         guard n > 0, let p = sqlite3_column_blob(st, i) else { return [] }
         return Array(UnsafeBufferPointer(start: p.assumingMemoryBound(to: Float.self), count: n))
     }
 
-    private var now: Int64 { Int64(Date().timeIntervalSince1970) }
+    var now: Int64 { Int64(Date().timeIntervalSince1970) }
 
     static func hash(_ s: String) -> String {
         // FNV-1a 64bit（変更検知用。暗号用途ではない）
@@ -95,7 +96,7 @@ public final class Store {
     }
 
     /// 点を足すか更新して id を返す（vector が nil なら触らない）
-    private func upsertNode(kind: String, key: String, name: String, description: String,
+    func upsertNode(kind: String, key: String, name: String, description: String,
                             vector: [Float]?, hash: String?) -> Int64 {
         let sql = vector == nil
             ? "INSERT INTO nodes(kind,key,name,description,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(kind,key) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at RETURNING id"
@@ -239,31 +240,51 @@ public final class Store {
     /// ファイル・フォルダの点のベクトルを返す。stamp（説明文の元・日付・大きさ・モデル名のハッシュ）が変わったものだけ
     /// describe で説明文を作り（中身を読むのはここだけ）、embed し直す。消えたパスの点は消す。
     public func fileVectors(_ entries: [FileEntry], stamps: [String], describe: (Int) -> String,
-                            embed: (String) -> [Float], progress: ((Int) -> Void)? = nil) -> (vecs: [[Float]], embedded: Int) {
-        lock.lock(); defer { lock.unlock() }
+                            embed: (String) -> [Float], progress: ((Int, Int) -> Void)? = nil) -> (vecs: [[Float]], embedded: Int) {
+        // ベクトル化（長いと数分）の間は lock を持たない（設定窓・検索の記録・例の保存を止めないため）。書き込みは 100 件ずつ
         var have: [String: (String, [Float])] = [:]
+        lock.lock()
         if let st = prepare("SELECT key, desc_hash, vector FROM nodes WHERE kind IN ('file','folder')") {
             while sqlite3_step(st) == SQLITE_ROW { have[text(st, 0)] = (text(st, 1), blob(st, 2)) }
             sqlite3_finalize(st)
         }
-        try? exec("BEGIN")
+        lock.unlock()
         var out: [[Float]] = []
         var made = 0
+        var pending: [(FileEntry, String, [Float], String)] = []
+        func flush() {
+            guard !pending.isEmpty else { return }
+            lock.lock()
+            try? exec("BEGIN")
+            for (e, d, v, h) in pending {
+                _ = upsertNode(kind: e.isDir ? "folder" : "file", key: e.path, name: e.name, description: d, vector: v, hash: h)
+            }
+            try? exec("COMMIT")
+            lock.unlock()
+            pending.removeAll()
+        }
+        let total = entries.indices.filter { i in !(have[entries[i].path].map { $0.0 == stamps[i] && !$0.1.isEmpty } ?? false) }.count
+        if total > 0 { progress?(0, total) }
         for (i, e) in entries.enumerated() {
             if let old = have[e.path], old.0 == stamps[i], !old.1.isEmpty { out.append(old.1); continue }
             let d = describe(i)
             let v = embed(d)
             out.append(v)
             made += 1
-            _ = upsertNode(kind: e.isDir ? "folder" : "file", key: e.path, name: e.name, description: d, vector: v, hash: stamps[i])
-            if made % 100 == 0 { try? exec("COMMIT"); try? exec("BEGIN"); progress?(made) }
+            pending.append((e, d, v, stamps[i]))
+            if pending.count >= 100 { flush() }
+            if made % 10 == 0 || made == total { progress?(made, total) }
         }
+        flush()
         let live = Set(entries.map(\.path))
+        lock.lock()
+        try? exec("BEGIN")
         if let del = prepare("DELETE FROM nodes WHERE kind IN ('file','folder') AND key = ?") {
             for k in have.keys where !live.contains(k) { sqlite3_reset(del); bind(del, 1, k); sqlite3_step(del) }
             sqlite3_finalize(del)
         }
         try? exec("COMMIT")
+        lock.unlock()
         return (out, made)
     }
 

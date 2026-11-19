@@ -107,7 +107,7 @@ func runFileEval(embedder: Embedder, appQs: [(String, [String])], appEngine: Eng
     let store = try opt("--file-store").map { try Store(url: URL(fileURLWithPath: $0)) } ?? Store()
     let e = Engine(embedder: embedder, store: store)
     t = Date()
-    let made = e.setFiles(entries) { n in FileHandle.standardError.write("  ベクトル化 \(n) 件\n".data(using: .utf8)!) }
+    let made = e.setFiles(entries) { n, total in if n % 100 == 0 || n == total { FileHandle.standardError.write("  ベクトル化 \(n)/\(total) 件\n".data(using: .utf8)!) } }
     let tVec = Date().timeIntervalSince(t)
     let ec = e.fileEdgeCounts
     print("ファイル \(entries.filter { !$0.isDir }.count) 件・フォルダ \(entries.filter(\.isDir).count) 件（一覧 \(f1(tList * 1000))ms）")
