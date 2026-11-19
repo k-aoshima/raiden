@@ -168,9 +168,11 @@ public enum Ranker {
     /// rel: つながりの言い方の anchor / target のベクトル（mix.relation のときだけ使う）
     public static func rank(_ c: Corpus, query q: String, vec v: [Float], mix m: Mix,
                             intent: QueryIntent? = nil, rel: (anchor: [Float], target: [Float])? = nil,
-                            limit: Int = 8) -> [(Int, Float)] {
+                            limit: Int = 8, allow: [Bool]? = nil) -> [(Int, Float)] {
         if m.relation, let it = intent, it.hasRelation, let rel {
-            return rankRelation(c, it, rel, m, limit)
+            // 絞り込み（allow）があるときは全部並べてから当てはまる物だけ残す
+            guard let allow else { return rankRelation(c, it, rel, m, limit) }
+            return Array(rankRelation(c, it, rel, m, c.count).filter { allow[$0.0] }.prefix(limit))
         }
         let n = c.count
         if n == 0 { return [] }
@@ -262,7 +264,7 @@ public enum Ranker {
             if let r = it.range, m.timeFilter {
                 let wantFam = it.families.subtracting(["folder"])
                 nearestFallback = !(0..<n).contains { i in
-                    guard let md = c.meta[i], wantFam.isEmpty || !wantFam.isDisjoint(with: md.families) else { return false }
+                    guard allow?[i] ?? true, let md = c.meta[i], wantFam.isEmpty || !wantFam.isDisjoint(with: md.families) else { return false }
                     return it.download ? r.contains(md.added) : md.times.contains { r.contains($0) }
                 }
             }
@@ -330,6 +332,11 @@ public enum Ranker {
                 for (r, i) in order.enumerated() { score[i] += (m.rrfK + 1) / (m.rrfK + Float(r + 1)) }
             }
             for i in 0..<n { score[i] += bonus[i] + adjust[i] }
+        }
+        // 絞り込み（入力欄のコマンド）: 当てはまらない物は候補から外す
+        if let allow {
+            for i in 0..<n where !allow[i] { score[i] = -.infinity }
+            return topIndices(score, limit).filter { allow[$0] }.map { ($0, score[$0]) }
         }
         return topIndices(score, limit).map { ($0, score[$0]) }
     }

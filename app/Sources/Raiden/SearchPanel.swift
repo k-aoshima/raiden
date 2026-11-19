@@ -218,6 +218,9 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     private var glassView: NSView?
     private var veilView: VeilView?
     private var effectView: NSVisualEffectView?
+    /// 絞り込みのコマンド（-kind ss -date 7d）の一覧・チップ・ゴーストテキスト（FilterUI.swift）
+    let filterInput = FilterInput()
+    var selectedRow: Int { selected }
 
     /// maxRows はアプリ＋ファイルの合計
     static let width: CGFloat = 660, fieldHeight: CGFloat = 60, rowHeight: CGFloat = 48, headerHeight: CGFloat = 26,
@@ -336,6 +339,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             self.openSelected(reveal: true)
             return nil
         }
+        filterInput.attach(self, field: field, content: content)
     }
 
     var isVisible: Bool { panel.isVisible }
@@ -353,6 +357,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
 
     func show() {
         field.stringValue = ""
+        filterInput.reset()
         setResults([], query: "")
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
@@ -387,8 +392,10 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     /// 節ごとに並べる。中身のある節が 1 つだけなら見出しは出さない。
     /// notFound: 出している節が全部見つからない（Engine の判定）。「見つかりません」を出し、候補は薄く下に並べる。
     /// 節ごとの印（ResultSection.faded）は、その節の候補だけ薄くして見出しに「見つかりません」を添える
-    func setResults(_ sections: [ResultSection], query: String, notFound: Bool = false) {
-        guard query == field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+    /// extra: 一番上に足す行（絞り込みの一覧の見出し）。palette: 絞り込みの一覧（出ている間は検索の結果で上書きしない）
+    func setResults(_ sections: [ResultSection], query: String, notFound: Bool = false,
+                    extra: [(NSView, CGFloat)] = [], palette: Bool = false) {
+        guard query == filterInput.currentQuery, palette || filterInput.palette == nil else { return }
         let secs = sections.filter { !$0.items.isEmpty }
         let showHeaders = secs.count > 1 || notFound
         results = []
@@ -406,6 +413,8 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             lines.append(v)
             inner += h
         }
+        let top = palette ? extra : filterInput.topLines(sections: secs, query: query, preparing: !status.stringValue.isEmpty)
+        for (v, h) in top { addLine(v, h) }
         if notFound && !query.isEmpty {
             addLine(LabelLine("見つかりません", symbol: "magnifyingglass", detail: secs.isEmpty ? nil : "近いものを薄く出しています", big: true),
                     Self.messageHeight)
@@ -459,7 +468,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
 
     private func openSelected(reveal: Bool) {
         guard results.indices.contains(selected), let c = results[selected].candidate else { return }
-        let q = field.stringValue
+        let q = QueryFilters.parse(filterInput.currentQuery).text   // 覚えるのはコマンドを抜いた言葉
         hide()
         onOpen?(q, c, reveal)
     }
@@ -467,10 +476,11 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     // MARK: NSTextFieldDelegate
 
     func controlTextDidChange(_ obj: Notification) {
-        onQuery?(field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
+        filterInput.textDidChange()
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
+        if filterInput.handle(sel) { return true }
         switch sel {
         case #selector(NSResponder.moveDown(_:)):
             if !rows.isEmpty { selected = (selected + 1) % rows.count; updateSelection() }

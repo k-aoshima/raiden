@@ -75,6 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // 選んで閉じたときは open が先に記録する。残っていれば選ばずに閉じた
             DispatchQueue.main.async { self?.finishSession(chosen: nil) }
         }
+        panel.filterInput.context = { [weak self] in self?.filesReady == true ? self?.engine?.filterContext : nil }
         panel.setStatus("準備中…", symbol: "hourglass")
         work.async { [weak self] in self?.boot() }
         // 取りこぼしの保険（1 日 1 回、アプリもファイルも全体を見直す）と、古い検索の記録の掃除

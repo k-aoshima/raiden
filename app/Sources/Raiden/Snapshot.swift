@@ -38,6 +38,7 @@ enum Snapshot {
         shoot(dir + "/panel-preparing.png", query: "PDFを見るやつ", sections: [appSec],
               status: ("ファイル準備中… 120/300", "hourglass"))
         shootSettings(dir: dir)
+        FilterSnapshots.run(dir: dir)
     }
 
     /// 設定窓の各画面（settings-scope / general / learning / log.png）。中身はダミーと初期値だけ
@@ -72,7 +73,12 @@ enum Snapshot {
         if let (s, sym) = status { c.setStatus(s, symbol: sym) }
         c.setResults(sections, query: query, notFound: notFound)
         c.select(select)
+        capture(c, path)
+    }
+
+    static func capture(_ c: SearchPanelController, _ path: String) {
         c.panel.contentView?.layoutSubtreeIfNeeded()
+        c.filterInput.updateGhost()   // ゴーストテキストは入力欄の位置が決まってから置く
         let v = c.content
         v.layoutSubtreeIfNeeded()
         let b = v.bounds

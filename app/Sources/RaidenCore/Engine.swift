@@ -78,6 +78,8 @@ public final class Engine {
     private(set) public var files: [FileEntry] = []
     private var fileCorpus = Corpus()
     private var fileIndex: [String: Int] = [:]
+    private var fileKeys: [QueryFilters.FileKeys] = []
+    private var ctxCache: FilterContext?   // filterContext の作り置き（setFiles で捨てる）
 
     public init(embedder: Embedder, store: Store? = nil, useDict: Bool = true) {
         self.embedder = embedder
@@ -177,7 +179,26 @@ public final class Engine {
         if q.isEmpty { return Judged(results: [], noMatch: false, signals: MatchSignals()) }
         var m = appMix
         if !useExamples { m.k = false }
-        return rankAppsJudged(query: q, vec: embedder.embed(q), mix: m, limit: limit)
+        // 入力欄のコマンド（-type app -name …）。コマンドが無ければ今までどおり
+        let f = QueryFilters.parse(query.precomposedStringWithCanonicalMapping)
+        guard f.hasSyntax else { return rankAppsJudged(query: q, vec: embedder.embed(q), mix: m, limit: limit) }
+        var none = Judged<SearchResult>(results: [], noMatch: false, signals: MatchSignals())
+        none.filters = f
+        guard f.allowsApps, f.isActive || !f.text.isEmpty else { return none }
+        lock.lock()
+        let list = apps
+        lock.unlock()
+        let allow = f.isActive ? list.map { f.matches(app: $0) } : nil
+        if f.text.isEmpty {
+            // 言葉が無ければ当てはまるアプリを名前の順に
+            var j = Judged(results: list.indices.filter { allow?[$0] ?? true }.sorted { list[$0].jp < list[$1].jp }
+                .prefix(limit).map { SearchResult(app: list[$0], score: 0) }, noMatch: false, signals: MatchSignals())
+            j.filters = f
+            return j
+        }
+        var j = rankAppsJudged(query: f.text, vec: embedder.embed(f.text), mix: m, limit: limit, allow: allow)
+        j.filters = f
+        return j
     }
 
     /// ベクトルを作り済みの入力で並べる（答え合わせで組み合わせを振るとき用）
@@ -186,11 +207,12 @@ public final class Engine {
     }
 
     /// Ranker で並べ、いつも開くアプリの加点を足して並べ直す（lock の外で呼ぶ）
-    private func rankedApps(_ c: Corpus, top: [String: Int], count: Int, query q: String, vec: [Float], mix: Mix, limit: Int) -> [(Int, Float)] {
+    private func rankedApps(_ c: Corpus, top: [String: Int], count: Int, query q: String, vec: [Float], mix: Mix, limit: Int,
+                            allow: [Bool]? = nil) -> [(Int, Float)] {
         // いつも開くアプリの加点: 全部並べてから足して並べ直す（アプリは百数十個なので軽い）
         let boost = openBonus > 0 ? Set(QueryIntent.parse(q).families.compactMap { top[$0] }) : []
-        if boost.isEmpty { return Ranker.rank(c, query: q, vec: vec, mix: mix, limit: limit) }
-        return Array(Ranker.rank(c, query: q, vec: vec, mix: mix, limit: count)
+        if boost.isEmpty { return Ranker.rank(c, query: q, vec: vec, mix: mix, limit: limit, allow: allow) }
+        return Array(Ranker.rank(c, query: q, vec: vec, mix: mix, limit: count, allow: allow)
             .map { ($0.0, $0.1 + (boost.contains($0.0) ? openBonus : 0)) }
             .sorted { $0.1 > $1.1 }.prefix(limit))
     }
@@ -208,12 +230,15 @@ public final class Engine {
         store.recordOpenedWith(file: path, appKey: key, appName: name)
     }
 
-    public func rankAppsJudged(query q: String, vec: [Float], mix: Mix, limit: Int = 8, rule: NoMatchRule = .apps) -> Judged<SearchResult> {
+    public func rankAppsJudged(query q: String, vec: [Float], mix: Mix, limit: Int = 8, rule: NoMatchRule = .apps,
+                               allow: [Bool]? = nil) -> Judged<SearchResult> {
         lock.lock()
         let c = appCorpus, apps = self.apps, top = topOpener
         lock.unlock()
-        let ranked = rankedApps(c, top: top, count: apps.count, query: q, vec: vec, mix: mix, limit: max(limit, 3))
-        let s = NoMatch.signals(c, query: q, vec: vec, mix: mix, ranked: ranked, rankedNoEx: nil, intent: nil, relation: false)
+        let ok = allow.map { $0.count == apps.count ? $0 : Array(repeating: true, count: apps.count) }
+        let ranked = rankedApps(c, top: top, count: apps.count, query: q, vec: vec, mix: mix, limit: max(limit, 3), allow: ok)
+        if ranked.isEmpty { return Judged(results: [], noMatch: allow != nil, signals: MatchSignals()) }
+        let s = NoMatch.signals(c, query: q, vec: vec, mix: mix, ranked: ranked, rankedNoEx: nil, intent: nil, relation: false, allow: ok)
         return Judged(results: ranked.prefix(limit).map { SearchResult(app: apps[$0.0], score: $0.1) },
                       noMatch: rule.isNoMatch(s), signals: s)
     }
@@ -252,8 +277,11 @@ public final class Engine {
                         added: $0.added, downloaded: $0.downloaded)
         })
         c.addEdges(contains: contains, coUsed: co, coTime: ct)
+        let keys = entries.map(QueryFilters.FileKeys.init)
         lock.lock()
         files = entries
+        fileKeys = keys
+        ctxCache = nil
         fileIndex = Dictionary(entries.enumerated().map { ($1.path, $0) }, uniquingKeysWith: { a, _ in a })
         fileCorpus = c
         lock.unlock()
@@ -288,15 +316,59 @@ public final class Engine {
     }
 
     /// searchFiles と同じ並びに「見つからない」の印を付けて返す（弾いても候補は消さない）
+    /// 値の候補の件数を数えるための手元の一覧（入力欄の「-」の一覧で使う）
+    public var filterContext: FilterContext {
+        lock.lock()
+        if let c = ctxCache, c.appCount == apps.count { lock.unlock(); return c }
+        let fs = files, keys = fileKeys, n = apps.count
+        lock.unlock()
+        let c = FilterContext(files: fs, keys: keys.count == fs.count ? keys : nil, appCount: n)
+        lock.lock(); if fs.count == files.count { ctxCache = c }; lock.unlock()
+        return c
+    }
+
     public func searchFilesJudged(_ query: String, limit: Int = 8, now: Date = Date()) -> Judged<FileResult> {
         let q = query.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
         if q.isEmpty { return Judged(results: [], noMatch: false, signals: MatchSignals()) }
+        // 入力欄のコマンド（-kind ss -date 7d …）。コマンドが無ければ今までどおり
+        let f = QueryFilters.parse(query.precomposedStringWithCanonicalMapping, now: now)
+        if f.hasSyntax { return searchFilesFiltered(f, limit: limit, now: now) }
         let it = QueryIntent.parse(q, now: now)
         var rel: ([Float], [Float])?
         if fileMix.relation && it.hasRelation {
             rel = (embedder.embed(it.anchor), embedder.embed(it.target.isEmpty ? q : it.target))
         }
         return rankFilesJudged(query: q, vec: embedder.embed(q), mix: fileMix, intent: it, rel: rel, limit: limit)
+    }
+
+    /// コマンド付きの入力: 当てはまる物だけを候補にする（確実な絞り込み）。
+    /// 残りの文が空なら新しい順（使った日・変更日の新しい方）。「見つからない」の判定は残った物の中で行う。
+    /// 当てはまる物が 0 件なら results は空で noMatch（画面は「条件に合う物はありません」）
+    func searchFilesFiltered(_ f: QueryFilters, limit: Int, now: Date) -> Judged<FileResult> {
+        var none = Judged<FileResult>(results: [], noMatch: false, signals: MatchSignals())
+        none.filters = f
+        guard f.allowsFiles, f.isActive || !f.text.isEmpty else { return none }
+        lock.lock()
+        let fs = files, keys = fileKeys
+        lock.unlock()
+        let allow: [Bool]? = f.isActive ? fs.indices.map { f.matches(fs[$0], keys: keys.count == fs.count ? keys[$0] : nil) } : nil
+        if let allow, !allow.contains(true) { none = Judged(results: [], noMatch: true, signals: MatchSignals()); none.filters = f; return none }
+        var j: Judged<FileResult>
+        if f.text.isEmpty {
+            let order = fs.indices.filter { allow?[$0] ?? true }.sorted {
+                let a = max(fs[$0].lastUsed, fs[$0].mtime), b = max(fs[$1].lastUsed, fs[$1].mtime)
+                return a != b ? a > b : fs[$0].path < fs[$1].path
+            }
+            j = Judged(results: order.prefix(limit).map { FileResult(file: fs[$0], score: 0) }, noMatch: false, signals: MatchSignals())
+        } else {
+            let t = f.text
+            let it = QueryIntent.parse(t, now: now)
+            var rel: ([Float], [Float])?
+            if fileMix.relation && it.hasRelation { rel = (embedder.embed(it.anchor), embedder.embed(it.target.isEmpty ? t : it.target)) }
+            j = rankFilesJudged(query: t, vec: embedder.embed(t), mix: fileMix, intent: it, rel: rel, limit: limit, allow: allow)
+        }
+        j.filters = f
+        return j
     }
 
     public func rankFiles(query q: String, vec: [Float], mix: Mix, intent: QueryIntent?,
@@ -309,19 +381,20 @@ public final class Engine {
 
     public func rankFilesJudged(query q: String, vec: [Float], mix: Mix, intent: QueryIntent?,
                                 rel: (anchor: [Float], target: [Float])? = nil, limit: Int = 8,
-                                rule: NoMatchRule = .files) -> Judged<FileResult> {
+                                rule: NoMatchRule = .files, allow: [Bool]? = nil) -> Judged<FileResult> {
         lock.lock()
         let c = fileCorpus, fs = files
         lock.unlock()
-        let ranked = Ranker.rank(c, query: q, vec: vec, mix: mix, intent: intent, rel: rel, limit: max(limit, 3))
+        let allow = allow.flatMap { $0.count == fs.count ? $0 : nil }
+        let ranked = Ranker.rank(c, query: q, vec: vec, mix: mix, intent: intent, rel: rel, limit: max(limit, 3), allow: allow)
         let relation = mix.relation && (intent?.hasRelation ?? false) && rel != nil
         // 1 位と 2 位の差は例を抜いて見る（弱い例が 1 件だけ点数を押し上げて差が開くのを避ける。並べ替えは 1ms ほど）
         var noEx: [(Int, Float)]?
         if mix.k && !c.exVecs.isEmpty && !relation {
             var m0 = mix; m0.k = false
-            noEx = Ranker.rank(c, query: q, vec: vec, mix: m0, intent: intent, rel: rel, limit: 2)
+            noEx = Ranker.rank(c, query: q, vec: vec, mix: m0, intent: intent, rel: rel, limit: 2, allow: allow)
         }
-        let s = NoMatch.signals(c, query: q, vec: vec, mix: mix, ranked: ranked, rankedNoEx: noEx, intent: intent, relation: relation)
+        let s = NoMatch.signals(c, query: q, vec: vec, mix: mix, ranked: ranked, rankedNoEx: noEx, intent: intent, relation: relation, allow: allow)
         return Judged(results: ranked.prefix(limit).map { FileResult(file: fs[$0.0], score: $0.1) },
                       noMatch: rule.isNoMatch(s), signals: s)
     }
