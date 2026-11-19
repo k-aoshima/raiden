@@ -33,6 +33,7 @@ final class ResultRow: NSView {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
+        hint.setContentCompressionResistancePriority(.required, for: .horizontal)
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -59,6 +60,51 @@ final class ResultRow: NSView {
     override func mouseDown(with event: NSEvent) { onClick?() }
 }
 
+/// 節の見出し（「アプリ」「ファイル」）。選べない
+final class SectionHeader: NSView {
+    init(_ text: String, symbol: String) {
+        super.init(frame: .zero)
+        let glyph = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: text) ?? NSImage())
+        glyph.symbolConfiguration = .init(pointSize: 10, weight: .semibold)
+        glyph.contentTintColor = .tertiaryLabelColor
+        let label = NSTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: 11, weight: .semibold)
+        label.textColor = .tertiaryLabelColor
+        for v in [glyph, label] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(v)
+        }
+        NSLayoutConstraint.activate([
+            glyph.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            glyph.centerYAnchor.constraint(equalTo: centerYAnchor, constant: 1),
+            label.leadingAnchor.constraint(equalTo: glyph.trailingAnchor, constant: 5),
+            label.centerYAnchor.constraint(equalTo: glyph.centerYAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+}
+
+/// 候補 1 件。アプリかファイル・フォルダ
+enum Candidate {
+    case app(SearchResult)
+    case file(FileResult)
+
+    var path: String {
+        switch self {
+        case .app(let r): return r.app.path
+        case .file(let r): return r.file.path
+        }
+    }
+}
+
+/// 一覧の 1 節（見出し＋候補）
+struct ResultSection {
+    var title: String
+    var symbol: String
+    var items: [Candidate]
+}
+
 /// 中央に出る入力欄と候補の一覧
 final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelegate {
     let panel: KeyPanel
@@ -66,15 +112,18 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     private let status = NSTextField(labelWithString: "")
     private let stack = NSStackView()
     private var rows: [ResultRow] = []
-    private var results: [SearchResult] = []
+    private var headers: [SectionHeader] = []
+    private var results: [Candidate] = []
     private var selected = 0
     private var iconCache: [String: NSImage] = [:]
     private var heightConstraint: NSLayoutConstraint!
 
-    static let width: CGFloat = 640, fieldHeight: CGFloat = 56, rowHeight: CGFloat = 46, maxRows = 8
+    /// maxRows はアプリ＋ファイルの合計
+    static let width: CGFloat = 640, fieldHeight: CGFloat = 56, rowHeight: CGFloat = 46, headerHeight: CGFloat = 24, maxRows = 9
 
     var onQuery: ((String) -> Void)?
-    var onOpen: ((String, SearchResult) -> Void)?
+    /// (入力, 候補, ⌘ を押していたか)。⌘Enter は Finder に表示
+    var onOpen: ((String, Candidate, Bool) -> Void)?
     var onHide: (() -> Void)?
 
     override init() {
@@ -107,7 +156,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         field.drawsBackground = false
         field.focusRingType = .none
         field.font = .systemFont(ofSize: 24, weight: .regular)
-        field.placeholderString = "アプリを探す（例: PDFを見るやつ）"
+        field.placeholderString = "アプリ・ファイルを探す（例: PDFを見るやつ）"
         field.delegate = self
         field.cell?.usesSingleLineMode = true
         status.font = .systemFont(ofSize: 12)
@@ -142,6 +191,16 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             heightConstraint,
         ])
         status.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        // ⌘Enter は入力欄の doCommandBy に来ないことがあるので、ここで拾う（日本語入力の変換中は触らない）
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] ev in
+            guard let self, self.panel.isKeyWindow,
+                  ev.keyCode == 36 || ev.keyCode == 76,
+                  ev.modifierFlags.contains(.command) else { return ev }
+            if let tv = self.panel.firstResponder as? NSTextView, tv.hasMarkedText() { return ev }
+            self.openSelected(reveal: true)
+            return nil
+        }
     }
 
     var isVisible: Bool { panel.isVisible }
@@ -149,7 +208,6 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     func show() {
         field.stringValue = ""
         setResults([], query: "")
-        layoutPanel(rows: 0)
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(field)
@@ -163,10 +221,10 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
 
     func setStatus(_ s: String) { status.stringValue = s }
 
-    private func layoutPanel(rows n: Int) {
-        let listH = n > 0 ? CGFloat(n) * Self.rowHeight + 10 : 0
-        heightConstraint.constant = n > 0 ? CGFloat(n) * Self.rowHeight : 0
-        let h = Self.fieldHeight + listH
+    private func layoutPanel(rows n: Int, headers hn: Int) {
+        let inner = CGFloat(n) * Self.rowHeight + CGFloat(hn) * Self.headerHeight
+        heightConstraint.constant = n > 0 ? inner : 0
+        let h = Self.fieldHeight + (n > 0 ? inner + 10 : 0)
         let screen = NSScreen.main ?? NSScreen.screens[0]
         let vf = screen.visibleFrame
         // 上端の位置を固定して下に伸ばす（候補の数で入力欄が動かないように）
@@ -174,31 +232,64 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         panel.setFrame(NSRect(x: vf.midX - Self.width / 2, y: top - h, width: Self.width, height: h), display: true)
     }
 
-    func setResults(_ rs: [SearchResult], query: String) {
+    /// 節ごとに並べる。中身のある節が 1 つだけなら見出しは出さない
+    func setResults(_ sections: [ResultSection], query: String) {
         guard query == field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
-        results = Array(rs.prefix(Self.maxRows))
+        let secs = sections.filter { !$0.items.isEmpty }
+        let showHeaders = secs.count > 1
+        results = []
         selected = 0
         rows.forEach { $0.removeFromSuperview() }
-        rows = results.enumerated().map { i, r in
-            let row = ResultRow()
-            row.translatesAutoresizingMaskIntoConstraints = false
-            row.title.stringValue = r.app.jp == r.app.name ? r.app.jp : "\(r.app.jp)  \(r.app.name)"
-            row.sub.stringValue = r.app.path
-            row.icon.image = icon(r.app.path)
-            row.onClick = { [weak self] in self?.selected = i; self?.openSelected() }
-            stack.addArrangedSubview(row)
-            row.widthAnchor.constraint(equalToConstant: Self.width).isActive = true
-            row.heightAnchor.constraint(equalToConstant: Self.rowHeight).isActive = true
-            return row
+        headers.forEach { $0.removeFromSuperview() }
+        rows = []
+        headers = []
+        for sec in secs {
+            if showHeaders {
+                let h = SectionHeader(sec.title, symbol: sec.symbol)
+                h.translatesAutoresizingMaskIntoConstraints = false
+                stack.addArrangedSubview(h)
+                h.widthAnchor.constraint(equalToConstant: Self.width).isActive = true
+                h.heightAnchor.constraint(equalToConstant: Self.headerHeight).isActive = true
+                headers.append(h)
+            }
+            for c in sec.items {
+                let i = results.count
+                results.append(c)
+                let row = ResultRow()
+                row.translatesAutoresizingMaskIntoConstraints = false
+                switch c {
+                case .app(let r):
+                    row.title.stringValue = r.app.jp == r.app.name ? r.app.jp : "\(r.app.jp)  \(r.app.name)"
+                    row.sub.stringValue = r.app.path
+                    row.hint.stringValue = "開く ↩"
+                case .file(let r):
+                    row.title.stringValue = r.file.name
+                    row.sub.stringValue = Self.shortParent(r.file.path)
+                    row.hint.stringValue = r.file.isDir ? "Finder で開く ↩" : "開く ↩　Finder ⌘↩"
+                }
+                row.icon.image = icon(c.path)
+                row.onClick = { [weak self] in self?.selected = i; self?.openSelected(reveal: false) }
+                stack.addArrangedSubview(row)
+                row.widthAnchor.constraint(equalToConstant: Self.width).isActive = true
+                row.heightAnchor.constraint(equalToConstant: Self.rowHeight).isActive = true
+                rows.append(row)
+            }
         }
         updateSelection()
-        layoutPanel(rows: results.count)
+        layoutPanel(rows: rows.count, headers: headers.count)
+    }
+
+    /// 親フォルダまでのパスを ~ で短くする（~/Documents/仕事）
+    static func shortParent(_ path: String) -> String {
+        ((path as NSString).deletingLastPathComponent as NSString).abbreviatingWithTildeInPath
     }
 
     private func icon(_ path: String) -> NSImage {
         if let i = iconCache[path] { return i }
         let i = NSWorkspace.shared.icon(forFile: path)
         i.size = NSSize(width: 64, height: 64)
+        // ファイルは数が多いので、溜まりすぎたら捨てる
+        if iconCache.count > 2000 { iconCache.removeAll() }
         iconCache[path] = i
         return i
     }
@@ -207,12 +298,12 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         for (i, r) in rows.enumerated() { r.selected = i == selected }
     }
 
-    private func openSelected() {
+    private func openSelected(reveal: Bool) {
         guard results.indices.contains(selected) else { return }
         let q = field.stringValue
         let r = results[selected]
         hide()
-        onOpen?(q, r)
+        onOpen?(q, r, reveal)
     }
 
     // MARK: NSTextFieldDelegate
@@ -231,7 +322,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             return true
         case #selector(NSResponder.insertNewline(_:)):
             // 日本語入力の変換中の Enter は確定に使う（ここには来ない）
-            openSelected()
+            openSelected(reveal: NSApp.currentEvent?.modifierFlags.contains(.command) ?? false)
             return true
         case #selector(NSResponder.cancelOperation(_:)):
             hide()

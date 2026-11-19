@@ -201,6 +201,39 @@ public final class Store {
         try? exec("COMMIT")
     }
 
+    /// 「入力文 q でファイル・フォルダ path を選んだ」を記録する。例の点を足し、例 → ファイルの chose の線の重みを 1 増やす。
+    /// ファイルの点が無い（まだベクトル化していない）ときは、ベクトル無しの点を作っておく（次の fileVectors で埋まる）。
+    public func recordFileChoice(query q: String, path: String, isDir: Bool, name: String, vector: [Float], model: String) {
+        lock.lock(); defer { lock.unlock() }
+        try? exec("BEGIN")
+        let ex = upsertNode(kind: "example", key: q, name: q, description: q, vector: vector,
+                            hash: Store.hash(model + "\n" + q))
+        let fid = upsertNode(kind: isDir ? "folder" : "file", key: path, name: name, description: "", vector: nil, hash: nil)
+        if ex >= 0, fid >= 0, let st = prepare("""
+            INSERT INTO edges(from_id, to_id, kind, weight, last_used) VALUES(?,?,'chose',1,?)
+            ON CONFLICT(from_id, to_id, kind) DO UPDATE SET weight = weight + 1, last_used = excluded.last_used
+            """) {
+            sqlite3_bind_int64(st, 1, ex); sqlite3_bind_int64(st, 2, fid); sqlite3_bind_int64(st, 3, now)
+            sqlite3_step(st)
+            sqlite3_finalize(st)
+        }
+        try? exec("COMMIT")
+    }
+
+    /// ファイル・フォルダを選んだ例を（入力文, パス）で全部読む（Engine.addFileExamples に渡す用）
+    public func fileExamples() -> [(String, String)] {
+        lock.lock(); defer { lock.unlock() }
+        guard let st = prepare("""
+            SELECT x.key, f.key FROM edges e JOIN nodes x ON x.id = e.from_id JOIN nodes f ON f.id = e.to_id
+            WHERE e.kind='chose' AND x.kind='example' AND f.kind IN ('file','folder')
+            ORDER BY e.last_used
+            """) else { return [] }
+        defer { sqlite3_finalize(st) }
+        var out: [(String, String)] = []
+        while sqlite3_step(st) == SQLITE_ROW { out.append((text(st, 0), text(st, 1))) }
+        return out
+    }
+
     // MARK: - ファイル・フォルダの点と線
 
     /// ファイル・フォルダの点のベクトルを返す。stamp（説明文の元・日付・大きさ・モデル名のハッシュ）が変わったものだけ

@@ -3,7 +3,7 @@
 「PDFを見るやつ」「黒い画面でコマンド打つやつ」のような曖昧な言い方で、Mac に入っているアプリを探して開くランチャー（最小版）。
 
 - メニューバー常駐（Dock には出ない）。**⌥Space** で画面中央に入力欄が出る（取れなければ ⌃⌥⌘Space）。
-- 打つたびに候補を最大 8 件、アイコン付きで出す。↑↓ で選んで Enter で開く。Esc で閉じる。
+- 打つのが止まって 0.1 秒たったら、アプリとファイル・フォルダの候補を合わせて最大 9 件、アイコン付きで出す。↑↓ で選んで Enter で開く（フォルダは Finder で開く）。⌘Enter で Finder に表示。Esc で閉じる。
 - 文章を作るモデル（LLM）は使わない。使うのは文の埋め込みモデル **BAAI/bge-m3** だけで、Core ML に変換してアプリの中で動かす（Python も常駐ヘルパーも無し）。
 - 選んで開いた「入力した文 → アプリ」を覚え、次から k近傍法で効かせる。使うほど当たる。
 
@@ -60,7 +60,11 @@ HF_HOME=/Volumes/SSD/hf uv run python export_tokenizer.py --out /Volumes/SSD/rai
 
 ### ファイルとフォルダ（app/Sources/RaidenCore/FileCatalog.swift, QueryIntent.swift, Ranker.swift）
 
-Engine の `searchFiles` で探す（アプリの画面にはまだつないでいない）。
+Engine の `searchFiles` で探す。
+
+- 入力欄では「アプリ」と「ファイル・フォルダ」の節に分けて出す。点数の付け方が違う（アプリは k近傍法の重み 1.0、ファイルは時間・種類・フォルダの加点）ので、点数では混ぜない。ふだんはアプリの節が先で、時間・種類・つながりの言葉があればファイルの節が先。先の節は最大 4 件、残りを後の節に回す。
+- 一覧は起動時と 30 分おき（と入力欄を開いた時に 30 分以上たっていれば）に作り直す。初回のベクトル化の間は「ファイル準備中…」でアプリだけ出す。
+- 選んだ「入力 → ファイル」は例の点から chose の線で残し（`Store.recordFileChoice`）、一覧を作り直すたびに `Engine.addFileExamples` で入れ直す。
 
 - 対象は `~/Documents`・`~/Downloads`・`~/Desktop`・`~/Documents/Obsidian Vault`。隠しファイル・パッケージの中・`.app`・node_modules / .venv などは除く。パスは NFC に揃える。
 - 説明文: 名前・Spotlight の種類名（kMDItemKind）・種類の日本語と英語・親フォルダ名・中身の頭 260 字（PDF は PDFKit、txt / md / csv / html はそのまま、docx は AppKit）。フォルダは中の種類の数と名前 10 個。
