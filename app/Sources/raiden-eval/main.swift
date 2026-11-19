@@ -121,6 +121,12 @@ if args.contains("--nl") {
 }
 print("モデル \(embedder.identifier)  読み込み \(String(format: "%.2f", Date().timeIntervalSince(t0)))s  読み込み後メモリ \(String(format: "%.0f", physFootprintMB()))MB")
 
+// --watch-test --store <path>: FSEvents で変化が検索にすぐ出るかを確かめる（WatchTest.swift）
+if args.contains("--watch-test") {
+    try runWatchTest(embedder: embedder)
+    exit(0)
+}
+
 // PyTorch の答えとの突き合わせ（convert.py の reference.json）
 if let b = bge, let d = try? Data(contentsOf: b.modelDir.appendingPathComponent("reference.json")),
    let ref = try? JSONSerialization.jsonObject(with: d) as? [String: Any], let texts = ref["texts"] as? [String] {
