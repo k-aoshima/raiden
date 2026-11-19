@@ -179,7 +179,7 @@ public final class Engine {
         if q.isEmpty { return Judged(results: [], noMatch: false, signals: MatchSignals()) }
         var m = appMix
         if !useExamples { m.k = false }
-        // 入力欄のコマンド（-type app -name …）。コマンドが無ければ今までどおり
+        // 入力欄のコマンド（#type app #name …）。コマンドが無ければ今までどおり
         let f = QueryFilters.parse(query.precomposedStringWithCanonicalMapping)
         guard f.hasSyntax else { return rankAppsJudged(query: q, vec: embedder.embed(q), mix: m, limit: limit) }
         var none = Judged<SearchResult>(results: [], noMatch: false, signals: MatchSignals())
@@ -330,7 +330,7 @@ public final class Engine {
     public func searchFilesJudged(_ query: String, limit: Int = 8, now: Date = Date()) -> Judged<FileResult> {
         let q = query.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
         if q.isEmpty { return Judged(results: [], noMatch: false, signals: MatchSignals()) }
-        // 入力欄のコマンド（-kind ss -date 7d …）。コマンドが無ければ今までどおり
+        // 入力欄のコマンド（#kind ss #date 7d …）。コマンドが無ければ今までどおり
         let f = QueryFilters.parse(query.precomposedStringWithCanonicalMapping, now: now)
         if f.hasSyntax { return searchFilesFiltered(f, limit: limit, now: now) }
         let it = QueryIntent.parse(q, now: now)

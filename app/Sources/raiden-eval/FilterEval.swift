@@ -34,50 +34,50 @@ func runFilterTests() {
     func inRange(_ f: QueryFilters, _ c: QueryFilters.Command, _ day: String) -> Bool { f.dates[c]?.range.contains(ts(day)) ?? false }
 
     // コマンドの無い入力は今までどおり
-    for q in ["PDFを見るやつ", "kobako-devlog", "2026-11 の請求書", "1/2", "and/or", "C-3PO", "-1 と -2", "昨日のスクショ"] {
+    for q in ["PDFを見るやつ", "kobako-devlog", "2026-11 の請求書", "1/2", "and/or", "C-3PO", "-1 と -2", "C# の本", "#1 と #2", "-kind pdf", "昨日のスクショ"] {
         let f = p(q)
         expect(!f.hasSyntax && f.text == q && !f.isActive, "コマンド無し「\(q)」→ hasSyntax \(f.hasSyntax) text「\(f.text)」")
     }
-    var f = p("-date 7d -kind ss 請求書")
+    var f = p("#date 7d #kind ss 請求書")
     expect(f.text == "請求書", "残りの文 「\(f.text)」")
     expect(f.kinds == ["screenshot"], "種類 \(f.kinds)")
     expect(inRange(f, .date, "2026-11-12 09:00") && inRange(f, .date, "2026-11-19 23:00") && !inRange(f, .date, "2026-11-11 23:00"),
            "直近7日の範囲")
     expect(f.chips.map(\.label) == ["期間: 直近7日", "種類: スクショ"], "チップ \(f.chips.map(\.label))")
-    f = p("請求書 -kind pdf -date 2026-09")
+    f = p("請求書 #kind pdf #date 2026-09")
     expect(f.text == "請求書" && f.kinds == ["pdf"] && inRange(f, .date, "2026-09-30 23:59") && !inRange(f, .date, "2026-10-01 00:00"), "末尾のコマンド")
-    f = p("-k pdf -k doc"); expect(f.kinds == ["pdf", "doc"] && f.chips.map(\.label) == ["種類: PDF・Word・文書"], "-k を 2 回は「または」 \(f.chips.map(\.label))")
-    f = p("-kind pdf,docx"); expect(f.kinds == ["pdf"] && f.kindExts == ["docx"] && f.chips.map(\.label) == ["種類: PDF・.docx"], "-kind の種類でない値は拡張子 \(f.chips.map(\.label))")
-    f = p("-ext pdf,docx -e key"); expect(f.exts == ["pdf", "docx", "key"] && f.chips.map(\.label) == ["拡張子: .pdf・.docx・.key"], "-ext のカンマと 2 回")
-    f = p("-date today -date yesterday"); expect(inRange(f, .date, "2026-11-18 10:00") && !inRange(f, .date, "2026-11-19 10:00"), "-date 2 回は後で上書き")
-    f = p("-date 11-14..11-16"); expect(inRange(f, .date, "2026-11-14 00:00") && inRange(f, .date, "2026-11-16 23:59") && !inRange(f, .date, "2026-11-17 00:00") && !inRange(f, .date, "2026-11-13 23:59"), "範囲")
-    f = p("-date 2026-11-14"); expect(inRange(f, .date, "2026-11-14 12:00") && !inRange(f, .date, "2026-11-15 00:00"), "その日")
-    f = p("-date 12-25"); expect(inRange(f, .date, "2025-12-25 12:00"), "まだ来ていない月日は去年")
-    f = p("-date 先週"); expect(inRange(f, .date, "2026-11-10 12:00") && !inRange(f, .date, "2026-11-17 12:00"), "先週（月曜はじまりでなくても 11/10 は先週）")
-    f = p("-date 今月"); expect(inRange(f, .date, "2026-11-01 00:00") && !inRange(f, .date, "2026-10-31 23:59"), "今月")
-    f = p("-date 先月"); expect(inRange(f, .date, "2026-10-15 00:00") && !inRange(f, .date, "2026-11-01 00:00"), "先月")
-    f = p("-date 2w"); expect(inRange(f, .date, "2026-11-05 01:00") && !inRange(f, .date, "2026-11-04 23:00"), "2w")
-    f = p("-date 3m"); expect(inRange(f, .date, "2026-08-19 12:00") && !inRange(f, .date, "2026-08-18 12:00"), "3m")
-    f = p("-date 1y"); expect(inRange(f, .date, "2025-11-20 12:00"), "1y")
-    f = p("-m 昨日 -c 2026"); expect(inRange(f, .modified, "2026-11-18 12:00") && inRange(f, .created, "2026-03-01 00:00"), "-m -c")
-    f = p("-type d -path Desktop"); expect(f.types == ["d"] && f.paths == ["Desktop"] && f.chips.map(\.label) == ["フォルダだけ", "場所: Desktop"], "-type d -path")
-    f = p("-t f,d"); expect(f.types == ["f", "d"], "-t f,d")
-    f = p("-in ~/Desktop -p \"Obsidian Vault\" メモ"); expect(f.paths == ["~/Desktop", "Obsidian Vault"] && f.text == "メモ", "-in と引用符 \(f.paths) 「\(f.text)」")
-    f = p("-name 請求 -n 見積"); expect(f.names == ["請求", "見積"], "-name")
-    f = p("-種類 pdf -日付 今日 -場所 Desktop -名前 請求"); expect(f.kinds == ["pdf"] && f.dates[.date] != nil && f.paths == ["Desktop"] && f.names == ["請求"], "日本語の名前")
-    f = p("-type app -date 7d"); expect(!f.allowsApps && f.notes.contains { $0.contains("一緒に使えません") }, "アプリと -date はぶつかる \(f.notes)")
-    f = p("-type app"); expect(f.allowsApps && !f.allowsFiles, "-type app はアプリだけ")
-    f = p("-type d -date 7d"); expect(!f.allowsApps && f.allowsFiles && f.notes.isEmpty, "-type d と -date は使える")
-    f = p("-size 3m 請求書"); expect(f.notes == ["-size は使えません"] && !f.isActive && f.text == "3m 請求書", "知らないコマンド \(f.notes) 「\(f.text)」")
-    f = p("-date あした 請求書"); expect(f.notes == ["-date の「あした」は読めません"] && !f.isActive && f.text == "請求書", "読めない値 \(f.notes)")
+    f = p("#k pdf #k doc"); expect(f.kinds == ["pdf", "doc"] && f.chips.map(\.label) == ["種類: PDF・Word・文書"], "#k を 2 回は「または」 \(f.chips.map(\.label))")
+    f = p("#kind pdf,docx"); expect(f.kinds == ["pdf"] && f.kindExts == ["docx"] && f.chips.map(\.label) == ["種類: PDF・.docx"], "#kind の種類でない値は拡張子 \(f.chips.map(\.label))")
+    f = p("#ext pdf,docx #e key"); expect(f.exts == ["pdf", "docx", "key"] && f.chips.map(\.label) == ["拡張子: .pdf・.docx・.key"], "#ext のカンマと 2 回")
+    f = p("#date today #date yesterday"); expect(inRange(f, .date, "2026-11-18 10:00") && !inRange(f, .date, "2026-11-19 10:00"), "#date 2 回は後で上書き")
+    f = p("#date 11-14..11-16"); expect(inRange(f, .date, "2026-11-14 00:00") && inRange(f, .date, "2026-11-16 23:59") && !inRange(f, .date, "2026-11-17 00:00") && !inRange(f, .date, "2026-11-13 23:59"), "範囲")
+    f = p("#date 2026-11-14"); expect(inRange(f, .date, "2026-11-14 12:00") && !inRange(f, .date, "2026-11-15 00:00"), "その日")
+    f = p("#date 12-25"); expect(inRange(f, .date, "2025-12-25 12:00"), "まだ来ていない月日は去年")
+    f = p("#date 先週"); expect(inRange(f, .date, "2026-11-10 12:00") && !inRange(f, .date, "2026-11-17 12:00"), "先週（月曜はじまりでなくても 11/10 は先週）")
+    f = p("#date 今月"); expect(inRange(f, .date, "2026-11-01 00:00") && !inRange(f, .date, "2026-10-31 23:59"), "今月")
+    f = p("#date 先月"); expect(inRange(f, .date, "2026-10-15 00:00") && !inRange(f, .date, "2026-11-01 00:00"), "先月")
+    f = p("#date 2w"); expect(inRange(f, .date, "2026-11-05 01:00") && !inRange(f, .date, "2026-11-04 23:00"), "2w")
+    f = p("#date 3m"); expect(inRange(f, .date, "2026-08-19 12:00") && !inRange(f, .date, "2026-08-18 12:00"), "3m")
+    f = p("#date 1y"); expect(inRange(f, .date, "2025-11-20 12:00"), "1y")
+    f = p("#m 昨日 #c 2026"); expect(inRange(f, .modified, "2026-11-18 12:00") && inRange(f, .created, "2026-03-01 00:00"), "#m #c")
+    f = p("#type d #path Desktop"); expect(f.types == ["d"] && f.paths == ["Desktop"] && f.chips.map(\.label) == ["フォルダだけ", "場所: Desktop"], "#type d #path")
+    f = p("#t f,d"); expect(f.types == ["f", "d"], "#t f,d")
+    f = p("#in ~/Desktop #p \"Obsidian Vault\" メモ"); expect(f.paths == ["~/Desktop", "Obsidian Vault"] && f.text == "メモ", "#in と引用符 \(f.paths) 「\(f.text)」")
+    f = p("#name 請求 #n 見積"); expect(f.names == ["請求", "見積"], "#name")
+    f = p("#種類 pdf #日付 今日 #場所 Desktop #名前 請求"); expect(f.kinds == ["pdf"] && f.dates[.date] != nil && f.paths == ["Desktop"] && f.names == ["請求"], "日本語の名前")
+    f = p("#type app #date 7d"); expect(!f.allowsApps && f.notes.contains { $0.contains("一緒に使えません") }, "アプリと #date はぶつかる \(f.notes)")
+    f = p("#type app"); expect(f.allowsApps && !f.allowsFiles, "#type app はアプリだけ")
+    f = p("#type d #date 7d"); expect(!f.allowsApps && f.allowsFiles && f.notes.isEmpty, "#type d と #date は使える")
+    f = p("#size 3m 請求書"); expect(f.notes == ["#size は使えません"] && !f.isActive && f.text == "3m 請求書", "知らないコマンド \(f.notes) 「\(f.text)」")
+    f = p("#date あした 請求書"); expect(f.notes == ["#date の「あした」は読めません"] && !f.isActive && f.text == "請求書", "読めない値 \(f.notes)")
     // 打っている途中は知らせない・絞らない
-    for q in ["-", "請求書 -", "-da", "-date", "請求書 -date", "-date 2026-", "-kind sc"] {
+    for q in ["#", "請求書 #", "＃", "#da", "#date", "請求書 #date", "#date 2026-", "#kind sc"] {
         let g = p(q)
         expect(g.notes.isEmpty && !g.isActive && g.pending != nil, "打ちかけ「\(q)」→ notes \(g.notes) pending \(g.pending ?? "nil")")
     }
-    expect(p("請求書 -").text == "請求書", "打ちかけの「-」は残りの文に入れない")
-    expect(p("-date 7d").isActive, "最後の値でも読めれば効く")
-    expect(p("-help").help && p("-h").help, "-help")
+    expect(p("請求書 #").text == "請求書", "打ちかけの「#」は残りの文に入れない")
+    expect(p("#date 7d").isActive, "最後の値でも読めれば効く")
+    expect(p("#help").help && p("#h").help, "#help")
 
     // 当てはまるか
     let home = NSHomeDirectory()
@@ -85,116 +85,119 @@ func runFilterTests() {
     let pdf = FileEntry(path: home + "/Documents/仕事/請求書_9月.pdf", mtime: ts("2026-09-10 10:00"), created: ts("2026-09-01 10:00"))
     let dir = FileEntry(path: home + "/Documents/仕事", isDir: true, mtime: ts("2026-11-18 10:00"))
     let md = FileEntry(path: home + "/Documents/Obsidian Vault/メモ.md", mtime: ts("2026-11-19 09:00"))
-    expect(p("-kind ss").matches(ss) && !p("-kind ss").matches(pdf), "スクショ")
-    expect(p("-kind image").matches(ss), "スクショは画像でも当たり")
-    expect(p("-kind md").matches(md) && p("-ext md").matches(md) && !p("-ext md").matches(pdf), "md")
-    expect(p("-type d").matches(dir) && !p("-type d").matches(pdf) && !p("-type f").matches(dir), "-type")
-    expect(p("-kind folder").matches(dir) && !p("-kind pdf").matches(dir), "-kind folder")
-    expect(p("-path 仕事").matches(pdf) && !p("-path 仕事").matches(dir), "-path 名前は下だけ（フォルダ自身は入らない）")
-    expect(p("-path ~/Documents").matches(pdf) && !p("-path ~/Desktop").matches(pdf) && p("-path ~/Desktop").matches(ss), "-path ~/")
-    expect(p("-path documents/仕事").matches(pdf), "-path パスの一部")
-    expect(p("-path \"Obsidian Vault\"").matches(md) && p("-path obsidian").matches(md), "-path 空白入り・大文字小文字")
-    expect(p("-name 請求").matches(pdf) && !p("-name 請求").matches(md), "-name")
-    expect(p("-date 2026-09").matches(pdf) && !p("-date 2026-11").matches(pdf), "-date は変更日でも")
-    expect(p("-created 2026-09-01").matches(pdf) && !p("-modified 2026-09-01").matches(pdf), "-created / -modified")
-    expect(p("-kind pdf -path 仕事 -date 2026-09").matches(pdf) && !p("-kind pdf -path 仕事 -date 2026-10").matches(pdf), "かつ")
-    expect(p("-path Desktop -path 仕事").matches(pdf) && p("-path Desktop -path 仕事").matches(ss), "-path 2 回は「または」")
+    expect(p("#kind ss").matches(ss) && !p("#kind ss").matches(pdf), "スクショ")
+    expect(p("#kind image").matches(ss), "スクショは画像でも当たり")
+    expect(p("#kind md").matches(md) && p("#ext md").matches(md) && !p("#ext md").matches(pdf), "md")
+    expect(p("#type d").matches(dir) && !p("#type d").matches(pdf) && !p("#type f").matches(dir), "#type")
+    expect(p("#kind folder").matches(dir) && !p("#kind pdf").matches(dir), "#kind folder")
+    expect(p("#path 仕事").matches(pdf) && !p("#path 仕事").matches(dir), "#path 名前は下だけ（フォルダ自身は入らない）")
+    expect(p("#path ~/Documents").matches(pdf) && !p("#path ~/Desktop").matches(pdf) && p("#path ~/Desktop").matches(ss), "#path ~/")
+    expect(p("#path documents/仕事").matches(pdf), "#path パスの一部")
+    expect(p("#path \"Obsidian Vault\"").matches(md) && p("#path obsidian").matches(md), "#path 空白入り・大文字小文字")
+    expect(p("#name 請求").matches(pdf) && !p("#name 請求").matches(md), "#name")
+    expect(p("#date 2026-09").matches(pdf) && !p("#date 2026-11").matches(pdf), "#date は変更日でも")
+    expect(p("#created 2026-09-01").matches(pdf) && !p("#modified 2026-09-01").matches(pdf), "#created / #modified")
+    expect(p("#kind pdf #path 仕事 #date 2026-09").matches(pdf) && !p("#kind pdf #path 仕事 #date 2026-10").matches(pdf), "かつ")
+    expect(p("#path Desktop #path 仕事").matches(pdf) && p("#path Desktop #path 仕事").matches(ss), "#path 2 回は「または」")
 
     print("== 一覧と値の候補")
     func pal(_ t: String, committed: [String] = [], ctx: FilterContext? = nil) -> FilterCompletion.Palette? {
         FilterCompletion.palette(for: t, committed: committed, context: ctx, now: testNow)
     }
-    expect(pal("-")?.mode == .commands && pal("-")?.items.count == FilterCompletion.commandItems.count, "「-」で全部の一覧")
-    expect(pal("請求書 -")?.mode == .commands, "空白の直後の「-」")
+    expect(pal("#")?.mode == .commands && pal("#")?.items.count == FilterCompletion.commandItems.count, "「-」で全部の一覧")
+    expect(pal("請求書 #")?.mode == .commands, "空白の直後の「#」")
+    expect(pal("＃")?.mode == .commands && pal("＃da")?.items.map(\.title) == ["#date"], "全角の「＃」でも一覧")
+    expect(pal("C#") == nil && pal("#1") == nil, "「C#」「#1」は一覧を出さない")
     for t in ["kobako-", "2026-", "請求書-", "-1", "PDFを見るやつ", "1/2"] { expect(pal(t) == nil, "一覧を出さない「\(t)」") }
-    expect(pal("-da")?.items.map(\.title) == ["-date"], "-da → -date: \(pal("-da")?.items.map(\.title) ?? [])")
-    expect(pal("-k")?.items.map(\.title) == ["-kind"], "-k → -kind")
-    expect(pal("-t")?.items.map(\.title) == ["-type"], "-t → -type: \(pal("-t")?.items.map(\.title) ?? [])")
-    expect(pal("-種")?.items.map(\.title) == ["-kind"], "-種 → -kind")
-    expect(pal("-場")?.items.map(\.title) == ["-path"], "-場 → -path")
-    expect(pal("-in")?.items.map(\.title) == ["-path"], "-in → -path")
-    expect(pal("-size") == nil, "知らない名前は一覧なし")
-    expect(pal("-kind")?.mode == .commands, "「-kind」（空白前）はまだコマンドの一覧")
-    expect(pal("-kind ")?.mode == .values(.kind), "「-kind 」で種類の候補")
-    expect(pal("-date ")?.items.prefix(3).map(\.title) == ["今日", "昨日", "直近7日"], "-date の候補 \(pal("-date ")?.items.prefix(3).map(\.title) ?? [])")
-    expect(pal("-date 7")?.items.first?.insert == "7d", "-date 7 → 7d")
-    expect(pal("-date 2026-11")?.items.first?.title == "2026年11月", "-date 2026-11（手で打った日付）")
-    expect(pal("-kind sc")?.items.first?.insert == "ss", "-kind sc → ss")
-    expect(pal("-kind pdf,do")?.items.first?.insert == "pdf,doc", "-kind pdf,do → pdf,doc: \(pal("-kind pdf,do")?.items.map(\.insert) ?? [])")
-    expect(pal("-type ")?.items.map(\.insert) == ["f", "d", "app"], "-type の候補")
-    expect(pal("-name ") == nil, "-name は候補なし")
-    expect(pal("-date 7d ") == nil, "値の後に空白を打ったら閉じる")
-    expect(pal("-help ")?.mode == .commands, "-help で一覧")
+    expect(pal("#da")?.items.map(\.title) == ["#date"], "#da → #date: \(pal("#da")?.items.map(\.title) ?? [])")
+    expect(pal("#k")?.items.map(\.title) == ["#kind"], "#k → #kind")
+    expect(pal("#t")?.items.map(\.title) == ["#type"], "#t → #type: \(pal("#t")?.items.map(\.title) ?? [])")
+    expect(pal("#種")?.items.map(\.title) == ["#kind"], "#種 → #kind")
+    expect(pal("#場")?.items.map(\.title) == ["#path"], "#場 → #path")
+    expect(pal("#in")?.items.map(\.title) == ["#path"], "#in → #path")
+    expect(pal("#size") == nil, "知らない名前は一覧なし")
+    expect(pal("#kind")?.mode == .commands, "「#kind」（空白前）はまだコマンドの一覧")
+    expect(pal("#kind ")?.mode == .values(.kind), "「#kind 」で種類の候補")
+    expect(pal("#date ")?.items.prefix(3).map(\.title) == ["今日", "昨日", "直近7日"], "#date の候補 \(pal("#date ")?.items.prefix(3).map(\.title) ?? [])")
+    expect(pal("#date 7")?.items.first?.insert == "7d", "#date 7 → 7d")
+    expect(pal("#date 2026-11")?.items.first?.title == "2026年11月", "#date 2026-11（手で打った日付）")
+    expect(pal("#kind sc")?.items.first?.insert == "ss", "#kind sc → ss")
+    expect(pal("#kind pdf,do")?.items.first?.insert == "pdf,doc", "#kind pdf,do → pdf,doc: \(pal("#kind pdf,do")?.items.map(\.insert) ?? [])")
+    expect(pal("#type ")?.items.map(\.insert) == ["f", "d", "app"], "#type の候補")
+    expect(pal("#name ") == nil, "#name は候補なし")
+    expect(pal("#date 7d ") == nil, "値の後に空白を打ったら閉じる")
+    expect(pal("#help ")?.mode == .commands, "#help で一覧")
     // ゴーストテキスト
     func ghost(_ t: String) -> String? { pal(t).flatMap(FilterCompletion.ghost)?.text }
-    expect(ghost("-date 7") == "d（直近7日）", "ゴースト -date 7 → \(ghost("-date 7") ?? "nil")")
-    expect(ghost("-kind sc") == "reenshot → ss（スクショ）", "ゴースト -kind sc → \(ghost("-kind sc") ?? "nil")")
-    expect(ghost("-kind pd") == "f（PDF）", "ゴースト -kind pd → \(ghost("-kind pd") ?? "nil")")
-    expect(ghost("-path Do")?.hasPrefix("cuments") == true || ghost("-path Do")?.hasPrefix("wnloads") == true, "ゴースト -path Do → \(ghost("-path Do") ?? "nil")")
-    expect(ghost("-date ") == nil, "値が空ならゴーストなし")
+    expect(ghost("#date 7") == "d（直近7日）", "ゴースト #date 7 → \(ghost("#date 7") ?? "nil")")
+    expect(ghost("#kind sc") == "reenshot → ss（スクショ）", "ゴースト #kind sc → \(ghost("#kind sc") ?? "nil")")
+    expect(ghost("#kind pd") == "f（PDF）", "ゴースト #kind pd → \(ghost("#kind pd") ?? "nil")")
+    expect(ghost("#path Do")?.hasPrefix("cuments") == true || ghost("#path Do")?.hasPrefix("wnloads") == true, "ゴースト #path Do → \(ghost("#path Do") ?? "nil")")
+    expect(ghost("#date ") == nil, "値が空ならゴーストなし")
     // 決める
-    if let p1 = pal("請求書 -da") {
-        let r = FilterCompletion.accept(p1.items[0], palette: p1, text: "請求書 -da")
-        expect(r.text == "請求書 -date " && r.commit == nil, "コマンドを決める → 「\(r.text)」")
+    if let p1 = pal("請求書 #da") {
+        let r = FilterCompletion.accept(p1.items[0], palette: p1, text: "請求書 #da")
+        expect(r.text == "請求書 #date " && r.commit == nil, "コマンドを決める → 「\(r.text)」")
     }
-    if let p2 = pal("請求書 -date 7") {
-        let r = FilterCompletion.accept(p2.items[0], palette: p2, text: "請求書 -date 7")
-        expect(r.text == "請求書 " && r.commit == "-date 7d", "値を決める → 「\(r.text)」 \(r.commit ?? "nil")")
+    if let p2 = pal("請求書 #date 7") {
+        let r = FilterCompletion.accept(p2.items[0], palette: p2, text: "請求書 #date 7")
+        expect(r.text == "請求書 " && r.commit == "#date 7d", "値を決める → 「\(r.text)」 \(r.commit ?? "nil")")
     }
-    let ex = FilterCompletion.extractCommitted("-date 2026-11-14 請求書 -kind pdf ", now: testNow)
-    expect(ex?.commands == ["-date 2026-11-14", "-kind pdf"] && ex?.text == "請求書 ", "打ち終えたコマンドをチップに \(String(describing: ex))")
-    expect(FilterCompletion.extractCommitted("-date 2026-1", now: testNow) == nil, "打ちかけはチップにしない")
-    expect(FilterCompletion.extractCommitted("-date あした ", now: testNow) == nil, "読めない値はチップにしない")
+    let ex = FilterCompletion.extractCommitted("#date 2026-11-14 請求書 #kind pdf ", now: testNow)
+    expect(ex?.commands == ["#date 2026-11-14", "#kind pdf"] && ex?.text == "請求書 ", "打ち終えたコマンドをチップに \(String(describing: ex))")
+    expect(FilterCompletion.extractCommitted("#date 2026-1", now: testNow) == nil, "打ちかけはチップにしない")
+    expect(FilterCompletion.extractCommitted("#date あした ", now: testNow) == nil, "読めない値はチップにしない")
 
-    // -type の別名（前の版の -app -folder -file）
-    for (q, t) in [("-app", "app"), ("-folder", "d"), ("-file", "f"), ("-t -app", "app"), ("-type -folder", "d"), ("-t -app s", "app"), ("-app ", "app")] {
+    // #type の別名（前の版の #app #folder #file）
+    for (q, t) in [("#app", "app"), ("#folder", "d"), ("#file", "f"), ("#t #app", "app"), ("#type #folder", "d"), ("#t #app s", "app"), ("#app ", "app")] {
         let g = p(q)
         expect(g.types == [t] && g.notes.isEmpty, "別名「\(q)」→ \(g.types) \(g.notes)")
     }
-    for q in ["-ap", "-t -ap", "-t -fol"] {
+    for q in ["#ap", "#t #ap", "#t #fol"] {
         let g = p(q)
         expect(g.notes.isEmpty, "打ちかけ「\(q)」は知らせない \(g.notes)")
     }
-    expect(p("-t -app sa").text == "sa", "「-t -app sa」の残りは sa")
-    expect(pal("-ap")?.items.first?.title == "-type", "-ap → -type の行")
-    expect(FilterCompletion.commands(matching: "").first { $0.title == "-type" }?.alias.contains("-app") == true, "一覧の -type に別名 -app")
-    expect(pal("-t -ap")?.mode == .values(.type) && pal("-t -ap")?.items.first?.insert == "app", "「-t -ap」は -type の値の候補")
-    expect(pal("-t -fol")?.items.first?.insert == "d", "「-t -fol」→ d")
-    if let p3 = pal("-t -ap") {
-        let r = FilterCompletion.accept(p3.items[0], palette: p3, text: "-t -ap")
-        expect(r.text == "" && r.commit == "-type app", "「-t -ap」で決める → 「\(r.text)」 \(r.commit ?? "nil")")
+    expect(p("＃kind pdf").kinds == ["pdf"] && p("＃t ＃app").types == ["app"] && p("＃種類 pdf 請求書").text == "請求書", "全角の「＃」")
+    expect(p("#t #app sa").text == "sa", "「#t #app sa」の残りは sa")
+    expect(pal("#ap")?.items.first?.title == "#type", "#ap → #type の行")
+    expect(FilterCompletion.commands(matching: "").first { $0.title == "#type" }?.alias.contains("#app") == true, "一覧の #type に別名 #app")
+    expect(pal("#t #ap")?.mode == .values(.type) && pal("#t #ap")?.items.first?.insert == "app", "「#t #ap」は #type の値の候補")
+    expect(pal("#t #fol")?.items.first?.insert == "d", "「#t #fol」→ d")
+    if let p3 = pal("#t #ap") {
+        let r = FilterCompletion.accept(p3.items[0], palette: p3, text: "#t #ap")
+        expect(r.text == "" && r.commit == "#type app", "「#t #ap」で決める → 「\(r.text)」 \(r.commit ?? "nil")")
     }
-    expect(FilterCompletion.extractCommitted("-t -app ", now: testNow)?.commands == ["-type app"], "「-t -app 」をチップに")
-    expect(FilterCompletion.extractCommitted("-folder ", now: testNow)?.commands == ["-type d"], "「-folder 」をチップに")
+    expect(FilterCompletion.extractCommitted("#t #app ", now: testNow)?.commands == ["#type app"], "「#t #app 」をチップに")
+    expect(FilterCompletion.extractCommitted("#folder ", now: testNow)?.commands == ["#type d"], "「#folder 」をチップに")
 
     // 件数（見本の一覧）
     let sample = [ss, pdf, dir, md,
                   FileEntry(path: home + "/Desktop/スクリーンショット 2026-11-19 08.00.00.png", mtime: ts("2026-11-19 08:00")),
                   FileEntry(path: home + "/Downloads/写真.jpg", mtime: ts("2026-11-01 08:00"))]
     let ctx = FilterContext(files: sample, appCount: 3)
-    let dv = pal("-date ", ctx: ctx)?.items ?? []
+    let dv = pal("#date ", ctx: ctx)?.items ?? []
     func c(_ items: [FilterCompletion.Item], _ ins: String) -> Int? { items.first { $0.insert == ins }?.count }
-    expect(c(dv, "today") == 2 && c(dv, "7d") == 4, "-date の件数 今日 \(c(dv, "today") ?? -1) 直近7日 \(c(dv, "7d") ?? -1)")
+    expect(c(dv, "today") == 2 && c(dv, "7d") == 4, "#date の件数 今日 \(c(dv, "today") ?? -1) 直近7日 \(c(dv, "7d") ?? -1)")
     expect(dv.last?.count == 0, "0 件は下に回す")
-    let dvss = pal("-date ", committed: ["-kind ss"], ctx: ctx)?.items ?? []
-    expect(c(dvss, "today") == 1 && c(dvss, "7d") == 2, "-kind ss の中の -date の件数 \(c(dvss, "today") ?? -1) / \(c(dvss, "7d") ?? -1)")
-    let kv = pal("-kind ", ctx: ctx)?.items ?? []
-    expect(kv.first?.insert == "image" && kv.allSatisfy { ($0.count ?? 0) > 0 }, "-kind は手元にある種類だけを多い順 \(kv.map { "\($0.insert) \($0.count ?? -1)" })")
+    let dvss = pal("#date ", committed: ["#kind ss"], ctx: ctx)?.items ?? []
+    expect(c(dvss, "today") == 1 && c(dvss, "7d") == 2, "#kind ss の中の #date の件数 \(c(dvss, "today") ?? -1) / \(c(dvss, "7d") ?? -1)")
+    let kv = pal("#kind ", ctx: ctx)?.items ?? []
+    expect(kv.first?.insert == "image" && kv.allSatisfy { ($0.count ?? 0) > 0 }, "#kind は手元にある種類だけを多い順 \(kv.map { "\($0.insert) \($0.count ?? -1)" })")
     // 件数と結果が食い違わない
-    for t in ["-date 7d", "-kind ss", "-kind image -date today", "-path Desktop", "-type d"] {
+    for t in ["#date 7d", "#kind ss", "#kind image #date today", "#path Desktop", "#type d"] {
         let n = ctx.indices(p(t)).count
         let parts = t.split(separator: " ")
         let cmd = String(parts[parts.count - 2]), v = String(parts[parts.count - 1])
         let base = parts.count > 2 ? [parts.prefix(parts.count - 2).joined(separator: " ")] : []
         let items = pal(cmd + " ", committed: base, ctx: ctx)?.items ?? []
-        let got = cmd == "-path" ? items.first { $0.title == v }?.count : c(items, v)
+        let got = cmd == "#path" ? items.first { $0.title == v }?.count : c(items, v)
         expect(got == n, "件数「\(t)」 候補 \(got ?? -1) / 結果 \(n)")
     }
     // 次に付けそうなコマンド
-    let nx = FilterCompletion.next(p("-kind ss"), context: ctx, now: testNow)
-    expect(nx.first?.insert == "-date today", "-kind ss の後は -date \(nx.map(\.insert))")
-    let nx2 = FilterCompletion.next(p("-date 7d"), context: ctx, now: testNow)
-    expect(nx2.first?.insert.hasPrefix("-kind") == true, "-date の後は -kind \(nx2.map(\.insert))")
+    let nx = FilterCompletion.next(p("#kind ss"), context: ctx, now: testNow)
+    expect(nx.first?.insert == "#date today", "#kind ss の後は #date \(nx.map(\.insert))")
+    let nx2 = FilterCompletion.next(p("#date 7d"), context: ctx, now: testNow)
+    expect(nx2.first?.insert.hasPrefix("#kind") == true, "#date の後は #kind \(nx2.map(\.insert))")
 
     print("確かめ \(checks - failures)/\(checks)")
 
@@ -203,7 +206,7 @@ func runFilterTests() {
     let entries = FileCatalog.collect()
     let real = FilterContext(files: entries, appCount: 120)
     print("\n== 件数の速さ（手元 \(entries.count) 件、一覧 \(String(format: "%.0f", Date().timeIntervalSince(t0) * 1000))ms）")
-    for (t, committed) in [("-date ", [String]()), ("-kind ", []), ("-ext ", []), ("-path ", []), ("-date ", ["-kind ss"]), ("-path D", ["-kind pdf", "-date 3m"])] {
+    for (t, committed) in [("#date ", [String]()), ("#kind ", []), ("#ext ", []), ("#path ", []), ("#date ", ["#kind ss"]), ("#path D", ["#kind pdf", "#date 3m"])] {
         var ms: [Double] = []
         var n = 0
         for _ in 0..<20 {
@@ -215,9 +218,9 @@ func runFilterTests() {
         print("  \((committed + [t]).joined(separator: " "))  候補 \(n) 件  中央 \(String(format: "%.2f", ms[10]))ms  最大 \(String(format: "%.2f", ms.last!))ms")
     }
     var ms: [Double] = []
-    for _ in 0..<20 { let s = Date(); _ = FilterCompletion.next(QueryFilters.parse("-kind ss", now: testNow), context: real, now: testNow); ms.append(Date().timeIntervalSince(s) * 1000) }
+    for _ in 0..<20 { let s = Date(); _ = FilterCompletion.next(QueryFilters.parse("#kind ss", now: testNow), context: real, now: testNow); ms.append(Date().timeIntervalSince(s) * 1000) }
     ms.sort()
-    print("  次のコマンド（-kind ss の後）中央 \(String(format: "%.2f", ms[10]))ms")
+    print("  次のコマンド（#kind ss の後）中央 \(String(format: "%.2f", ms[10]))ms")
     exit(failures == 0 ? 0 : 1)
 }
 

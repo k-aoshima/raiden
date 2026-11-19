@@ -130,28 +130,29 @@ macOS 26 以降は Liquid Glass（`NSGlassEffectView`、白寄りの tint）、�
 
 ### 絞り込みのコマンド（app/Sources/RaidenCore/QueryFilters.swift, FilterCompletion.swift, app/Sources/Raiden/FilterUI.swift）
 
-入力欄に `-kind ss -date 7d 請求書` のように書くと、当てはまらない物を候補から外す（QueryIntent の「昨日の」「PDFの」は言い方からの推測で点数を上下するだけだが、こちらは確実な絞り込み）。名前は Spotlight（kind / date / modified / created）と find / fd（-type -ext -path -name）にそろえた。
+入力欄に `#kind ss #date 7d 請求書` のように書くと、当てはまらない物を候補から外す（QueryIntent の「昨日の」「PDFの」は言い方からの推測で点数を上下するだけだが、こちらは確実な絞り込み）。名前は Spotlight（kind / date / modified / created）と find / fd（#type #ext #path #name）にそろえた。
 
 | コマンド | 別名 | 値 | 意味 |
 |---|---|---|---|
-| `-kind` | `-k` `-種類` | pdf, image, screenshot / ss, movie / video, music / audio, document / doc, spreadsheet / xls, presentation / ppt, md, text, code, archive / zip, 3d, folder, app（種類の名前でなければ拡張子） | 種類 |
-| `-type` | `-t` | f（ファイル）, d（フォルダ）, app（アプリ） | 対象 |
-| `-ext` | `-e` `-拡張子` | pdf, docx, pdf,docx | 拡張子 |
-| `-date` | `-日付` | today, yesterday, 7d, 2w, 3m, 1y, 2026, 2026-11, 2026-11-14, 11-14, 11-14..11-16, 今日・昨日・今週・先週・今月・先月・今年・去年 | 使った日・変更日・追加日・作成日のどれかが入る |
-| `-modified` | `-m` `-変更日` | 同上 | 変更日だけ |
-| `-created` | `-c` `-作成日` | 同上 | 作成日だけ |
-| `-path` | `-p` `-in` `-場所` | Desktop, ~/Documents/仕事, "Obsidian Vault" | その下だけ（`~/` `/` で始まればその下、名前なら親フォルダの名前の一部、`a/b` ならパスの一部） |
-| `-name` | `-n` `-名前` | 請求 | 名前にその文字を含む物だけ（文字の一致） |
-| `-help` | `-h` | | コマンドの一覧 |
+| `#kind` | `#k` `#種類` | pdf, image, screenshot / ss, movie / video, music / audio, document / doc, spreadsheet / xls, presentation / ppt, md, text, code, archive / zip, 3d, folder, app（種類の名前でなければ拡張子） | 種類 |
+| `#type` | `#t`（別名 `#app` = `#type app`、`#folder` = `#type d`、`#file` = `#type f`。`#t #app` も `#type app`） | f（ファイル）, d（フォルダ）, app（アプリ） | 対象 |
+| `#ext` | `#e` `#拡張子` | pdf, docx, pdf,docx | 拡張子 |
+| `#date` | `#日付` | today, yesterday, 7d, 2w, 3m, 1y, 2026, 2026-11, 2026-11-14, 11-14, 11-14..11-16, 今日・昨日・今週・先週・今月・先月・今年・去年 | 使った日・変更日・追加日・作成日のどれかが入る |
+| `#modified` | `#m` `#変更日` | 同上 | 変更日だけ |
+| `#created` | `#c` `#作成日` | 同上 | 作成日だけ |
+| `#path` | `#p` `#in` `#場所` | Desktop, ~/Documents/仕事, "Obsidian Vault" | その下だけ（`~/` `/` で始まればその下、名前なら親フォルダの名前の一部、`a/b` ならパスの一部） |
+| `#name` | `#n` `#名前` | 請求 | 名前にその文字を含む物だけ（文字の一致） |
+| `#help` | `#h` | | コマンドの一覧 |
 
-- 違うコマンドどうしは「かつ」、同じコマンドを 2 回・カンマ区切りは「または」。`-date` などを 2 回書いたら後の方で上書き（範囲は `11-14..11-16`）。
-- アプリ（`-type app`）は `-kind`（アプリ以外）・`-ext`・`-date`・`-path` と一緒に使えない（入力欄の下に知らせる）。`-type d` と `-path`・`-date` は使える。
+- 違うコマンドどうしは「かつ」、同じコマンドを 2 回・カンマ区切りは「または」。`#date` などを 2 回書いたら後の方で上書き（範囲は `11-14..11-16`）。
+- アプリ（`#type app`）は `#kind`（アプリ以外）・`#ext`・`#date`・`#path` と一緒に使えない（入力欄の下に知らせる）。`#type d` と `#path`・`#date` は使える。
 - コマンドを抜いた残りがふつうの曖昧検索。残りが空なら新しい順（使った日・変更日の新しい方）。「見つからない」の判定は残った物の中で行い、0 件なら「条件に合う物はありません」（近い日付の代わりは出さない）。
-- コマンドと読むのは入力の先頭か空白の直後の半角「-」＋文字だけ（「kobako-devlog」「2026-11」「-1」は普通の文字）。知らないコマンドや読めない値は絞り込まずに「-size は使えません」と出す。打っている途中（「-」「-da」「-date」「-date 2026-」）は絞りも知らせもしない。
-- 入力欄: 「-」でコマンドの一覧、「-date 」で値の候補（件数つき。ほかの条件の中で数え、0 件は下に回す）。↑↓ で選んで Enter / Tab、Esc で一覧だけ閉じる。打ちかけの値はゴーストテキストで補い → / Tab で決める。値まで決まったコマンドはチップにして入力欄の下に並べ、入力欄が空のときの Backspace で最後のチップを消す。チップの横に次に付けそうなコマンド（`-kind ss` の後の `-date 今日`）を小さく出す。
+- コマンドと読むのは入力の先頭か空白の直後の「#」＋文字だけ。全角の「＃」も同じ（日本語入力のまま打てる）。「C#」「#1」は普通の文字。前の版の「-kind」の形は受け付けない。知らないコマンドや読めない値は絞り込まずに「#size は使えません」と出す。打っている途中（「#」「#da」「#date」「#date 2026-」）は絞りも知らせもしない。
+- 入力欄: 「#」でコマンドの一覧、「#date 」で値の候補（件数つき。ほかの条件の中で数え、0 件は下に回す）。↑↓ で選んで Enter / Tab、Esc で一覧だけ閉じる。打ちかけの値はゴーストテキストで補い → / Tab で決める。値まで決まったコマンドはチップにして入力欄の下に並べ、入力欄が空のときの Backspace で最後のチップを消す。チップの横に次に付けそうなコマンド（`#kind ss` の後の `#date 今日`）を小さく出す。
+- コマンドが 1 つでも効いているときは候補の上限（設定の最大件数）で切らず、当てはまる物を全部出す。パネルは画面の高さの 65% まで伸び、それ以上はスクロール。行は 200 件ずつ作り、↑↓ で選択行まで自動でスクロール。節の見出しに件数（「アプリ 133件」）。
 - 件数は絞り込みと同じ `QueryFilters.matches` で数える。手元 989 件で 1 回 0.1〜1.8ms（`raiden-eval --test-filters`）。
 - 解析の結果（どのコマンドを何と読んだか）は `Judged.filters` に入る（検索の記録用）。よく使う値を上に出す口は `FilterCompletion.usage`（SearchLog が入ったら差し込む）。
-- 確かめ: `raiden-eval --test-filters`（解析・一覧・値の候補・ゴースト・件数、108 項目）。見本は `docs/ui/option-*.png`。
+- 確かめ: `raiden-eval --test-filters`（解析・一覧・値の候補・ゴースト・件数、133 項目。入力欄のフォーカスと打鍵は `Raiden --test-focus`）。見本は `docs/ui/option-*.png`。
 
 ### メモリの設定
 

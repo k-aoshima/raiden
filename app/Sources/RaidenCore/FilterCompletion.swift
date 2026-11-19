@@ -6,7 +6,7 @@ public struct FilterContext: Sendable {
     public let files: [FileEntry]
     public let keys: [QueryFilters.FileKeys]
     public let appCount: Int
-    /// フォルダのパスと、ファイルごとの上のフォルダ（ホームの下だけ）の番号。-path の候補の件数を数える用
+    /// フォルダのパスと、ファイルごとの上のフォルダ（ホームの下だけ）の番号。#path の候補の件数を数える用
     let folders: [String]
     let ancestors: [[Int32]]
     /// 最近使ったフォルダ（使った日・変更日の新しい順）
@@ -43,15 +43,15 @@ public struct FilterContext: Sendable {
     }
 }
 
-/// 入力欄の「-」から出す一覧（コマンドか値の候補）・ゴーストテキスト・次に付けそうなコマンドを決める。
+/// 入力欄の「#」から出す一覧（コマンドか値の候補）・ゴーストテキスト・次に付けそうなコマンドを決める。
 /// 画面に依らない部分（raiden-eval --test-filters で確かめる）
 public enum FilterCompletion {
     public struct Item: Sendable, Equatable {
-        public let title: String      // -date、直近7日
+        public let title: String      // #date、直近7日
         public let detail: String     // 期間で絞る 例: 7d, today
         public let symbol: String
-        public let insert: String     // 決めたときに入れる文字（コマンドなら "-date"、値なら "7d"、次のコマンドなら "-date 7d"）
-        public var alias = ""         // 一覧に小さく出す別名（-k）
+        public let insert: String     // 決めたときに入れる文字（コマンドなら "#date"、値なら "7d"、次のコマンドなら "#date 7d"）
+        public var alias = ""         // 一覧に小さく出す別名（#k）
         public var count: Int?        // その値で残る件数（ほかの条件の中で）。数えられなければ nil
         public var also: [String] = []  // ゴーストテキストで補う別の言い方（screenshot、Documents）
     }
@@ -61,9 +61,9 @@ public enum FilterCompletion {
     public struct Palette: Sendable {
         public let mode: Mode
         public let items: [Item]
-        /// 置き換える範囲（入力欄の文字のうち、最後の「-da」や「-date 7」の部分）の始まり（文字数）
+        /// 置き換える範囲（入力欄の文字のうち、最後の「#da」や「#date 7」の部分）の始まり（文字数）
         public let start: Int
-        /// 打ちかけの値（「-date 7」の「7」）
+        /// 打ちかけの値（「#date 7」の「7」）
         public let partial: String
     }
 
@@ -98,7 +98,7 @@ public enum FilterCompletion {
         ("zip", "圧縮", "archivebox", ["archive", "圧縮"]), ("3d", "3Dモデル", "cube", []),
         ("folder", "フォルダ", "folder", ["フォルダ"]), ("app", "アプリ", "app", ["application", "アプリ"]),
     ]
-    /// -type の値の別の言い方（「-t -folder」「-type fol」でも当たるように）
+    /// #type の値の別の言い方（「#t #folder」「#type fol」でも当たるように）
     static let typeAlso: [String: [String]] = ["f": ["file"], "d": ["folder", "dir"], "app": ["application"]]
     static let typeValues: [(String, String, String)] = [("f", "ファイル", "doc"), ("d", "フォルダ", "folder"), ("app", "アプリ", "app")]
 
@@ -117,13 +117,13 @@ public enum FilterCompletion {
         while s > 0 && !chars[s - 1].isWhitespace { s -= 1 }
         let last = String(chars[s...])
         let toks = QueryFilters.tokenize(text)
-        // -help（打ち終えて空白）なら全部の一覧
+        // #help（打ち終えて空白）なら全部の一覧
         if let h = toks.lastIndex(where: { QueryFilters.commandName($0).flatMap(QueryFilters.command(named:)) == .help }),
            h == toks.count - 1, text.last?.isWhitespace == true,
            let r = text.range(of: toks[h], options: .backwards) {
             return Palette(mode: .commands, items: commands(matching: ""), start: text.distance(from: text.startIndex, to: r.lowerBound), partial: "")
         }
-        // 「-t -ap」: -type の値の位置に別名（-app -folder -file）を打っているなら、-type の値の候補にする
+        // 「#t #ap」: #type の値の位置に別名（#app #folder #file）を打っているなら、#type の値の候補にする
         if !last.isEmpty, let name = QueryFilters.commandName(last), !name.isEmpty {
             var e = s
             while e > 0 && chars[e - 1].isWhitespace { e -= 1 }
@@ -136,12 +136,12 @@ public enum FilterCompletion {
                 if !items.isEmpty { return Palette(mode: .values(.type), items: items, start: b, partial: name) }
             }
         }
-        // コマンドの一覧: 最後のトークンが「-」「-da」（入力の先頭か空白の直後の「-」だけ）
+        // コマンドの一覧: 最後のトークンが「#」「#da」（入力の先頭か空白の直後の「#」「＃」だけ）
         if !last.isEmpty, let name = QueryFilters.commandName(last) {
             let items = commands(matching: name)
             return items.isEmpty ? nil : Palette(mode: .commands, items: items, start: s, partial: name)
         }
-        // 値の候補: 「-date 」（値がまだ無い）か「-date 7」（打ちかけ）
+        // 値の候補: 「#date 」（値がまだ無い）か「#date 7」（打ちかけ）
         var e = s
         while e > 0 && chars[e - 1].isWhitespace { e -= 1 }
         if !last.isEmpty && e == s { return nil }
@@ -161,9 +161,9 @@ public enum FilterCompletion {
         commandItems.filter { c in
             hit(name, QueryFilters.aliases.filter { $0.1 == c.0 }.map(\.0) + (c.0 == .type ? QueryFilters.typeShorthands.map(\.0) : []))
         }.map { c in
-            let ja = QueryFilters.aliases.filter { $0.1 == c.0 && $0.0.unicodeScalars.contains { $0.value > 0x2FFF } }.map { "-" + $0.0 }
-            let sh = c.0 == .type ? QueryFilters.typeShorthands.map { "-" + $0.0 } : []
-            let alias = ([c.0.short].compactMap { $0 } + (c.0 == .path ? ["-in"] : []) + ja.prefix(1) + sh).joined(separator: " ")
+            let ja = QueryFilters.aliases.filter { $0.1 == c.0 && $0.0.unicodeScalars.contains { $0.value > 0x2FFF } }.map { QueryFilters.mark + $0.0 }
+            let sh = c.0 == .type ? QueryFilters.typeShorthands.map { QueryFilters.mark + $0.0 } : []
+            let alias = ([c.0.short].compactMap { $0 } + (c.0 == .path ? ["#in"] : []) + ja.prefix(1) + sh).joined(separator: " ")
             return Item(title: c.0.name, detail: c.3.isEmpty ? c.2 : c.2 + "  " + c.3, symbol: c.1, insert: c.0.name, alias: alias)
         }
     }
@@ -243,7 +243,7 @@ public enum FilterCompletion {
         return ranked.map(\.element)
     }
 
-    /// -path の候補: 中のファイルが多いフォルダ（ほかの条件の中で）と最近使ったフォルダ。context が無ければ探す場所だけ
+    /// #path の候補: 中のファイルが多いフォルダ（ほかの条件の中で）と最近使ったフォルダ。context が無ければ探す場所だけ
     static func placeItems(partial: String, others: QueryFilters, pool: [Int]?, ctx: FilterContext?) -> [Item] {
         var cands: [(String, Int?)] = []
         if let ctx, let pool {
@@ -271,7 +271,7 @@ public enum FilterCompletion {
 
     // MARK: - ゴーストテキスト
 
-    /// 打ちかけの値の補完（「-date 7」→「d（直近7日）」、「-kind sc」→「reenshot → ss（スクショ）」）。
+    /// 打ちかけの値の補完（「#date 7」→「d（直近7日）」、「#kind sc」→「reenshot → ss（スクショ）」）。
     /// 返すのは補う文字（薄く出す）と、→ / Tab で決めたときの候補
     public static func ghost(_ p: Palette) -> (text: String, item: Item)? {
         guard case .values = p.mode, !p.partial.isEmpty else { return nil }
@@ -297,7 +297,7 @@ public enum FilterCompletion {
         switch p.mode {
         case .commands:
             guard let cmd = QueryFilters.command(named: String(item.insert.dropFirst())) else { return (text, nil) }
-            if cmd == .help { return (head + "-", nil) }
+            if cmd == .help { return (head + QueryFilters.mark, nil) }
             return (head + cmd.name + " ", nil)
         case .values(let cmd):
             return (tidy(head), cmd.name + " " + item.insert)
@@ -309,7 +309,7 @@ public enum FilterCompletion {
         return t.isEmpty ? "" : t + " "
     }
 
-    /// 打ち終えたコマンド（空白まで打った「-date 2026-11-14 」）を入力欄から抜き出してチップにする。
+    /// 打ち終えたコマンド（空白まで打った「#date 2026-11-14 」）を入力欄から抜き出してチップにする。
     /// 最後が空白でなければ何もしない（打ちかけを消さない）。読めない値のコマンドは残す（入力欄の下に知らせる）
     public static func extractCommitted(_ text: String, now: Date = Date()) -> (commands: [String], text: String)? {
         guard text.last?.isWhitespace == true else { return nil }
@@ -332,7 +332,7 @@ public enum FilterCompletion {
 
     // MARK: - 次に付けそうなコマンド
 
-    /// 値まで決まった後に、次に付けそうなコマンド（insert は「-date today」のようにコマンドと値の組）。件数 0 は出さない
+    /// 値まで決まった後に、次に付けそうなコマンド（insert は「#date today」のようにコマンドと値の組）。件数 0 は出さない
     public static func next(_ f: QueryFilters, context ctx: FilterContext?, now: Date = Date()) -> [Item] {
         guard f.isActive, !f.wantsApps, let ctx else { return [] }
         let pool = ctx.indices(f)
@@ -348,17 +348,17 @@ public enum FilterCompletion {
         if !hasDate {
             for (v, l) in [("today", "今日"), ("7d", "直近7日"), ("1m", "直近1か月")] where out.count < 2 {
                 let c = count(.date, v)
-                if c > 0 && c < pool.count { out.append(Item(title: "-date \(l)", detail: "", symbol: "clock", insert: "-date \(v)", count: c)) }
+                if c > 0 && c < pool.count { out.append(Item(title: "#date \(l)", detail: "", symbol: "clock", insert: "#date \(v)", count: c)) }
             }
         }
         if !hasKind {
             let ks = kindValues.filter { !["folder", "app"].contains($0.0) }.map { ($0, count(.kind, $0.0)) }
                 .filter { $0.1 > 0 && $0.1 < pool.count }.sorted { $0.1 > $1.1 }.prefix(2)
-            for (k, c) in ks { out.append(Item(title: "-kind \(k.1)", detail: "", symbol: k.2, insert: "-kind \(k.0)", count: c)) }
+            for (k, c) in ks { out.append(Item(title: "#kind \(k.1)", detail: "", symbol: k.2, insert: "#kind \(k.0)", count: c)) }
         }
         if hasDate && hasKind && f.paths.isEmpty,
            let p = placeItems(partial: "", others: f, pool: pool, ctx: ctx).first(where: { ($0.count ?? 0) > 0 && ($0.count ?? 0) < pool.count }) {
-            out.append(Item(title: "-path \(p.title)", detail: "", symbol: "folder", insert: "-path \(p.insert)", count: p.count))
+            out.append(Item(title: "#path \(p.title)", detail: "", symbol: "folder", insert: "#path \(p.insert)", count: p.count))
         }
         return Array(out.prefix(3))
     }

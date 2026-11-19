@@ -1,15 +1,15 @@
 import AppKit
 import RaidenCore
 
-/// 入力欄の絞り込みコマンド（-kind ss -date 7d …）の画面側。SearchPanelController からは数か所だけ呼ぶ。
+/// 入力欄の絞り込みコマンド（#kind ss #date 7d …）の画面側。SearchPanelController からは数か所だけ呼ぶ。
 ///
-///   「-」を打つとコマンドの一覧、「-date 」で値の候補（件数つき）を候補の場所に出す。↑↓ で選び、Enter / Tab で決める。
+///   「#」を打つとコマンドの一覧、「#date 」で値の候補（件数つき）を候補の場所に出す。↑↓ で選び、Enter / Tab で決める。
 ///   値まで決まったコマンドはチップ（committed）にして入力欄から抜き、入力欄の下に並べる。入力欄が空のときの Backspace で最後のチップを消す。
 ///   打ちかけの値はゴーストテキスト（薄い文字）で補い、→ / Tab で決める。一覧が出ている間の Esc は一覧だけ閉じる。
 final class FilterInput {
     weak var panel: SearchPanelController?
     private weak var field: NSTextField?
-    /// 値まで決まったコマンド（"-date 7d"）。付けた順
+    /// 値まで決まったコマンド（"#date 7d"）。付けた順
     private(set) var committed: [String] = []
     private(set) var palette: FilterCompletion.Palette?
     private var ghost: (text: String, item: FilterCompletion.Item)?
@@ -198,7 +198,7 @@ final class FilterInput {
     }
 }
 
-/// 入力欄の下の 1 行: 効いている絞り込みのチップ（アイコン付き）、知らせ（「-size は使えません」）、次に付けそうなコマンド
+/// 入力欄の下の 1 行: 効いている絞り込みのチップ（アイコン付き）、知らせ（「#size は使えません」）、次に付けそうなコマンド
 final class ChipBar: NSView {
     static let height: CGFloat = 32
     private let onNext: (String) -> Void
@@ -317,25 +317,25 @@ enum FilterSnapshots {
             c.filterInput.refresh()
             return c
         }
-        Snapshot.capture(panel("-"), dir + "/option-commands.png")
-        Snapshot.capture(panel("-date "), dir + "/option-date-values.png")
-        Snapshot.capture(panel("-kind sc"), dir + "/option-ghost.png")
+        Snapshot.capture(panel("#"), dir + "/option-commands.png")
+        Snapshot.capture(panel("#date "), dir + "/option-date-values.png")
+        Snapshot.capture(panel("#kind sc"), dir + "/option-ghost.png")
 
-        // チップが 2 つ付いた状態（-kind ss -date 7d）。候補は見本
-        let c = panel("", committed: ["-kind ss", "-date 7d"])
-        let rows = files.filter { QueryFilters.parse("-kind ss -date 7d", now: now).matches($0) }.prefix(4).map {
+        // チップが 2 つ付いた状態（#kind ss #date 7d）。候補は見本
+        let c = panel("", committed: ["#kind ss", "#date 7d"])
+        let rows = files.filter { QueryFilters.parse("#kind ss #date 7d", now: now).matches($0) }.prefix(4).map {
             RowItem(title: $0.name, sub: RowItem.shortParent($0.path), iconImage: NSWorkspace.shared.icon(for: .png), hint: RowItem.fileHint)
         }
         let q = c.filterInput.currentQuery
         c.setResults([ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: Array(rows))], query: q)
         Snapshot.capture(c, dir + "/option-chips.png")
 
-        // -type app で全部出してスクロールした状態。アプリは OS 付属のもの（私的な名前は使わない）
+        // #type app で全部出してスクロールした状態。アプリは OS 付属のもの（私的な名前は使わない）
         let appDirs = ["/System/Applications", "/System/Applications/Utilities"]
         let appPaths = appDirs.flatMap { d in
             ((try? FileManager.default.contentsOfDirectory(atPath: d)) ?? []).filter { $0.hasSuffix(".app") }.map { d + "/" + $0 }
         }.sorted { ($0 as NSString).lastPathComponent < ($1 as NSString).lastPathComponent }
-        let all = panel("", committed: ["-type app"])
+        let all = panel("", committed: ["#type app"])
         let appRows = appPaths.map {
             RowItem(title: (($0 as NSString).lastPathComponent as NSString).deletingPathExtension, sub: $0, iconPath: $0, hint: RowItem.appHint)
         }
@@ -371,50 +371,50 @@ enum FocusTest {
             return c.panel.firstResponder === ed
         }
 
-        // 1) 「-t 」→ ↓↓ でアプリ → Enter → 続けて「sa」
+        // 1) 「#t 」→ ↓↓ でアプリ → Enter → 続けて「sa」
         var c = make()
         expect(focused(c), "最初から入力欄が打てる")
-        type(c, "-t ")
-        expect(c.filterInput.palette?.mode == .values(.type), "「-t 」で値の候補")
+        type(c, "#t ")
+        expect(c.filterInput.palette?.mode == .values(.type), "「#t 」で値の候補")
         let appRow = c.filterInput.palette.map { c.filterInput.displayed($0).firstIndex { $0.insert == "app" } ?? 0 } ?? 0
         for _ in 0..<appRow { key(c, #selector(NSResponder.moveDown(_:))) }
         key(c, #selector(NSResponder.insertNewline(_:)))
-        expect(c.filterInput.committed == ["-type app"] && c.queryText.isEmpty, "Enter で -type app のチップ \(c.filterInput.committed) 「\(c.queryText)」")
+        expect(c.filterInput.committed == ["#type app"] && c.queryText.isEmpty, "Enter で #type app のチップ \(c.filterInput.committed) 「\(c.queryText)」")
         expect(focused(c), "Enter の後も入力欄が first responder")
         type(c, "sa")
-        expect(c.queryText == "sa" && c.filterInput.currentQuery == "-type app sa", "続けて打てる「\(c.queryText)」→ \(c.filterInput.currentQuery)")
+        expect(c.queryText == "sa" && c.filterInput.currentQuery == "#type app sa", "続けて打てる「\(c.queryText)」→ \(c.filterInput.currentQuery)")
 
         // 2) 一覧の行を押して決める（フォーカスを外してから）
         c = make()
-        type(c, "-t ")
+        type(c, "#t ")
         c.panel.makeFirstResponder(nil)
         c.filterInput.acceptRow(c.filterInput.palette.map { c.filterInput.displayed($0).firstIndex { $0.insert == "app" } ?? 0 } ?? 0)
-        expect(c.filterInput.committed == ["-type app"], "行を押して決める \(c.filterInput.committed)")
+        expect(c.filterInput.committed == ["#type app"], "行を押して決める \(c.filterInput.committed)")
         expect(focused(c), "行を押した後も入力欄が first responder")
         type(c, "s")
         expect(c.queryText == "s", "行を押した後に打てる「\(c.queryText)」")
 
-        // 3) 「-t -app」と打つ（前の版の名前）→ 空白でチップ → 続けて打てる
+        // 3) 「#t #app」と打つ（前の版の名前）→ 空白でチップ → 続けて打てる
         c = make()
-        type(c, "-t -ap")
-        expect(c.filterInput.palette?.mode == .values(.type), "「-t -ap」は -type の値の候補")
+        type(c, "#t #ap")
+        expect(c.filterInput.palette?.mode == .values(.type), "「#t #ap」は #type の値の候補")
         type(c, "p ")
-        expect(c.filterInput.committed == ["-type app"] && c.queryText.isEmpty, "「-t -app 」→ -type app \(c.filterInput.committed) 「\(c.queryText)」")
+        expect(c.filterInput.committed == ["#type app"] && c.queryText.isEmpty, "「#t #app 」→ #type app \(c.filterInput.committed) 「\(c.queryText)」")
         type(c, "sa")
-        expect(c.queryText == "sa" && focused(c), "「-t -app」の後に打てる「\(c.queryText)」")
+        expect(c.queryText == "sa" && focused(c), "「#t #app」の後に打てる「\(c.queryText)」")
 
-        // 4) 「-t -ap」で Tab（ゴースト）→ 決まる
+        // 4) 「#t #ap」で Tab（ゴースト）→ 決まる
         c = make()
-        type(c, "-t -ap")
+        type(c, "#t #ap")
         key(c, #selector(NSResponder.insertTab(_:)))
-        expect(c.filterInput.committed == ["-type app"] && focused(c), "「-t -ap」で Tab → \(c.filterInput.committed)")
+        expect(c.filterInput.committed == ["#type app"] && focused(c), "「#t #ap」で Tab → \(c.filterInput.committed)")
         type(c, "x")
         expect(c.queryText == "x", "Tab の後に打てる")
 
         // 5) 次のコマンドの札を押す・Backspace でチップを消す
         c = make()
         c.panel.makeFirstResponder(nil)
-        c.filterInput.acceptNext("-kind ss")
+        c.filterInput.acceptNext("#kind ss")
         expect(focused(c), "札を押した後も入力欄が first responder")
         key(c, #selector(NSResponder.deleteBackward(_:)))
         expect(c.filterInput.committed.isEmpty && focused(c), "Backspace でチップを消した後も打てる")
@@ -423,7 +423,7 @@ enum FocusTest {
 
         // 6) 候補が多いとき: 行は一度に全部作らず、↓ で選ぶとスクロールする
         c = make()
-        type(c, "-type app ")
+        type(c, "#type app ")
         let many = (0..<1500).map { RowItem(title: "見本アプリ \($0)", sub: "/Applications/見本\($0).app", iconImage: NSImage(), hint: RowItem.appHint) }
         c.setResults([ResultSection(title: "アプリ", symbol: "app.badge", items: many)], query: c.filterInput.currentQuery)
         expect(c.resultCount == 1500 && c.builtRowCount <= SearchPanelController.rowBatch, "1500 件で作った行は \(c.builtRowCount)")

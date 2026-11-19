@@ -419,7 +419,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     static let allLimit = 100_000
 
     static func sections(_ q: String, engine e: Engine, withFiles: Bool, order: SectionOrder = .auto) -> Sections {
-        // 絞り込みのコマンド（-type -kind -ext -date -path -name）が効いているときは上限で切らず全部出す（パネルはスクロール）
+        // 絞り込みのコマンド（#type #kind #ext #date #path #name）が効いているときは上限で切らず全部出す（パネルはスクロール）
         let filtered = QueryFilters.parse(q).isActive
         let total = filtered ? allLimit : SearchPanelController.maxRows
         let aj = e.searchJudged(q, limit: total)

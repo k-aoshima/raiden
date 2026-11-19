@@ -1,32 +1,32 @@
 import Foundation
 
-/// 入力欄の絞り込みコマンド（-kind ss -date 7d -path Desktop 請求書）。名前は Spotlight（kind / date / modified / created）と
-/// find / fd（-type -ext -path -name）にそろえた。
+/// 入力欄の絞り込みコマンド（#kind ss #date 7d #path Desktop 請求書）。名前は Spotlight（kind / date / modified / created）と
+/// find / fd（#type #ext #path #name）にそろえた。
 /// QueryIntent（「昨日の」「PDFの」を言い方から推測して点数を上げ下げする）と違い、当てはまらない物は候補から外す確実な絞り込み。
 ///
-///   違うコマンドどうしは「かつ」。同じコマンドを 2 回・カンマ区切りは「または」（-kind pdf,doc、-path Desktop -path Downloads）。
-///   -date・-modified・-created を 2 回書いたら後の方で上書き（範囲は 11-14..11-16 で書く）。
-///   アプリ（-type app / -kind app）は -kind（アプリ以外）・-ext・-date・-modified・-created・-path と一緒に使えない（知らせる）。
+///   違うコマンドどうしは「かつ」。同じコマンドを 2 回・カンマ区切りは「または」（#kind pdf,doc、#path Desktop #path Downloads）。
+///   #date・#modified・#created を 2 回書いたら後の方で上書き（範囲は 11-14..11-16 で書く）。
+///   アプリ（#type app / #kind app）は #kind（アプリ以外）・#ext・#date・#modified・#created・#path と一緒に使えない（知らせる）。
 ///   コマンドを抜いた残りの文がふつうの曖昧検索。残りが空なら絞り込んだ物を新しい順に並べる。
-///   知らないコマンドや読めない値は絞り込まずに notes に「-size は使えません」のように残す。
-///   打っている途中（「-」だけ、「-date」で値がまだ無い、最後の値が打ちかけ）は絞り込みも知らせもしない（pending）。
-///   コマンドと読むのは、入力の先頭か空白の直後の「-」＋文字だけ（「kobako-devlog」「2026-11」「-1」は普通の文字）。
+///   知らないコマンドや読めない値は絞り込まずに notes に「#size は使えません」のように残す。
+///   打っている途中（「#」だけ、「#date」で値がまだ無い、最後の値が打ちかけ）は絞り込みも知らせもしない（pending）。
+///   コマンドと読むのは、入力の先頭か空白の直後の「#」「＃」＋文字だけ（「C#」「#1」は普通の文字）。
 public struct QueryFilters: Sendable {
     public enum Command: String, Sendable, CaseIterable {
         case kind, type, ext, date, modified, created, path, name, help
         public var takesValue: Bool { self != .help }
-        public var name: String { "-" + rawValue }
-        /// 短い別名（find / fd と同じ 1 文字）。-date は無し
+        public var name: String { QueryFilters.mark + rawValue }
+        /// 短い別名（find / fd と同じ 1 文字）。#date は無し
         public var short: String? {
             switch self {
-            case .kind: return "-k"
-            case .type: return "-t"
-            case .ext: return "-e"
-            case .modified: return "-m"
-            case .created: return "-c"
-            case .path: return "-p"
-            case .name: return "-n"
-            case .help: return "-h"
+            case .kind: return "#k"
+            case .type: return "#t"
+            case .ext: return "#e"
+            case .modified: return "#m"
+            case .created: return "#c"
+            case .path: return "#p"
+            case .name: return "#n"
+            case .help: return "#h"
             case .date: return nil
             }
         }
@@ -36,7 +36,7 @@ public struct QueryFilters: Sendable {
     /// 1 つのコマンドの読み取り結果（検索の記録に残す用）
     public struct Parsed: Sendable {
         public let command: Command?   // nil は知らないコマンド
-        public let raw: String         // 書かれたとおり（-date 7d）
+        public let raw: String         // 書かれたとおり（#date 7d）
         public let value: String?
         public let meaning: String?    // どう解釈したか（直近7日、PDF・Word）。読めなければ nil
         public let ok: Bool
@@ -56,14 +56,14 @@ public struct QueryFilters: Sendable {
     public var text = ""                  // コマンドを抜いた残り（ふつうの曖昧検索に使う）
     public var hasSyntax = false          // コマンドが 1 つでも書かれていた（無ければ今までの検索そのまま）
     public var parsed: [Parsed] = []
-    public var notes: [String] = []       // 「-size は使えません」など
+    public var notes: [String] = []       // 「#size は使えません」など
     public var help = false
-    /// 値がまだ無い・打ちかけのコマンド（"" は「-」だけ）。絞り込みには使わない
+    /// 値がまだ無い・打ちかけのコマンド（"" は「#」だけ）。絞り込みには使わない
     public var pending: String?
     public var dates: [Command: DateCond] = [:]
     public var types: Set<String> = []    // f / d / app
     public var kinds: Set<String> = []    // FileCatalog.families の名前（folder・app も）
-    public var kindExts: Set<String> = [] // -kind md / txt（拡張子で見る種類）
+    public var kindExts: Set<String> = [] // #kind md / txt（拡張子で見る種類）
     public var exts: Set<String> = []
     public var paths: [String] = []
     public var names: [String] = []       // Describe.normalize 済み
@@ -74,7 +74,7 @@ public struct QueryFilters: Sendable {
     var hasKind: Bool { !kinds.isEmpty || !kindExts.isEmpty }
     /// 絞り込みが効いているか
     public var isActive: Bool { !types.isEmpty || hasKind || !exts.isEmpty || !dates.isEmpty || !paths.isEmpty || !names.isEmpty }
-    /// アプリを頼んだか（-type app / -kind app）
+    /// アプリを頼んだか（#type app / #kind app）
     public var wantsApps: Bool { types.contains("app") || kinds.contains("app") }
     /// アプリを候補に出すか（ファイルにしか効かない条件が付いていれば出さない）
     public var allowsApps: Bool {
@@ -101,8 +101,8 @@ public struct QueryFilters: Sendable {
         ("help", .help), ("h", .help), ("?", .help), ("ヘルプ", .help),
     ]
 
-    /// -type の別名（前の版の名前）。-app → -type app、-folder → -type d、-file → -type f。
-    /// 「-t -app」のように -type の値の位置に来たら値として読む
+    /// #type の別名（前の版の名前）。#app → #type app、#folder → #type d、#file → #type f。
+    /// 「#t #app」のように #type の値の位置に来たら値として読む
     public static let typeShorthands: [(String, String)] = [("app", "app"), ("folder", "d"), ("file", "f")]
 
     static func shorthand(_ token: String) -> String? {
@@ -110,17 +110,17 @@ public struct QueryFilters: Sendable {
         return typeShorthands.first { $0.0 == n }?.1
     }
 
-    /// 打ちかけの別名（「-ap」「-fol」）か
+    /// 打ちかけの別名（「#ap」「#fol」）か
     static func isShorthandPrefix(_ name: String) -> Bool {
         !name.isEmpty && typeShorthands.contains { $0.0.hasPrefix(name) }
     }
 
-    /// トークンの別名を -type の形に直す（-app → -type app、-t -app → -t app）
+    /// トークンの別名を #type の形に直す（#app → #type app、#t #app → #t app）
     public static func expandShorthands(_ toks: [String]) -> [String] {
         var out: [String] = []
         for t in toks {
             if let v = shorthand(t) {
-                if let p = out.last, let pn = commandName(p), command(named: pn) == .type { out.append(v) } else { out += ["-type", v] }
+                if let p = out.last, let pn = commandName(p), command(named: pn) == .type { out.append(v) } else { out += ["#type", v] }
             } else { out.append(t) }
         }
         return out
@@ -163,7 +163,7 @@ public struct QueryFilters: Sendable {
 
     // MARK: - 読み取り
 
-    /// 空白で区切る。「"」で始まる値は次の「"」まで 1 つ（-path "Obsidian Vault"）
+    /// 空白で区切る。「"」で始まる値は次の「"」まで 1 つ（#path "Obsidian Vault"）
     static func tokenize(_ s: String) -> [String] {
         var out: [String] = [], cur = "", quoted = false
         for ch in s {
@@ -186,10 +186,14 @@ public struct QueryFilters: Sendable {
         return t
     }
 
-    /// トークンがコマンドの形か。半角の「-」＋文字（数字・「-」で始まらない）。返り値は名前（「-」だけなら ""）。
-    /// 全角の「ー」「－」は扱わない
+    /// コマンドの始まりの記号。全角の「＃」も同じに扱う（日本語入力のまま打てるように）
+    public static let mark = "#"
+    static func isMark(_ c: Character) -> Bool { c == "#" || c == "＃" }
+
+    /// トークンがコマンドの形か。トークンの先頭の「#」「＃」＋文字（「#1」は数字なので違う。「C#」は途中なので違う）。
+    /// 返り値は名前（「#」だけなら ""）
     public static func commandName(_ token: String) -> String? {
-        guard token.hasPrefix("-") else { return nil }
+        guard let first = token.first, isMark(first) else { return nil }
         let n = String(token.dropFirst())
         if n.isEmpty { return "" }
         if n == "?" { return n }
@@ -210,12 +214,12 @@ public struct QueryFilters: Sendable {
             let isLast = i == toks.count - 1
             if name.isEmpty { if isLast && !trailingSpace { f.pending = "" }; i += 1; continue }
             guard let cmd = command(named: name) else {
-                // 打ちかけ（「-da」）は知らせない。空白を打った後や途中にあれば知らせる
+                // 打ちかけ（「#da」）は知らせない。空白を打った後や途中にあれば知らせる
                 if isLast && !trailingSpace && (aliases.contains(where: { Describe.normalize($0.0).hasPrefix(Describe.normalize(name)) })
                                                 || isShorthandPrefix(name)) {
                     f.pending = name
                 } else {
-                    f.notes.append("-\(name) は使えません")
+                    f.notes.append("#\(name) は使えません")
                     f.parsed.append(Parsed(command: nil, raw: t, value: nil, meaning: nil, ok: false))
                 }
                 i += 1; continue
@@ -227,7 +231,7 @@ public struct QueryFilters: Sendable {
             }
             // 値: 次のトークン（コマンドの形でなければ）
             guard i + 1 < toks.count, commandName(toks[i + 1]) == nil else {
-                // 「-t -ap」（-type の値の位置で別名を打ちかけ）は待つ
+                // 「#t #ap」（#type の値の位置で別名を打ちかけ）は待つ
                 if cmd == .type, i + 2 == toks.count, !trailingSpace, let n = commandName(toks[i + 1]), isShorthandPrefix(n) {
                     f.pending = cmd.rawValue
                     i += 2; continue
@@ -238,7 +242,7 @@ public struct QueryFilters: Sendable {
             let v = unquote(toks[i + 1])
             let valueIsLast = i + 1 == toks.count - 1 && !trailingSpace
             i += 2
-            // 打ちかけの種類（-kind sc → screenshot）は拡張子として読まずに待つ
+            // 打ちかけの種類（#kind sc → screenshot）は拡張子として読まずに待つ
             if valueIsLast && cmd == .kind, let lastPiece = pieces(v).last,
                !kindWords.contains(where: { Describe.normalize($0.0) == lastPiece }),
                kindWords.contains(where: { Describe.normalize($0.0).hasPrefix(lastPiece) }) {
@@ -248,7 +252,7 @@ public struct QueryFilters: Sendable {
             if let meaning = f.apply(cmd, v, now: now) {
                 f.parsed.append(Parsed(command: cmd, raw: t + " " + toks[i - 1], value: v, meaning: meaning, ok: true))
             } else if valueIsLast {
-                f.pending = cmd.rawValue   // 打ちかけ（-date 2026-1）は知らせない
+                f.pending = cmd.rawValue   // 打ちかけ（#date 2026-1）は知らせない
             } else {
                 f.notes.append("\(cmd.name) の「\(v)」は読めません")
                 f.parsed.append(Parsed(command: cmd, raw: t + " " + toks[i - 1], value: v, meaning: nil, ok: false))
@@ -257,11 +261,11 @@ public struct QueryFilters: Sendable {
         // アプリはファイルにしか効かない条件と一緒に使えない
         if f.wantsApps {
             var others: [String] = []
-            if f.kinds.subtracting(["app"]).count > 0 || !f.kindExts.isEmpty { others.append("-kind") }
-            if !f.exts.isEmpty { others.append("-ext") }
+            if f.kinds.subtracting(["app"]).count > 0 || !f.kindExts.isEmpty { others.append("#kind") }
+            if !f.exts.isEmpty { others.append("#ext") }
             for c in [Command.date, .modified, .created] where f.dates[c] != nil { others.append(c.name) }
-            if !f.paths.isEmpty { others.append("-path") }
-            if !others.isEmpty { f.notes.append("アプリ（-type app）と \(others.joined(separator: "・")) は一緒に使えません") }
+            if !f.paths.isEmpty { others.append("#path") }
+            if !others.isEmpty { f.notes.append("アプリ（#type app）と \(others.joined(separator: "・")) は一緒に使えません") }
         }
         f.text = f.hasSyntax ? rest.joined(separator: " ") : query.trimmingCharacters(in: .whitespacesAndNewlines)
         return f
@@ -294,7 +298,7 @@ public struct QueryFilters: Sendable {
                 if let fam = Self.kindWords.first(where: { Describe.normalize($0.0) == p })?.1 {
                     fams.append(fam); ls.append(Self.familyLabel[fam] ?? p); continue
                 }
-                // 種類の名前でなければ拡張子として読む（-kind pdf,docx。-ext と違い、同じ -kind の中の「または」）
+                // 種類の名前でなければ拡張子として読む（#kind pdf,docx。#ext と違い、同じ #kind の中の「または」）
                 guard p.count <= 10, p.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) else { return nil }
                 xs.append(p); ls.append("." + p)
             }
@@ -397,7 +401,7 @@ public struct QueryFilters: Sendable {
         return true
     }
 
-    /// アプリが条件に当てはまるか（アプリに効くのは -name だけ）
+    /// アプリが条件に当てはまるか（アプリに効くのは #name だけ）
     public func matches(app a: AppEntry) -> Bool {
         guard allowsApps else { return false }
         if names.isEmpty { return true }
@@ -406,7 +410,7 @@ public struct QueryFilters: Sendable {
     }
 
     /// path が場所 p の下か。「~/Desktop」「/Users/..」はその下。名前なら、ホームからの親フォルダのどれかの名前に含まれれば当たり。
-    /// 「Documents/仕事」のように「/」を含む名前は、親フォルダまでのパスの一部に含まれれば当たり（find -path と同じ考え）
+    /// 「Documents/仕事」のように「/」を含む名前は、親フォルダまでのパスの一部に含まれれば当たり（find #path と同じ考え）
     public static func isUnder(_ path: String, _ p: String, parentKey: String? = nil) -> Bool {
         if p.hasPrefix("~") || p.hasPrefix("/") {
             var base = (p as NSString).expandingTildeInPath.precomposedStringWithCanonicalMapping

@@ -233,7 +233,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     private var glassView: NSView?
     private var veilView: VeilView?
     private var effectView: NSVisualEffectView?
-    /// 絞り込みのコマンド（-kind ss -date 7d）の一覧・チップ・ゴーストテキスト（FilterUI.swift）
+    /// 絞り込みのコマンド（#kind ss #date 7d）の一覧・チップ・ゴーストテキスト（FilterUI.swift）
     let filterInput = FilterInput()
     var selectedRow: Int { selected }
 
