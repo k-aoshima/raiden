@@ -139,9 +139,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let b = try BGEEmbedder(modelDir: dir, body: "body.mlmodelc", computeUnits: .cpuOnly)
             try b.load()
             let store = try Store()
+            if store.migratedFiles > 0 {
+                rlog("ファイル・フォルダのベクトルを 2 値に変換 \(store.migratedFiles) 件（作り直しなし）")
+            }
             // 入力文と例のベクトルは覚えておく（ファイル一覧を作り直すたびに例を入れ直すため）
             let e = Engine(embedder: CachedEmbedder(b), store: store)
             let scope = DispatchQueue.main.sync { settings.scope }
+            // 検索範囲のファイルを並べる（フォルダへのアクセスの許可を待っている間はここで止まるので、記録に残す）
+            rlog("いつも開くアプリを調べる（検索範囲のファイルを並べる）")
             let opens = OpenWithIndex.build(scope: scope)
             e.setApps(AppCatalog.collect(opens: opens), opens: opens)
             e.loadExamples()

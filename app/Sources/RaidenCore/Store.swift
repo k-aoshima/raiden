@@ -45,8 +45,11 @@ public final class Store {
         CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
         """)
         try exec(Store.searchLogSchema)
-        migrateFileVectorsToBinary()
+        migratedFiles = migrateFileVectorsToBinary()
     }
+
+    /// 起動時に float32 から 2 値へ変換したファイル・フォルダの点の数（0 なら変換済み・新しい DB）
+    public private(set) var migratedFiles = 0
 
     deinit { sqlite3_close(db) }
 
@@ -311,7 +314,11 @@ public final class Store {
         try? exec("UPDATE nodes SET description='' WHERE kind IN ('file','folder')")
         try? exec("INSERT OR REPLACE INTO meta(k, v) VALUES('file_vectors', 'bin1')")
         try? exec("COMMIT")
-        if !rows.isEmpty { try? exec("VACUUM") }
+        if !rows.isEmpty {
+            try? exec("VACUUM")
+            // WAL のままだと詰めた結果が -wal に残り、本体のファイルは小さくならないので書き戻す
+            try? exec("PRAGMA wal_checkpoint(TRUNCATE)")
+        }
         return rows.count
     }
 
