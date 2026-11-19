@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// アプリの並べ方の既定（raiden-eval の --sweep / --combos の結果で決めた。README 参照）
@@ -55,6 +56,9 @@ public struct FileResult: Sendable {
 public final class Engine {
     public let embedder: Embedder
     public var appMix = Mix.appDefault
+    /// 入力に種類の言葉（PDF・ワード・画像…）があるとき、手元のその種類をいちばん多く開くアプリに足す点
+    /// （raiden-eval --sweep-open で決めた。0.05〜0.3 で既存 25 問の例ありは変わらず、自作アプリは大きいほど上がる）
+    public var openBonus: Float = 0.15
     public var fileMix = Mix.fileDefault
     public let useDict: Bool
     public let store: Store?
@@ -62,6 +66,7 @@ public final class Engine {
     private(set) public var apps: [AppEntry] = []
     private var appVecs: [[Float]] = []
     private var byKey: [String: Int] = [:]
+    private var topOpener: [String: Int] = [:]  // 種類 → その種類をいちばん多く開くアプリの番号
     private(set) public var examples: [ExampleNode] = []
     private var exVecs: [[Float]] = []
     private var appCorpus = Corpus()
@@ -75,7 +80,13 @@ public final class Engine {
         self.useDict = useDict
     }
 
-    public func setApps(_ list: [AppEntry]) {
+    /// opens を渡すと、グラフの線 app → file（opens）も Store に張り直す
+    public func setApps(_ list: [AppEntry], opens: OpenWithIndex? = nil) {
+        if let store, let opens { store.replaceOpens(opens.pairs, apps: list) }
+        var top: [String: (Int, Int)] = [:]
+        for (i, a) in list.enumerated() {
+            for (f, n) in a.opens where n > (top[f]?.1 ?? 0) { top[f] = (i, n) }
+        }
         let descs = list.map { Describe.text($0, useDict: useDict) }
         let vs: [[Float]]
         if let store {
@@ -85,6 +96,7 @@ public final class Engine {
         }
         lock.lock()
         apps = list; appVecs = vs
+        topOpener = top.mapValues(\.0)
         byKey = Dictionary(list.enumerated().map { ($1.key, $0) }, uniquingKeysWith: { a, _ in a })
         rebuildAppCorpus()
         lock.unlock()
@@ -161,9 +173,26 @@ public final class Engine {
     /// ベクトルを作り済みの入力で並べる（答え合わせで組み合わせを振るとき用）
     public func rankApps(query q: String, vec: [Float], mix: Mix, limit: Int = 8) -> [SearchResult] {
         lock.lock()
-        let c = appCorpus, apps = self.apps
+        let c = appCorpus, apps = self.apps, top = topOpener
         lock.unlock()
-        return Ranker.rank(c, query: q, vec: vec, mix: mix, limit: limit).map { SearchResult(app: apps[$0.0], score: $0.1) }
+        // いつも開くアプリの加点: 全部並べてから足して並べ直す（アプリは百数十個なので軽い）
+        let boost = openBonus > 0 ? Set(QueryIntent.parse(q).families.compactMap { top[$0] }) : []
+        if boost.isEmpty {
+            return Ranker.rank(c, query: q, vec: vec, mix: mix, limit: limit).map { SearchResult(app: apps[$0.0], score: $0.1) }
+        }
+        return Ranker.rank(c, query: q, vec: vec, mix: mix, limit: apps.count)
+            .map { ($0.0, $0.1 + (boost.contains($0.0) ? openBonus : 0)) }
+            .sorted { $0.1 > $1.1 }.prefix(limit)
+            .map { SearchResult(app: apps[$0.0], score: $0.1) }
+    }
+
+    /// Raiden からファイルを開いたとき、実際に開いたアプリを覚える（file → app の opened_with の線）
+    public func recordOpened(file path: String, appURL: URL?) {
+        guard let store else { return }
+        let app = appURL ?? NSWorkspace.shared.urlForApplication(toOpen: URL(fileURLWithPath: path))
+        guard let app else { return }
+        let key = Bundle(url: app)?.bundleIdentifier ?? app.standardizedFileURL.path
+        store.recordOpenedWith(file: path, appKey: key, appName: app.deletingPathExtension().lastPathComponent)
     }
 
     // MARK: - ファイル・フォルダ

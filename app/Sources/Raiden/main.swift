@@ -47,7 +47,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try b.load()
             let store = try Store()
             let e = Engine(embedder: b, store: store)
-            e.setApps(AppCatalog.collect())
+            let opens = OpenWithIndex.build()
+            e.setApps(AppCatalog.collect(opens: opens), opens: opens)
             e.loadExamples()
             bge = b
             engine = e
@@ -65,7 +66,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func rescan() {
         work.async { [weak self] in
             guard let self, let e = self.engine else { return }
-            e.setApps(AppCatalog.collect())
+            let opens = OpenWithIndex.build()
+            e.setApps(AppCatalog.collect(opens: opens), opens: opens)
             self.lastScan = Date()
         }
     }
