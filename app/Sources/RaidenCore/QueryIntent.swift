@@ -99,14 +99,33 @@ public struct QueryIntent: Sendable {
             ("最近", r(day(-14), day(1))), ("この前", r(day(-14), day(1))), ("こないだ", r(day(-14), day(1))),
             ("recent", r(day(-14), day(1))),
         ]
-        for (w, rg) in fixed where q.contains(w) {
+        // 「直近一週間」「過去3日」「ここ2週間」「1か月以内」: 今日までの N 日・週・月。「3日前」（その日あたり）は下で別に読む
+        let kanjiNum: [Character: Int] = ["一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10, "数": 3]
+        let pat = "(直近|過去|ここ|この|最近|最新)?\\s*([0-9０-９]+|[一二三四五六七八九十数]+)\\s*(日間|日|週間|週|か月|ヶ月|カ月|ヵ月)(以内|の間|間)?"
+        if let m = q.range(of: pat, options: .regularExpression) {
+            let s = String(q[m])
+            let qualified = ["直近", "過去", "ここ", "この", "最近", "最新"].contains { s.hasPrefix($0) } || s.hasSuffix("以内") || s.hasSuffix("間")
+            let after = q[m.upperBound...]
+            if qualified && !after.hasPrefix("前") {
+                let half = s.applyingTransform(.fullwidthToHalfwidth, reverse: false) ?? s
+                var n = Int(String(half.filter { $0.isASCII && $0.isNumber })) ?? 0
+                if n == 0 { n = s.compactMap { kanjiNum[$0] }.reduce(0) { $0 == 0 ? $1 : ($1 == 10 ? $0 * 10 : $0 + $1) } }
+                if n == 0 { n = 1 }
+                let days = s.contains("週") ? 7 * n : (s.contains("月") ? 30 * n : n)
+                it.range = r(day(-days), day(1))
+                rest = rest.replacingOccurrences(of: s, with: " ")
+            }
+        }
+        for (w, rg) in fixed where it.range == nil && q.contains(w) {
             it.range = rg
             rest = rest.replacingOccurrences(of: w, with: " ")
             break
         }
-        if it.range == nil, let m = q.range(of: "([0-9]+)(日|週間|か月|ヶ月|カ月)前", options: .regularExpression) {
+        if it.range == nil, let m = q.range(of: "([0-9０-９]+|[一二三四五六七八九十数]+)(日|週間|週|か月|ヶ月|カ月|ヵ月)前", options: .regularExpression) {
             let s = String(q[m])
-            let n = Int(s.prefix { $0.isNumber }) ?? 0
+            let half = s.applyingTransform(.fullwidthToHalfwidth, reverse: false) ?? s
+            var n = Int(String(half.filter { $0.isASCII && $0.isNumber })) ?? 0
+            if n == 0 { n = s.compactMap { kanjiNum[$0] }.reduce(0) { $0 == 0 ? $1 : ($1 == 10 ? $0 * 10 : $0 + $1) } }
             if s.contains("日") { it.range = r(day(-n - 1), day(-n + 2)) }
             else if s.contains("週") { it.range = r(day(-7 * n - 4), day(-7 * n + 4)) }
             else { it.range = r(cal.date(byAdding: .day, value: -30 * n - 15, to: today)!, cal.date(byAdding: .day, value: -30 * n + 15, to: today)!) }
@@ -127,7 +146,7 @@ public struct QueryIntent: Sendable {
             rest = rest.replacingOccurrences(of: String(q[m]), with: " ")
         }
         // 残りから「やつ」「した」など中身の無い言葉を落とす
-        for w in ["いじった", "使った", "開いた", "見た", "作った", "した", "やつ", "もの", "ファイル"] {
+        for w in ["いじった", "使った", "開いた", "見た", "作った", "撮った", "撮影した", "保存した", "した", "やつ", "もの", "ファイル"] {
             rest = rest.replacingOccurrences(of: w, with: " ")
         }
         let t = rest.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters).union(CharacterSet(charactersIn: "のをにでがはとも")))

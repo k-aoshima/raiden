@@ -256,6 +256,16 @@ public enum Ranker {
         var adjust = [Float](repeating: 0, count: n)
         if m.intents, let it = intent, !it.isEmpty {
             let folderOK = !m.folderHeadOnly || it.wantsFolder
+            // 言われた期間に当てはまる物が1つも無いとき（「昨日のスクショ」が無い等）は、外れた物を消すのではなく、
+            // 期間に近い日付の物ほど上に出す（-1 の代わりに、離れた日数に応じて小さく下げる）
+            var nearestFallback = false
+            if let r = it.range, m.timeFilter {
+                let wantFam = it.families.subtracting(["folder"])
+                nearestFallback = !(0..<n).contains { i in
+                    guard let md = c.meta[i], wantFam.isEmpty || !wantFam.isDisjoint(with: md.families) else { return false }
+                    return it.download ? r.contains(md.added) : md.times.contains { r.contains($0) }
+                }
+            }
             for i in 0..<n {
                 guard let md = c.meta[i] else { continue }
                 let isFolder = md.families.contains("folder")
@@ -282,7 +292,18 @@ public enum Ranker {
                             return it.download ? r.contains(cm.added) : cm.times.contains { r.contains($0) }
                         }
                     }
-                    if hit { adjust[i] += m.timeBonus } else if m.timeFilter { adjust[i] -= 1 }
+                    if hit { adjust[i] += m.timeBonus }
+                    else if nearestFallback {
+                        let ts = it.download ? [md.added] : md.times
+                        var gap = Int.max
+                        for t in ts {
+                            let d: Int = t < r.lowerBound ? r.lowerBound - t : (t > r.upperBound ? t - r.upperBound : 0)
+                            if d < gap { gap = d }
+                        }
+                        let gapDays = Float(min(gap, 3650 * 86400)) / 86400
+                        adjust[i] += m.timeBonus * 0.8 / (1 + gapDays / 3)   // 近い日付ほど、期間内に近い加点
+                    }
+                    else if m.timeFilter { adjust[i] -= 1 }
                 }
             }
         }

@@ -43,6 +43,7 @@ public enum AppCatalog {
                 let path = dir + "/" + item
                 guard let info = NSDictionary(contentsOfFile: path + "/Contents/Info.plist") as? [String: Any] else { continue }
                 let bid = info["CFBundleIdentifier"] as? String ?? ""
+                if bid == "com.kosuke.raiden" { continue }  // Raiden 自身は候補に出さない
                 let key = bid.isEmpty ? path : bid
                 if seen.contains(key) { continue }  // 同じ bundle id は最初の 1 個だけ
                 seen.insert(key)
