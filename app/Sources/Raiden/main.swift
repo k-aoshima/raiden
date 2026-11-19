@@ -13,8 +13,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var engine: Engine?
     private var bge: BGEEmbedder?
     private let work = DispatchQueue(label: "raiden.work", qos: .userInitiated)
+    /// ファイル一覧の作り直し（初回のベクトル化は数十秒かかるので、検索の列とは分ける）と、ファイルを選んだ例の保存。
+    /// FileIndex はこの列からだけ触る
+    private let fileWork = DispatchQueue(label: "raiden.files", qos: .utility)
+    /// アプリを選んだ例の保存（Store がファイルのベクトル化で塞がっていても、検索の列を止めないように分ける）
+    private let learnWork = DispatchQueue(label: "raiden.learn", qos: .utility)
     private var generation = 0
-    private var lastScan = Date.distantPast
+    private var pendingQuery: DispatchWorkItem?
+    /// 入力が止まってから検索するまでの待ち
+    private static let debounce: TimeInterval = 0.1
+    private var fileIndex: FileIndex?
+    private var fileWatcher: FSWatcher?
+    private var appWatcher: FSWatcher?
+    /// 一度でもファイル一覧ができたか（それまでは「ファイル準備中…」でアプリだけ出す）
+    private var filesReady = false
+    /// 取りこぼしの保険の全体の見直し（ふだんは FSEvents で変化をすぐ拾う）
+    private static let fullScanInterval: TimeInterval = 86400
     private var unloadTimer: Timer?
     private var unloadItems: [NSMenuItem] = []
     private let defaults = UserDefaults.standard
@@ -29,12 +43,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusItem()
         setupHotKey()
         panel.onQuery = { [weak self] q in self?.query(q) }
-        panel.onOpen = { [weak self] q, r in self?.open(q, r) }
+        panel.onOpen = { [weak self] q, c, reveal in self?.open(q, c, reveal: reveal) }
         panel.onHide = { [weak self] in self?.scheduleUnload() }
-        panel.setStatus("準備中…")
+        panel.setStatus("準備中…", symbol: "hourglass")
         work.async { [weak self] in self?.boot() }
-        // アプリの追加・削除を拾う（10 分おき）
-        Timer.scheduledTimer(withTimeInterval: 600, repeats: true) { [weak self] _ in self?.rescan() }
+        // 取りこぼしの保険（1 日 1 回、アプリもファイルも全体を見直す）
+        Timer.scheduledTimer(withTimeInterval: Self.fullScanInterval, repeats: true) { [weak self] _ in
+            self?.rescan()
+            self?.fullScanFiles()
+        }
     }
 
     // MARK: 起動
@@ -46,27 +63,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let b = try BGEEmbedder(modelDir: dir, body: "body.mlmodelc", computeUnits: .cpuOnly)
             try b.load()
             let store = try Store()
-            let e = Engine(embedder: b, store: store)
+            // 入力文と例のベクトルは覚えておく（ファイル一覧を作り直すたびに例を入れ直すため）
+            let e = Engine(embedder: CachedEmbedder(b), store: store)
             e.setApps(AppCatalog.collect())
             e.loadExamples()
             bge = b
             engine = e
-            lastScan = Date()
             let msg = String(format: "起動 %.1fs  アプリ %d  例 %d  メモリ %.0fMB",
                              Date().timeIntervalSince(t0), e.apps.count, e.examples.count, physFootprintMB())
             NSLog("Raiden: %@", msg)
-            DispatchQueue.main.async { self.panel.setStatus("") }
+            DispatchQueue.main.async {
+                self.panel.setStatus("ファイル準備中…", symbol: "hourglass")
+                self.startWatching(e)
+                self.fullScanFiles()
+            }
         } catch {
             NSLog("Raiden: 起動に失敗 %@", "\(error)")
-            DispatchQueue.main.async { self.panel.setStatus("モデルを読めませんでした") }
+            DispatchQueue.main.async { self.panel.setStatus("モデルを読めませんでした", symbol: "exclamationmark.triangle") }
         }
     }
 
     private func rescan() {
         work.async { [weak self] in
-            guard let self, let e = self.engine else { return }
+            guard let e = self?.engine else { return }
             e.setApps(AppCatalog.collect())
-            self.lastScan = Date()
+        }
+    }
+
+    /// FSEvents で見張り始める。全体の見直しより先に始めるので、見直しの間の変化も後で拾える
+    private func startWatching(_ e: Engine) {
+        let idx = FileIndex(engine: e)
+        fileIndex = idx
+        fileWatcher = FSWatcher(paths: idx.roots) { [weak self] change in
+            self?.fileWork.async {
+                let st = idx.apply(change)
+                NSLog("Raiden: ファイルの変化 %d 件・削除 %d 件（ベクトル化 %d 件）%.2fs",
+                      st.changed, st.removed, st.embedded, st.seconds)
+            }
+        }
+        // アプリの場所はフォルダ単位で十分（.app の中の細かい変化はまとめて 1 回の取り直しになる）
+        appWatcher = FSWatcher(paths: AppCatalog.dirs, fileEvents: false, quiet: 1.0, maxWait: 5.0) { [weak self] _ in
+            self?.rescan()
+        }
+    }
+
+    /// ファイル一覧を全体から作り直す（起動時と 1 日 1 回）。変わったものだけベクトル化する
+    private func fullScanFiles() {
+        guard let idx = fileIndex else { return }
+        fileWork.async { [weak self] in
+            let st = idx.fullScan { n in
+                DispatchQueue.main.async {
+                    if self?.filesReady == false { self?.panel.setStatus("ファイル準備中… \(n)", symbol: "hourglass") }
+                }
+            }
+            NSLog("Raiden: ファイル %d 件（ベクトル化 %d 件、例 %d）%.1fs", st.changed, st.embedded, st.examples, st.seconds)
+            DispatchQueue.main.async {
+                guard let self, !self.filesReady else { return }
+                self.filesReady = true
+                self.panel.setStatus("")
+            }
         }
     }
 
@@ -95,7 +150,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if panel.isVisible { panel.hide(); return }
         unloadTimer?.invalidate()
         panel.show()
-        if Date().timeIntervalSince(lastScan) > 600 { rescan() }
         // 解放していたら、打ち始める前に読み直しておく
         if let b = bge, !b.isLoaded {
             work.async {
@@ -107,30 +161,99 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: 検索と開く
 
+    /// 入力のたびに呼ばれる。入力が止まって debounce 秒たってから検索し、古い問い合わせは捨てる
     private func query(_ q: String) {
         generation += 1
         let g = generation
+        pendingQuery?.cancel()
+        pendingQuery = nil
         if q.isEmpty { panel.setResults([], query: q); return }
-        work.async { [weak self] in
-            guard let self, let e = self.engine else { return }
-            // 打っている途中の古い問い合わせは捨てる
-            var stale = false
-            DispatchQueue.main.sync { stale = g != self.generation }
-            if stale { return }
-            let rs = e.search(q, limit: SearchPanelController.maxRows)
-            DispatchQueue.main.async {
-                if g == self.generation { self.panel.setResults(rs, query: q) }
+        let withFiles = filesReady
+        let item = DispatchWorkItem { [weak self] in
+            self?.work.async {
+                guard let self, let e = self.engine else { return }
+                // 待っている間に次の文字が来ていたら捨てる
+                var stale = false
+                DispatchQueue.main.sync { stale = g != self.generation }
+                if stale { return }
+                let (sections, notFound) = Self.sections(q, engine: e, withFiles: withFiles)
+                DispatchQueue.main.async {
+                    if g == self.generation { self.panel.setResults(sections, query: q, notFound: notFound) }
+                }
             }
+        }
+        pendingQuery = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.debounce, execute: item)
+    }
+
+    /// アプリとファイルを節に分けて並べる（合計 maxRows 件）。
+    /// 点数はアプリとファイルで付け方が違う（アプリは k近傍法の重み 1.0、ファイルは時間・種類・フォルダの加点）ので混ぜない。
+    /// ふだんはアプリの節が先。時間・種類・つながりの言葉（「先週のPDF」「〜のとこ」）があればファイルの節を先にする。
+    /// 先の節は最大 4 件、残りを後の節に回す（後の節が少なければ先の節に戻す）。
+    /// 返り値の notFound は「見つからない」（パネルは「見つかりません」を出し、候補を薄く下に並べる）。
+    /// 判定は Engine の点数しきい値の担当が足す印を使う予定。まだ無いので、いまは常に false。
+    static func sections(_ q: String, engine e: Engine, withFiles: Bool) -> ([ResultSection], Bool) {
+        let total = SearchPanelController.maxRows
+        let apps = e.search(q, limit: total).map { RowItem(.app($0)) }
+        let appSec = ResultSection(title: "アプリ", symbol: "app.badge", items: apps)
+        let notFound = false
+        guard withFiles else { return ([appSec], notFound) }
+        let files = e.searchFiles(q, limit: total).map { RowItem(.file($0)) }
+        let it = QueryIntent.parse(q)
+        let fileFirst = !it.isEmpty || it.hasRelation
+        let fileSec = ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: files)
+        var first = fileFirst ? fileSec : appSec, second = fileFirst ? appSec : fileSec
+        let firstMax = 4
+        let nSecond = min(second.items.count, total - min(first.items.count, firstMax))
+        let nFirst = min(first.items.count, total - nSecond)
+        first.items = Array(first.items.prefix(nFirst))
+        second.items = Array(second.items.prefix(nSecond))
+        return ([first, second], notFound)
+    }
+
+    private func open(_ q: String, _ c: Candidate, reveal: Bool) {
+        let ws = NSWorkspace.shared
+        switch c {
+        case .app(let r):
+            if reveal {
+                ws.selectFile(r.app.path, inFileViewerRootedAtPath: "")
+            } else {
+                let cfg = NSWorkspace.OpenConfiguration()
+                cfg.activates = true
+                ws.openApplication(at: URL(fileURLWithPath: r.app.path), configuration: cfg) { _, err in
+                    if let err { NSLog("Raiden: 開けませんでした %@", "\(err)") }
+                }
+            }
+            learnWork.async { [weak self] in self?.engine?.learn(query: q, app: r.app) }
+        case .file(let r):
+            let url = URL(fileURLWithPath: r.file.path)
+            if reveal {
+                ws.selectFile(r.file.path, inFileViewerRootedAtPath: "")
+            } else if r.file.isDir, let finder = ws.urlForApplication(withBundleIdentifier: "com.apple.finder") {
+                // フォルダは既定のアプリに関係なく Finder で開く
+                let cfg = NSWorkspace.OpenConfiguration()
+                cfg.activates = true
+                ws.open([url], withApplicationAt: finder, configuration: cfg) { _, err in
+                    if let err { NSLog("Raiden: 開けませんでした %@", "\(err)") }
+                }
+            } else if !ws.open(url) {
+                NSLog("Raiden: 開けませんでした %@", r.file.path)
+            }
+            learnFile(q, r.file)
         }
     }
 
-    private func open(_ q: String, _ r: SearchResult) {
-        let cfg = NSWorkspace.OpenConfiguration()
-        cfg.activates = true
-        NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: r.app.path), configuration: cfg) { _, err in
-            if let err { NSLog("Raiden: 開けませんでした %@", "\(err)") }
+    /// 「入力 → ファイル」を例として保存し、メモリの Corpus にも足す（次から k近傍法で効く）。
+    /// Engine にはファイル用の保存が無いので Store に記録し、メモリへは addFileExamples で入れる。
+    /// ファイル一覧の作り直し（setFiles）と順番が入れ違わないよう、同じ列で行う
+    private func learnFile(_ query: String, _ f: FileEntry) {
+        let q = query.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty, let e = engine else { return }
+        fileWork.async {
+            let v = e.embedder.embed(q)
+            e.store?.recordFileChoice(query: q, path: f.path, isDir: f.isDir, name: f.name, vector: v, model: e.embedder.identifier)
+            e.addFileExamples([(q, f.path)])
         }
-        work.async { [weak self] in self?.engine?.learn(query: q, app: r.app) }
     }
 
     // MARK: モデルの解放
@@ -180,6 +303,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         unloadMinutes = s.tag
         unloadItems.forEach { $0.state = $0.tag == s.tag ? .on : .off }
     }
+}
+
+// Raiden --snapshot <dir>: 入力欄の見本を PNG に書き出して終わる（画面には出さない）
+if let i = CommandLine.arguments.firstIndex(of: "--snapshot") {
+    let dir = CommandLine.arguments.count > i + 1 ? CommandLine.arguments[i + 1] : "docs/ui"
+    Snapshot.run(dir: dir)
+    exit(0)
 }
 
 let app = NSApplication.shared

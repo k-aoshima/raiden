@@ -3,7 +3,7 @@
 「PDFを見るやつ」「黒い画面でコマンド打つやつ」のような曖昧な言い方で、Mac に入っているアプリを探して開くランチャー（最小版）。
 
 - メニューバー常駐（Dock には出ない）。**⌥Space** で画面中央に入力欄が出る（取れなければ ⌃⌥⌘Space）。
-- 打つたびに候補を最大 8 件、アイコン付きで出す。↑↓ で選んで Enter で開く。Esc で閉じる。
+- 打つのが止まって 0.1 秒たったら、アプリとファイル・フォルダの候補を合わせて最大 9 件、アイコン付きで出す。↑↓ で選んで Enter で開く（フォルダは Finder で開く）。⌘Enter で Finder に表示。Esc で閉じる。
 - 文章を作るモデル（LLM）は使わない。使うのは文の埋め込みモデル **BAAI/bge-m3** だけで、Core ML に変換してアプリの中で動かす（Python も常駐ヘルパーも無し）。
 - 選んで開いた「入力した文 → アプリ」を覚え、次から k近傍法で効かせる。使うほど当たる。
 
@@ -56,11 +56,21 @@ HF_HOME=/Volumes/SSD/hf uv run python export_tokenizer.py --out /Volumes/SSD/rai
 - `nodes(id, kind, key, name, description, vector, desc_hash, updated_at)` — kind は app / example / file / folder。desc_hash は「モデル名＋説明文」のハッシュで、変わった時だけベクトルを作り直す。
 - `edges(from_id, to_id, kind, weight, last_used)` — example→app の `chose`（weight は選んだ回数）、folder→中の物の `contains`、同じ日に使った物どうしの `co_used`（weight は回数）、変更日・追加日が 30 分以内の物どうしの `co_time`。
 
-近さはメモリに載せたベクトルとの総当たりの内積。アプリ一覧は起動時と 10 分おき（と入力欄を開いた時に 10 分以上たっていれば）に取り直す。
+近さはメモリに載せたベクトルとの総当たりの内積。アプリ一覧は起動時に取り、あとはアプリの場所（`AppCatalog.dirs`）を FSEvents で見張って、変化があれば取り直す（ベクトルは説明文が変わったアプリだけ作り直す）。
 
 ### ファイルとフォルダ（app/Sources/RaidenCore/FileCatalog.swift, QueryIntent.swift, Ranker.swift）
 
-Engine の `searchFiles` で探す（アプリの画面にはまだつないでいない）。
+Engine の `searchFiles` で探す。
+
+- 入力欄では「アプリ」と「ファイル・フォルダ」の節に分けて出す。点数の付け方が違う（アプリは k近傍法の重み 1.0、ファイルは時間・種類・フォルダの加点）ので、点数では混ぜない。ふだんはアプリの節が先で、時間・種類・つながりの言葉があればファイルの節が先。先の節は最大 4 件、残りを後の節に回す。
+- 一覧は FSEvents（1 ファイルずつの通知）で変化をすぐ拾う（`FileWatch.swift` の `FSWatcher` と `FileIndex`）。追加・変更・名前変更はその物と親フォルダを作り直し、説明文が変わった物だけベクトル化する。消えた物は中の物ごと外し、点と線（消えた物に向いた例の chose の線も）を消す。短い間の大量の変化は、静かになって 0.6 秒（最大 2 秒）ためて 1 回にまとめる。
+- 取りこぼしの保険: 起動時と 1 日 1 回は全体を見直す。FSEvents の履歴が途切れた印（MustScanSubDirs など）が来たら、その場所の中だけ見直す。初回のベクトル化の間は「ファイル準備中…」でアプリだけ出す。
+- 確かめ: `raiden-eval --watch-test --store <raiden.sqlite のコピー>`。`~/Documents/raiden-test-<pid>` で作る・書き換える・名前を変える・消す・100 個まとめて作る、を行い、検索に出るまでの時間を測って、最後にフォルダごと消す。2026-11-19: 作る 1.8 秒、書き換え 1.2 秒、名前変更 0.9 秒、削除 0.8 秒。100 個は 5.9 秒で全部入り、CPU 4.3 秒（74%）、footprint 42 → 45MB、その間の検索は最大 56ms。
+
+### 入力欄の見た目（app/Sources/Raiden/SearchPanel.swift）
+
+macOS 26 以降は Liquid Glass（`NSGlassEffectView`、白寄りの tint）、それより前は `NSVisualEffectView`。OS がダークモードでもパネルはライト（`.aqua`）で、文字は濃いグレー。選択中の行は面の色だけで示す。見本は `build/Raiden --snapshot docs/ui` で PNG に書き出す（画面には出さない。ガラスのぼかしは画面外では描かれないので、白い面だけが写る）。
+- 選んだ「入力 → ファイル」は例の点から chose の線で残し（`Store.recordFileChoice`）、一覧を作り直すたびに `Engine.addFileExamples` で入れ直す。
 
 - 対象は `~/Documents`・`~/Downloads`・`~/Desktop`・`~/Documents/Obsidian Vault`。隠しファイル・パッケージの中・`.app`・node_modules / .venv などは除く。パスは NFC に揃える。
 - 説明文: 名前・Spotlight の種類名（kMDItemKind）・種類の日本語と英語・親フォルダ名・中身の頭 260 字（PDF は PDFKit、txt / md / csv / html はそのまま、docx は AppKit）。フォルダは中の種類の数と名前 10 個。

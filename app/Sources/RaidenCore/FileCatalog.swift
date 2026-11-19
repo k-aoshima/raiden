@@ -34,14 +34,15 @@ public enum FileCatalog {
 
     static let skipDirs: Set<String> = ["node_modules", ".venv", "venv", "__pycache__", ".git", "DerivedData", "Pods"]
 
+    static let resourceKeys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .fileSizeKey, .contentModificationDateKey,
+                                                 .creationDateKey, .addedToDirectoryDateKey]
+
     /// 一覧を作る。隠しファイル・パッケージの中・アプリ本体・node_modules などは除く。roots 自体は点にしない。
     public static func collect(roots: [String] = defaultRoots) -> [FileEntry] {
         let fm = FileManager.default
-        let keys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .fileSizeKey, .contentModificationDateKey,
-                                      .creationDateKey, .addedToDirectoryDateKey]
+        let keys = resourceKeys
         var seen = Set(roots)
         var out: [FileEntry] = []
-        let tz = TimeInterval(TimeZone.current.secondsFromGMT())
         for root in roots {
             guard let en = fm.enumerator(at: URL(fileURLWithPath: root), includingPropertiesForKeys: keys,
                                          options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
@@ -56,32 +57,68 @@ public enum FileCatalog {
                 }
                 if seen.contains(path) { if isDir { en.skipDescendants() }; continue }
                 seen.insert(path)
-                var kind = isDir ? "フォルダ" : "書類"
-                var lastUsed = 0, used: [Int] = [], added = Int(rv?.addedToDirectoryDate?.timeIntervalSince1970 ?? 0)
-                var froms = false
-                if let it = MDItemCreate(nil, url.path as CFString) {
-                    if let k = MDItemCopyAttribute(it, kMDItemKind) as? String, !k.isEmpty { kind = k }
-                    if let d = MDItemCopyAttribute(it, kMDItemLastUsedDate) as? Date { lastUsed = Int(d.timeIntervalSince1970) }
-                    if let ds = MDItemCopyAttribute(it, "kMDItemUsedDates" as CFString) as? [Date] {
-                        used = ds.map { Int(($0.timeIntervalSince1970 + tz) / 86400) }
-                    }
-                    if let d = MDItemCopyAttribute(it, "kMDItemDateAdded" as CFString) as? Date, added == 0 {
-                        added = Int(d.timeIntervalSince1970)
-                    }
-                    if let w = MDItemCopyAttribute(it, kMDItemWhereFroms) as? [String], !w.isEmpty { froms = true }
-                }
-                out.append(FileEntry(
-                    path: path, name: name.precomposedStringWithCanonicalMapping,
-                    parentName: url.deletingLastPathComponent().lastPathComponent.precomposedStringWithCanonicalMapping,
-                    isDir: isDir, kind: kind.precomposedStringWithCanonicalMapping,
-                    families: families(name: name, isDir: isDir), size: rv?.fileSize ?? 0,
-                    mtime: Int(rv?.contentModificationDate?.timeIntervalSince1970 ?? 0),
-                    created: Int(rv?.creationDate?.timeIntervalSince1970 ?? 0),
-                    added: added, lastUsed: lastUsed, usedDays: used,
-                    downloaded: froms || path.hasPrefix(home + "/Downloads/")))
+                out.append(makeEntry(url: url, rv: rv, kindFallback: false))
             }
         }
         return out
+    }
+
+    /// 1 個分を作り直す（FSEvents で変化した物）。無ければ nil。
+    /// できたばかりの物は Spotlight の種類名がまだ無いことがあるので、そのときは UTType の名前で埋める
+    public static func entry(path: String) -> FileEntry? {
+        let url = URL(fileURLWithPath: path)
+        guard let rv = try? url.resourceValues(forKeys: Set(resourceKeys)) else { return nil }
+        return makeEntry(url: url, rv: rv, kindFallback: true)
+    }
+
+    /// 探す対象に入るパスか（roots のどれかの中で、隠し・node_modules など・アプリやパッケージの中でない）。roots 自体は false
+    public static func isIncluded(_ path: String, roots: [String] = defaultRoots) -> Bool {
+        guard let root = roots.filter({ path.hasPrefix($0 + "/") }).max(by: { $0.count < $1.count }) else { return false }
+        let comps = path.dropFirst(root.count + 1).split(separator: "/").map(String.init)
+        var cur = root
+        for (i, c) in comps.enumerated() {
+            if c.hasPrefix(".") || skipDirs.contains(c) || c.hasSuffix(".app") { return false }
+            cur += "/" + c
+            // 途中のフォルダがパッケージ（.key・.photoslibrary など）なら、その中は見ない
+            if i < comps.count - 1,
+               (try? URL(fileURLWithPath: cur).resourceValues(forKeys: [.isPackageKey]))?.isPackage == true { return false }
+        }
+        return true
+    }
+
+    static func makeEntry(url: URL, rv: URLResourceValues?, kindFallback: Bool) -> FileEntry {
+        let path = url.path.precomposedStringWithCanonicalMapping
+        let name = url.lastPathComponent
+        let isDir = (rv?.isDirectory ?? false) && !(rv?.isPackage ?? false)
+        let tz = TimeInterval(TimeZone.current.secondsFromGMT())
+        var kind = isDir ? "フォルダ" : "書類"
+        var mdKind = false
+        var lastUsed = 0, used: [Int] = [], added = Int(rv?.addedToDirectoryDate?.timeIntervalSince1970 ?? 0)
+        var froms = false
+        if let it = MDItemCreate(nil, url.path as CFString) {
+            if let k = MDItemCopyAttribute(it, kMDItemKind) as? String, !k.isEmpty { kind = k; mdKind = true }
+            if let d = MDItemCopyAttribute(it, kMDItemLastUsedDate) as? Date { lastUsed = Int(d.timeIntervalSince1970) }
+            if let ds = MDItemCopyAttribute(it, "kMDItemUsedDates" as CFString) as? [Date] {
+                used = ds.map { Int(($0.timeIntervalSince1970 + tz) / 86400) }
+            }
+            if let d = MDItemCopyAttribute(it, "kMDItemDateAdded" as CFString) as? Date, added == 0 {
+                added = Int(d.timeIntervalSince1970)
+            }
+            if let w = MDItemCopyAttribute(it, kMDItemWhereFroms) as? [String], !w.isEmpty { froms = true }
+        }
+        if kindFallback, !mdKind, !isDir,
+           let t = UTType(filenameExtension: (name as NSString).pathExtension), let d = t.localizedDescription, !d.isEmpty {
+            kind = d
+        }
+        return FileEntry(
+            path: path, name: name.precomposedStringWithCanonicalMapping,
+            parentName: url.deletingLastPathComponent().lastPathComponent.precomposedStringWithCanonicalMapping,
+            isDir: isDir, kind: kind.precomposedStringWithCanonicalMapping,
+            families: families(name: name, isDir: isDir), size: rv?.fileSize ?? 0,
+            mtime: Int(rv?.contentModificationDate?.timeIntervalSince1970 ?? 0),
+            created: Int(rv?.creationDate?.timeIntervalSince1970 ?? 0),
+            added: added, lastUsed: lastUsed, usedDays: used,
+            downloaded: froms || path.hasPrefix(home + "/Downloads/"))
     }
 
     // MARK: - 種類
