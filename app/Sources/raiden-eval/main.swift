@@ -3,8 +3,10 @@
 //   raiden-eval --model-dir <dir> --body body_int8.mlmodelc [--units ane|cpu|gpu|all] [--sweep] [--reload]
 //   raiden-eval --nl     （参考: OS の NLContextualEmbedding）
 //   --no-extra    自作アプリなどの説明の材料（AppExtra）と「いつも開くファイル」を使わない（前の作りと比べる）
-//   --show-desc   説明の材料が付いたアプリの説明文を並べる
+//   --show-desc   説明の材料か他社アプリの辞書が付いたアプリの説明文を並べる
 //   --apps-own <path>  自作アプリの問題（既定 ~/Library/Application Support/Raiden/evals/apps-own.json）
+//   --apps-3p <path>   他社アプリの問題（既定 ~/Library/Application Support/Raiden/evals/apps-3p.json）
+//   RAIDEN_NO_SPOTLIGHT=1  アプリの一覧を Spotlight で広げない（前の作りと比べる）
 //   --open-bonus <x> / --sweep-open  いつも開くアプリの加点（Engine.openBonus）を変える / 振って比べる
 //   --knn-w <x> / --knn-min <x> / --knn-pow <x> / --sweep-knn  アプリの k近傍法（例の重み・最低の近さ・近さの何乗）
 //
@@ -87,12 +89,17 @@ if let i = args.firstIndex(of: "--compile"), i + 2 < args.count {
 
 let fpStart = physFootprintMB()
 // --no-extra: 標準アプリ以外の説明の材料（AppExtra）を使わない（前の作りと比べる用）
+let tCollect = Date()
 let apps = AppCatalog.collect(extras: !args.contains("--no-extra"))
-print("アプリ \(apps.count) 個 / 起動時メモリ \(String(format: "%.0f", fpStart))MB")
+print("アプリ \(apps.count) 個（一覧づくり \(String(format: "%.2f", Date().timeIntervalSince(tCollect)))s） / 起動時メモリ \(String(format: "%.0f", fpStart))MB")
+if args.contains("--list-apps") {
+    for a in apps { print("\(a.jp)\t\(a.bundleID)\t\(a.path)") }
+    exit(0)
+}
 
 // --show-desc: 説明の材料が付いたアプリの説明文を並べて終わる
 if args.contains("--show-desc") {
-    for a in apps where !a.extra.isEmpty || !a.opens.isEmpty { print("[\(a.jp)] \(Describe.text(a))\n") }
+    for a in apps where !a.extra.isEmpty || !a.opens.isEmpty || (appDict[a.bundleID] != nil && !a.bundleID.hasPrefix("com.apple.")) { print("[\(a.jp)] \(Describe.text(a))\n") }
     exit(0)
 }
 
@@ -100,8 +107,12 @@ if args.contains("--show-desc") {
 //   --apps-own <path>（既定 ~/Library/Application Support/Raiden/evals/apps-own.json）。無ければ飛ばす
 struct OwnQ: Decodable { let q: String; let gold: [String] }
 let ownPath = opt("--apps-own") ?? RaidenPaths.support.appendingPathComponent("evals/apps-own.json").path
-let OWN: [(String, [String])] = ((try? JSONDecoder().decode([OwnQ].self, from: Data(contentsOf: URL(fileURLWithPath: ownPath)))) ?? [])
-    .map { ($0.q, $0.gold) }
+func loadQs(_ path: String) -> [(String, [String])] {
+    ((try? JSONDecoder().decode([OwnQ].self, from: Data(contentsOf: URL(fileURLWithPath: path)))) ?? []).map { ($0.q, $0.gold) }
+}
+let OWN = loadQs(ownPath)
+// 他社アプリを曖昧な言い方で探す問題（形は apps-own.json と同じ）
+let THIRD = loadQs(opt("--apps-3p") ?? RaidenPaths.support.appendingPathComponent("evals/apps-3p.json").path)
 
 // トークナイザの答え合わせ: --dump-texts <file> で全文を書き出し、Python で正解を作って --check-tokens <file> <ids.json>
 func allTexts(_ apps: [AppEntry]) -> [String] {
@@ -251,6 +262,10 @@ run(rich, PARTIAL, examples: true, "名前の一部")
 if !OWN.isEmpty {
     run(rich, OWN, examples: false, "自作アプリ・例なし")
     run(rich, OWN, examples: true, "自作アプリ・例あり")
+}
+if !THIRD.isEmpty {
+    run(rich, THIRD, examples: false, "他社アプリ・例なし")
+    run(rich, THIRD, examples: true, "他社アプリ・例あり")
 }
 print(String(format: "答え合わせ後メモリ footprint %.0fMB / 実メモリ(resident) %.0fMB", physFootprintMB(), residentMB()))
 

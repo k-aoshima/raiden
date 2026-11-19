@@ -2,11 +2,15 @@ import Foundation
 
 /// 標準アプリ以外（自作アプリなど）の説明の材料。名前と分類くらいしか手がかりが無いアプリのために、
 /// Info.plist の説明・権限の説明・ソースのフォルダの README・自分で書いたメモから短い文を集める。
+///   0. bundle id が Mac ごとに変わる Web アプリは、名前で引く手書きの辞書（appDictByName）を先頭に入れる
 ///   1. ~/Library/Application Support/Raiden/app-notes.json（{"bundle id か名前": "説明"}。標準アプリにも効く）
 ///   2. NSHumanReadableCopyright / CFBundleGetInfoString（普通の著作権表示・版番号・名前そのものは除く）
 ///   3. ~/Project/<アプリ名 か bundle id の末尾>（大文字小文字は区別しない）の README.md → CLAUDE.md →
 ///      .claude/CLAUDE.md → docs/SPEC.md のうち最初に見つかった 1 つの、最初の見出しと最初の段落（300 字まで）
-///   4. NS*UsageDescription（「This app needs access to the camera」のような決まり文句は除く）
+///   4. NS*UsageDescription（「This app needs access to the camera」のような決まり文句は除く）。
+///      手書きの辞書（appDict）があるアプリには使わない。英語の権限の説明はマイク・カメラ・Apple Events・
+///      Bluetooth などの使用理由だけのことがほとんどで、何をするアプリかを言わず名前と辞書の重みを薄めるため。
+///      辞書が無いアプリでも、英語のものは決まった道具（マイク・カメラなど）に触れるものを除き、1 つまで
 /// 2 と 4 は ja.lproj/InfoPlist.strings に日本語があればそちらを使う。2〜4 は com.apple.* には使わない（手書きの辞書がある）。
 /// 名前の重みが薄まらないよう、合計 maxChars 字で打ち切る（前の材料ほど優先）。
 public enum AppExtra {
@@ -51,6 +55,11 @@ public enum AppExtra {
     static let usageBoilerRe = re(
         #"^this app (needs|requires) access to (the |your )?[\w ]+\.?$|^a program running within|^an application in|"#
         + #"^a feature in .* is requesting|extension wants to|^the operation being performed|アクセス(が|を)(必要|許可)"#)
+    /// 英語の権限の説明で、どのアプリにもある道具の使用理由（何をするアプリかは言っていない）
+    static let usageGenericRe = re(
+        #"microphone|camera|apple ?events|bluetooth|location|contacts|calendars?|reminders|photos?( library)?|"#
+        + #"downloads folder|desktop folder|documents folder|local network|speech recognition|accessibility|"#
+        + #"control (other )?apps|send commands|removable volumes|network volumes|elevated permission|screen recording"#)
     static let linkRe = try! NSRegularExpression(pattern: #"!?\[([^\]]*)\]\([^)]*\)"#)
 
     static func clean(_ s: String) -> String {
@@ -75,6 +84,9 @@ public enum AppExtra {
     public static func text(path: String, info: [String: Any], bundleID bid: String, names: [String], ctx: Context) -> String {
         var parts: [String] = []
         let tail = String(bid.split(separator: ".").last ?? "")
+        let byName = names.lazy.compactMap { appDictByName[$0.lowercased()] }.first
+        if let d = byName { parts.append(d) }
+        let hasDict = appDict[bid] != nil || byName != nil
         if let n = (names + [bid, tail]).lazy.compactMap({ ctx.notes[$0.lowercased()] }).first {
             parts.append(clean(n))
         }
@@ -96,11 +108,15 @@ public enum AppExtra {
                 parts.append(r)
             }
             // 広告の追跡（NSUserTracking）は何をするアプリかを言っていないので使わない
-            for k in merged.keys.sorted() where k.hasPrefix("NS") && k.hasSuffix("UsageDescription")
+            var english = 0
+            for k in merged.keys.sorted() where !hasDict && k.hasPrefix("NS") && k.hasSuffix("UsageDescription")
                 && k != "NSUserTrackingUsageDescription" {
-                if let v = (merged[k] as? String).map(clean), meaningfulUsage(k, v), !parts.contains(v) {
-                    parts.append(v)
+                guard let v = (merged[k] as? String).map(clean), meaningfulUsage(k, v), !parts.contains(v) else { continue }
+                if v.allSatisfy({ $0.isASCII }) {
+                    if english >= 1 || matches(usageGenericRe, v) { continue }
+                    english += 1
                 }
+                parts.append(v)
             }
         }
         var out = ""

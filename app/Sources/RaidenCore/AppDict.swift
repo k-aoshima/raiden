@@ -1,4 +1,5 @@
-// Mac に最初から入っているアプリの短い説明（手書き。LLM は使っていない）。
+// アプリの短い説明（手書き。LLM は使っていない）。Mac に最初から入っているアプリと、よく使われる他社のアプリ。
+// 自作アプリ（~/Project にソースがあるもの）は AppExtra が README などから材料を拾うので、ここには書かない。
 //
 // 注意: 答え合わせ（raiden-eval の Q）の言い方（「PDFを見るやつ」「黒い画面でコマンド打つやつ」など）を
 // そのまま書き写さないこと。写すと答え合わせが甘くなる。言い換えた語で、何をするアプリかを書く。
@@ -45,7 +46,7 @@ public let appDict: [String: String] = [
     "com.apple.Image_Capture": "スキャナ カメラやiPhoneから画像を取り込む",
     "com.apple.AppStore": "アプリの入手 アップデート 購入",
     "com.apple.Chess": "チェス 対局 ボードゲーム",
-    "com.apple.games": "ゲーム",
+    "com.apple.games": "Apple Arcade 入れたゲームの一覧 実績 ランキング Game Center",
     "com.apple.journal": "日記 振り返り",
     "com.apple.FontBook": "フォント 書体の管理",
     "com.apple.ScreenContinuity": "iPhoneの画面をMacで操作",
@@ -82,4 +83,52 @@ public let appDict: [String: String] = [
     "com.apple.BluetoothFileExchange": "Bluetoothでファイルを送る",
     "com.apple.airport.airportutility": "AirMacベースステーション",
     "com.apple.VoiceOverUtility": "画面読み上げ アクセシビリティ",
+    // ── 他社のアプリ（日本語と英語の両方の言葉で、何をするアプリか）──
+    "com.unity3d.UnityEditor5.x": "ゲームエンジン Unity のエディタ。2D・3D のゲームを開発 シーン スクリプト C# game engine editor",
+    "com.unity3d.unityhub": "Unity でゲームを開発するための入口。エディタの版とプロジェクトを管理 game engine launcher",
+    "org.godotengine.godot": "オープンソースのゲームエンジン。2D・3D のゲームを開発する GDScript game engine",
+    "org.blenderfoundation.blender": "3DCG ソフト。モデリング スカルプト アニメーション レンダリング 3D graphics modeling",
+    "com.valvesoftware.steam": "PC ゲームのストアとランチャー。ゲームの購入 ダウンロード プレイ フレンド game store",
+    "com.live2d.cubism.CECubismEditorApp": "キャラクターのイラストをパーツに分けて動かす 2D アニメーション VTuber のモデル制作 Live2D animation",
+    "com.live2d.cubism.doc.modeling.ui.viewerForOriginalWorkflow.OWViewerDropFrame": "Live2D のモデルの動きを確かめるビューア viewer",
+    "com.microsoft.VSCode": "コードエディタ。プログラミング 拡張機能 デバッグ Git code editor IDE",
+    "com.google.antigravity": "Google の AI コーディングエディタ。エージェントがコードを書いて直す AI code editor IDE",
+    "cc.arduino.IDE2": "マイコンボードのスケッチを書いてビルドしボードへアップロードする開発環境 microcontroller sketch",
+    "com.mitchellh.ghostty": "ターミナルエミュレータ。シェルでコマンドを実行する 端末 terminal emulator",
+    "com.googlecode.iterm2": "ターミナルエミュレータ。シェル 画面分割 タブ terminal emulator",
+    "com.tinyspeck.slackmacgap": "仕事用のチャット。チャンネルでチームと会話 ハドル会議 team chat",
+    "jp.naver.line.mac": "メッセンジャー。トーク スタンプ 無料通話 messenger chat",
+    "md.obsidian": "Markdown のノートアプリ。メモどうしをリンクでつなぐ ナレッジベース notes",
+    "app.cyan.markedit": "Markdown のテキストエディタ。軽い md 書き物 text editor",
+    "com.google.Chrome": "Google の Web ブラウザ。サイト閲覧 タブ 拡張機能 web browser",
+    "com.microsoft.Word": "ワープロ。文書やレポートを作って編集する docx word processor",
+    "com.microsoft.Excel": "表計算ソフト。セル 関数 グラフ xlsx spreadsheet",
+    "com.microsoft.Powerpoint": "発表用のスライドを作るソフト pptx presentation slides",
+    "ai.elementlabs.lmstudio": "大規模言語モデルを自分の Mac にダウンロードして実行しチャットする local LLM",
+    "com.electron.ollama": "大規模言語モデルを自分の Mac 上で実行するツール local LLM runner",
+    "com.anthropic.claudefordesktop": "Anthropic の AI アシスタントのデスクトップ版。質問への回答 文章の下書き 資料の要約 コード作成 AI assistant desktop",
+    "com.anthropic.claude-code-url-handler": "Claude Code のリンクを開くための補助 URL handler",
+    "io.tailscale.ipn.macsys": "VPN。離れた場所にある自分の端末どうしを安全なプライベートネットワークでつなぐ mesh VPN remote access",
+    "com.knollsoft.Rectangle": "ウインドウ整理。ショートカットで画面の左右半分や四隅にウインドウを寄せる window manager",
+    "org.shiftitapp.ShiftIt": "ウインドウの位置と大きさをショートカットで動かす window manager",
+    "org.pqrs.Karabiner-Elements.Settings": "キーボードのキー割り当てを入れ替える リマップ key remapping",
+    "org.pqrs.Karabiner-EventViewer": "キー入力のイベントを確かめる Karabiner の付属ツール key event viewer",
+    "com.lwouis.alt-tab-macos": "Windows 風のウインドウ切り替え。開いているウインドウをサムネイルで選ぶ window switcher",
+    "com.clipy-app.Clipy": "クリップボード履歴。前にコピーした文字を呼び出す clipboard manager",
+    "io.github.keycastr": "押したキーを画面に重ねて表示する 画面収録や配信向け keystroke visualizer",
+    "net.freemacsoft.AppCleaner": "アプリのアンインストール。関連ファイルごと削除する uninstaller",
+    "com.google.drivefs": "Google ドライブ。クラウドのファイルを Finder と同期 cloud storage",
+    "fm.qmk.toolbox": "QMK ファームウェアを自作キーボードのマイコンに書き込む firmware flasher",
+    "org.via.configurator": "VIA 対応キーボードのキーマップを画面で組み替える keymap configurator",
+    "com.LGSI.OnScreen-Control": "LG のモニターの明るさ・入力切替・画面分割を Mac から操作 monitor control",
+    "com.steelseries.SteelSeries-GG": "SteelSeries のゲーミングマウス・キーボード・ヘッドセットの設定 gaming gear",
+    "com.google.inputmethod.Japanese.Tool.ConfigDialog": "Google 日本語入力のオプション 変換の挙動 IME input method",
+    "com.google.inputmethod.Japanese.Tool.DictionaryTool": "Google 日本語入力のユーザー辞書 単語登録 input method",
+    "com.google.chromeremotedesktop.me2me-host-uninstaller": "Chrome リモート デスクトップのホストを取り除く",
+]
+
+/// bundle id が Mac ごとに変わるアプリ（Safari の「Dock に追加」で作る Web アプリ）の説明。キーは名前（小文字）。
+/// AppExtra が説明の材料の先頭に入れる。
+public let appDictByName: [String: String] = [
+    "notebooklm": "Google の AI ノート。資料を読み込ませて要約や質問 音声の解説 AI research notebook",
 ]
