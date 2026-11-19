@@ -237,55 +237,53 @@ public final class Store {
 
     // MARK: - ファイル・フォルダの点と線
 
-    /// ファイル・フォルダの点のベクトルを返す。stamp（説明文の元・日付・大きさ・モデル名のハッシュ）が変わったものだけ
-    /// describe で説明文を作り（中身を読むのはここだけ）、embed し直す。消えたパスの点は消す。
-    public func fileVectors(_ entries: [FileEntry], stamps: [String], describe: (Int) -> String,
-                            embed: (String) -> [Float], progress: ((Int, Int) -> Void)? = nil) -> (vecs: [[Float]], embedded: Int) {
-        // ベクトル化（長いと数分）の間は lock を持たない（設定窓・検索の記録・例の保存を止めないため）。書き込みは 100 件ずつ
-        var have: [String: (String, [Float])] = [:]
-        lock.lock()
+    /// 保存済みのファイル・フォルダの点（パス → (desc_hash, ベクトル)）。ベクトルの無い点は空の配列
+    public func storedFileVectors() -> [String: (hash: String, vec: [Float])] {
+        lock.lock(); defer { lock.unlock() }
+        var have: [String: (hash: String, vec: [Float])] = [:]
         if let st = prepare("SELECT key, desc_hash, vector FROM nodes WHERE kind IN ('file','folder')") {
             while sqlite3_step(st) == SQLITE_ROW { have[text(st, 0)] = (text(st, 1), blob(st, 2)) }
             sqlite3_finalize(st)
         }
-        lock.unlock()
-        var out: [[Float]] = []
-        var made = 0
-        var pending: [(FileEntry, String, [Float], String)] = []
-        func flush() {
-            guard !pending.isEmpty else { return }
-            lock.lock()
-            try? exec("BEGIN")
-            for (e, d, v, h) in pending {
-                _ = upsertNode(kind: e.isDir ? "folder" : "file", key: e.path, name: e.name, description: d, vector: v, hash: h)
-            }
-            try? exec("COMMIT")
-            lock.unlock()
-            pending.removeAll()
+        return have
+    }
+
+    /// ファイル・フォルダの点を書く（vec が nil なら点だけ作ってベクトルは触らない。線を張るため）。まとめて 1 回の BEGIN〜COMMIT
+    public func saveFileNodes(_ rows: [(entry: FileEntry, description: String, vec: [Float]?, hash: String)]) {
+        guard !rows.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        try? exec("BEGIN")
+        for r in rows {
+            _ = upsertNode(kind: r.entry.isDir ? "folder" : "file", key: r.entry.path, name: r.entry.name,
+                           description: r.description, vector: r.vec, hash: r.hash)
         }
-        let total = entries.indices.filter { i in !(have[entries[i].path].map { $0.0 == stamps[i] && !$0.1.isEmpty } ?? false) }.count
-        if total > 0 { progress?(0, total) }
-        for (i, e) in entries.enumerated() {
-            if let old = have[e.path], old.0 == stamps[i], !old.1.isEmpty { out.append(old.1); continue }
-            let d = describe(i)
-            let v = embed(d)
-            out.append(v)
-            made += 1
-            pending.append((e, d, v, stamps[i]))
-            if pending.count >= 100 { flush() }
-            if made % 10 == 0 || made == total { progress?(made, total) }
-        }
-        flush()
-        let live = Set(entries.map(\.path))
-        lock.lock()
+        try? exec("COMMIT")
+    }
+
+    /// keys の点を消す（一覧から消えたパス）
+    public func deleteFileNodes(_ keys: [String]) {
+        guard !keys.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
         try? exec("BEGIN")
         if let del = prepare("DELETE FROM nodes WHERE kind IN ('file','folder') AND key = ?") {
-            for k in have.keys where !live.contains(k) { sqlite3_reset(del); bind(del, 1, k); sqlite3_step(del) }
+            for k in keys { sqlite3_reset(del); bind(del, 1, k); sqlite3_step(del) }
             sqlite3_finalize(del)
         }
         try? exec("COMMIT")
-        lock.unlock()
-        return (out, made)
+    }
+
+    /// 検索の記録で選んだファイル・フォルダの親フォルダ（パス → 選んだ回数）。ベクトル化の順番に使う
+    public func chosenFolders() -> [String: Int] {
+        lock.lock(); defer { lock.unlock() }
+        var out: [String: Int] = [:]
+        guard let st = prepare("SELECT chosen_kind, chosen_key FROM search_log WHERE chosen_kind IN ('file','folder') AND chosen_key IS NOT NULL") else { return out }
+        defer { sqlite3_finalize(st) }
+        while sqlite3_step(st) == SQLITE_ROW {
+            let k = text(st, 1)
+            let dir = text(st, 0) == "folder" ? k : (k as NSString).deletingLastPathComponent
+            out[dir, default: 0] += 1
+        }
+        return out
     }
 
     /// ファイル・フォルダどうしの線（contains / co_used）を、その種類の分だけ入れ替える。組はパス

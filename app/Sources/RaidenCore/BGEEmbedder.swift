@@ -19,6 +19,8 @@ public final class BGEEmbedder: Embedder {
     public let maxTokens: Int
     private let vocab: Int
     private let shapes: [Int]
+    /// 本体が受け付ける件数（読み込んだモデルの入力の形から取る。前の版のモデルは [1]）
+    public private(set) var batchSizes: [Int] = [1]
     private let lock = NSLock()
 
     private var tokenizer: UnigramTokenizer?
@@ -60,7 +62,12 @@ public final class BGEEmbedder: Embedder {
         scales = sd.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
         let cfg = MLModelConfiguration()
         cfg.computeUnits = computeUnits
-        model = try MLModel(contentsOf: try BGEEmbedder.compiled(bodyURL), configuration: cfg)
+        let m = try MLModel(contentsOf: try BGEEmbedder.compiled(bodyURL), configuration: cfg)
+        model = m
+        // 件数の次元: 入力の形の組（EnumeratedShapes）の先頭の数。meta.json ではなくモデルから読む（前の版のモデルと混ざっても壊れない）
+        let shapes = m.modelDescription.inputDescriptionsByName["inputs_embeds"]?.multiArrayConstraint?.shapeConstraint.enumeratedShapes ?? []
+        let bs = Set(shapes.compactMap { $0.first?.intValue })
+        batchSizes = bs.isEmpty ? [1] : bs.sorted()
         lastLoadSeconds = Date().timeIntervalSince(t0)
         return lastLoadSeconds
     }
@@ -95,45 +102,161 @@ public final class BGEEmbedder: Embedder {
     }
 
     public func embed(_ text: String) -> [Float] {
+        waitLock.lock(); waiting += 1; waitLock.unlock()
         lock.lock(); defer { lock.unlock() }
+        waitLock.lock(); waiting -= 1; waitLock.unlock()
         let zero = [Float](repeating: 0, count: dimension)
-        guard (try? loadLocked()) != nil, let tok = tokenizer, let model, let table else { return zero }
-        var ids = tok.encode(text).map(Int.init)
-        if ids.count > maxTokens { ids = Array(ids.prefix(maxTokens - 1)) + [ids.last!] }
+        guard (try? loadLocked()) != nil, let tok = tokenizer, let model else { return zero }
+        let ids = clip(tok.encode(text).map(Int.init))
         let L = shapes.first { $0 >= ids.count } ?? maxTokens
+        return run(model, rows: [ids], B: 1, L: L)?.first ?? zero
+    }
+
+    // 入力 1 文（検索）を待たせない: embed を待っている人がいれば、まとめての次の組は後にする（NSLock は順番を守らないため）
+    private let waitLock = NSLock()
+    private var waiting = 0
+    private func yieldToQueries() {
+        for _ in 0..<2000 {
+            waitLock.lock(); let w = waiting; waitLock.unlock()
+            if w == 0 { return }
+            usleep(500)
+        }
+    }
+
+    /// 長すぎる入力は頭の maxTokens - 1 個と </s> にする
+    private func clip(_ ids: [Int]) -> [Int] {
+        ids.count > maxTokens ? Array(ids.prefix(maxTokens - 1)) + [ids.last!] : ids
+    }
+
+    /// まとめてベクトル化する（ファイルの説明文用）。モデルが件数の次元を持つとき（meta.json の batches）だけ
+    /// B 件ずつ 1 回の予測に通す。短い文から順に並べてまとめるので、同じ組の中のパディングが少ない。
+    /// 件数の次元が無いモデル（前の版）では 1 件ずつ embed と同じ。結果の順番は texts と同じ
+    public func embedBatch(_ texts: [String], batch want: Int = 16) -> [[Float]] {
+        if useBatchProvider { return embedProvider(texts, batch: want) }
+        lock.lock(); _ = try? loadLocked(); let sizes = batchSizes; lock.unlock()
+        let B = sizes.last { $0 <= max(want, 1) } ?? 1
+        if B <= 1 || texts.count <= 1 { return texts.map { embed($0) } }
+        let zero = [Float](repeating: 0, count: dimension)
+        lock.lock()
+        guard (try? loadLocked()) != nil, let tok = tokenizer else { lock.unlock(); return texts.map { _ in zero } }
+        lock.unlock()
+        let ids = texts.map { clip(tok.encode($0).map(Int.init)) }
+        let order = ids.indices.sorted { ids[$0].count < ids[$1].count }
+        var out = [[Float]](repeating: zero, count: texts.count)
+        var i = 0
+        while i < order.count {
+            let chunk = Array(order[i..<min(i + B, order.count)])
+            i += chunk.count
+            let L = shapes.first { $0 >= ids[chunk.last!].count } ?? maxTokens
+            let bShape = sizes.first { $0 >= chunk.count } ?? B
+            yieldToQueries()
+            lock.lock()
+            let vs: [[Float]]? = (try? loadLocked()) != nil && model != nil ? run(model!, rows: chunk.map { ids[$0] }, B: bShape, L: L) : nil
+            lock.unlock()
+            // まとめて通せなかったら 1 件ずつ
+            for (k, j) in chunk.enumerated() { out[j] = vs?[k] ?? embed(texts[j]) }
+        }
+        return out
+    }
+
+    /// 比べる用: 件数の次元を持たないモデルに、1 件ずつの入力を MLArrayBatchProvider でまとめて渡す
+    public var useBatchProvider = false
+
+    private func embedProvider(_ texts: [String], batch: Int) -> [[Float]] {
+        let zero = [Float](repeating: 0, count: dimension)
         let dim = dimension
-        guard let emb = try? MLMultiArray(shape: [1, NSNumber(value: L), NSNumber(value: dim)], dataType: .float16),
-              let mask = try? MLMultiArray(shape: [1, NSNumber(value: L)], dataType: .int32) else { return zero }
+        var out: [[Float]] = []
+        var i = 0
+        while i < texts.count {
+            let part = texts[i..<min(i + max(batch, 1), texts.count)]
+            i += part.count
+            lock.lock(); defer { lock.unlock() }
+            guard (try? loadLocked()) != nil, let tok = tokenizer, let model, let table else { out += part.map { _ in zero }; continue }
+            var fps: [MLFeatureProvider] = []
+            for t in part {
+                let ids = clip(tok.encode(t).map(Int.init))
+                let L = shapes.first { $0 >= ids.count } ?? maxTokens
+                guard let emb = try? MLMultiArray(shape: [1, NSNumber(value: L), NSNumber(value: dim)], dataType: .float16),
+                      let mask = try? MLMultiArray(shape: [1, NSNumber(value: L)], dataType: .int32) else { continue }
+                emb.withUnsafeMutableBytes { raw, _ in
+                    let dst = raw.bindMemory(to: Float16.self)
+                    for k in 0..<(L * dim) { dst[k] = 0 }
+                    table.withUnsafeBytes { tb in
+                        let src = tb.bindMemory(to: Int8.self)
+                        for (t, id) in ids.enumerated() where id >= 0 && id < vocab {
+                            let s = scales[id]
+                            for j in 0..<dim { dst[t * dim + j] = Float16(Float(src[id * dim + j]) * s) }
+                        }
+                    }
+                }
+                mask.withUnsafeMutableBytes { raw, _ in
+                    let m = raw.bindMemory(to: Int32.self)
+                    for k in 0..<L { m[k] = k < ids.count ? 1 : 0 }
+                }
+                if let fp = try? MLDictionaryFeatureProvider(dictionary: ["inputs_embeds": MLFeatureValue(multiArray: emb),
+                                                                         "attention_mask": MLFeatureValue(multiArray: mask)]) {
+                    fps.append(fp)
+                }
+            }
+            guard let res = try? model.predictions(from: MLArrayBatchProvider(array: fps), options: MLPredictionOptions()) else {
+                out += part.map { _ in zero }; continue
+            }
+            for k in 0..<res.count {
+                let arr = res.features(at: k).featureValue(for: "embedding")?.multiArrayValue
+                var v = zero
+                if let arr { for j in 0..<dim { v[j] = arr[j].floatValue } }
+                out.append(Vec.normalized(v))
+            }
+        }
+        return out
+    }
+
+    /// 埋め込み表から（B, L, dim）を作って本体に通す。rows が B より少なければ残りは空の行（マスクは先頭だけ 1）。lock を持って呼ぶ
+    private func run(_ model: MLModel, rows: [[Int]], B: Int, L: Int) -> [[Float]]? {
+        let dim = dimension
+        guard let table,
+              let emb = try? MLMultiArray(shape: [NSNumber(value: B), NSNumber(value: L), NSNumber(value: dim)], dataType: .float16),
+              let mask = try? MLMultiArray(shape: [NSNumber(value: B), NSNumber(value: L)], dataType: .int32) else { return nil }
         emb.withUnsafeMutableBytes { raw, _ in
             let dst = raw.bindMemory(to: Float16.self)
-            for i in 0..<(L * dim) { dst[i] = 0 }
+            for i in 0..<(B * L * dim) { dst[i] = 0 }
             table.withUnsafeBytes { tb in
                 let src = tb.bindMemory(to: Int8.self)
-                for (t, id) in ids.enumerated() where id >= 0 && id < vocab {
-                    let s = scales[id]
-                    let o = id * dim, d = t * dim
-                    for j in 0..<dim { dst[d + j] = Float16(Float(src[o + j]) * s) }
+                for (r, ids) in rows.enumerated() {
+                    for (t, id) in ids.enumerated() where id >= 0 && id < vocab && t < L {
+                        let s = scales[id]
+                        let o = id * dim, d = (r * L + t) * dim
+                        for j in 0..<dim { dst[d + j] = Float16(Float(src[o + j]) * s) }
+                    }
                 }
             }
         }
         mask.withUnsafeMutableBytes { raw, _ in
             let m = raw.bindMemory(to: Int32.self)
-            for i in 0..<L { m[i] = i < ids.count ? 1 : 0 }
+            for r in 0..<B {
+                let n = r < rows.count ? rows[r].count : 1
+                for i in 0..<L { m[r * L + i] = i < n ? 1 : 0 }
+            }
         }
         guard let input = try? MLDictionaryFeatureProvider(dictionary: [
                 "inputs_embeds": MLFeatureValue(multiArray: emb),
                 "attention_mask": MLFeatureValue(multiArray: mask)]),
               let out = try? model.prediction(from: input),
-              let arr = out.featureValue(for: "embedding")?.multiArrayValue else { return zero }
-        var v = [Float](repeating: 0, count: dim)
-        if arr.dataType == .float32 {
-            arr.withUnsafeBytes { raw in
-                let p = raw.bindMemory(to: Float.self)
-                for i in 0..<dim { v[i] = p[i] }
+              let arr = out.featureValue(for: "embedding")?.multiArrayValue else { return nil }
+        let stride = arr.shape.count >= 2 ? arr.strides[0].intValue : dim
+        var vs: [[Float]] = []
+        for r in 0..<rows.count {
+            var v = [Float](repeating: 0, count: dim)
+            if arr.dataType == .float32 {
+                arr.withUnsafeBytes { raw in
+                    let p = raw.bindMemory(to: Float.self)
+                    for i in 0..<dim { v[i] = p[r * stride + i] }
+                }
+            } else {
+                for i in 0..<dim { v[i] = arr[r * stride + i].floatValue }
             }
-        } else {
-            for i in 0..<dim { v[i] = arr[i].floatValue }
+            vs.append(Vec.normalized(v))
         }
-        return Vec.normalized(v)
+        return vs
     }
 }

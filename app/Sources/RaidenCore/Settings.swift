@@ -25,7 +25,12 @@ public struct ScanScope: Equatable, Sendable {
 
     /// 今までの決め打ちと同じ（FileCatalog.defaultRoots と node_modules などの除外）
     public static var `default`: ScanScope { ScanScope(roots: FileCatalog.defaultRoots) }
-    public static let defaultExcludeNames = ["node_modules", ".venv", "venv", "__pycache__", ".git", "DerivedData", "Pods"]
+    /// 除外する名前の初期値。キャッシュ・ビルド物・依存の置き場（中身は数万件になりやすく、探す物ではない）。
+    /// . で始まる名前（.git .venv .build .next .cache）は隠しファイルとして常に除くが、設定で見えるよう載せておく
+    public static let defaultExcludeNames = ["node_modules", ".venv", "venv", "__pycache__", ".git", "DerivedData", "Pods",
+                                             "build", ".build", "dist", "target", ".next", ".cache", "*.log"]
+    /// 2026-11-20 より前の初期値（これだけ知っている settings.json には、増えた分だけを足す）
+    public static let legacyExcludeNames = ["node_modules", ".venv", "venv", "__pycache__", ".git", "DerivedData", "Pods"]
 
     /// ~ を広げ、シンボリックリンクをたどった実際のパスにする（列挙や FSEvents は実際のパスで返すため。/var → /private/var など）
     static func norm(_ p: String) -> String {
@@ -85,6 +90,8 @@ public struct RaidenSettings: Codable, Equatable, Sendable {
     public var folders: [Folder] = RaidenSettings.defaultFolders
     public var excludeFolders: [String] = []
     public var excludeNames: [String] = ScanScope.defaultExcludeNames
+    /// 今まで足した除外の初期値。初期値が増えたら、ここに無い分だけを excludeNames に足す（ユーザーが消した物は戻さない）
+    public var knownExcludeDefaults: [String] = ScanScope.defaultExcludeNames
     // 一般
     public var hotKey: HotKeySetting?          // nil = 既定（⌥Space、取れなければ ⌃⌥⌘Space）
     public var unloadMinutes = 0               // 入力欄を閉じてから何分でモデルを解放するか（0 = 解放しない）
@@ -123,7 +130,7 @@ public struct RaidenSettings: Codable, Equatable, Sendable {
 
     // 項目ごとに読めなければ初期値（古い版・壊れた値で全部が初期値に戻らないように）
     enum CodingKeys: String, CodingKey {
-        case version, folders, excludeFolders, excludeNames, hotKey, unloadMinutes, maxRows, sectionOrder, transparency, learn, logSearches, logDays
+        case version, folders, excludeFolders, excludeNames, knownExcludeDefaults, hotKey, unloadMinutes, maxRows, sectionOrder, transparency, learn, logSearches, logDays
     }
 
     public init(from d: Decoder) throws {
@@ -134,6 +141,10 @@ public struct RaidenSettings: Codable, Equatable, Sendable {
         folders = get(.folders, def.folders)
         excludeFolders = get(.excludeFolders, def.excludeFolders)
         excludeNames = get(.excludeNames, def.excludeNames)
+        // 初期値が増えた分だけを足す。knownExcludeDefaults が無いのは前の版の settings.json（前の初期値だけを知っている）
+        let known = get(.knownExcludeDefaults, ScanScope.legacyExcludeNames)
+        for n in ScanScope.defaultExcludeNames where !known.contains(n) && !excludeNames.contains(n) { excludeNames.append(n) }
+        knownExcludeDefaults = Array(Set(known).union(ScanScope.defaultExcludeNames)).sorted()
         hotKey = (try? c.decodeIfPresent(HotKeySetting.self, forKey: .hotKey)) ?? nil
         unloadMinutes = max(0, get(.unloadMinutes, def.unloadMinutes))
         maxRows = min(max(get(.maxRows, def.maxRows), Self.maxRowsRange.lowerBound), Self.maxRowsRange.upperBound)
@@ -187,9 +198,9 @@ public enum ScopeCounter {
     }
 
     /// 広すぎる場所の目安。メモリは 1 件約 15KB（raiden-eval --files の「ファイル数が増えた場合」: 49,450 件で footprint +734MB。
-    /// ベクトル 4KB に、一覧・線・並べ替えの作業分が乗る）、初回のベクトル化は 1 件約 30ms（約 1000 件で 25〜33 秒）
+    /// ベクトル 4KB に、一覧・線・並べ替えの作業分が乗る）、初回のベクトル化は 1 件約 12ms（8 件ずつまとめて。raiden-eval --bench-embed）
     public static let warnAbove = 50_000
     public static func estimate(_ n: Int) -> (memoryMB: Int, minutes: Int) {
-        (Int(Double(n) * 15.0 / 1024.0), Int((Double(n) * 0.03 / 60).rounded(.up)))
+        (Int(Double(n) * 15.0 / 1024.0), Int((Double(n) * 0.012 / 60).rounded(.up)))
     }
 }

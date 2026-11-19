@@ -107,7 +107,9 @@ func runFileEval(embedder: Embedder, appQs: [(String, [String])], appEngine: Eng
     let store = try opt("--file-store").map { try Store(url: URL(fileURLWithPath: $0)) } ?? Store()
     let e = Engine(embedder: embedder, store: store)
     t = Date()
-    let made = e.setFiles(entries) { n, total in if n % 100 == 0 || n == total { FileHandle.standardError.write("  ベクトル化 \(n)/\(total) 件\n".data(using: .utf8)!) } }
+    // --short-desc: 中身の頭を入れず、名前・場所・種類の短い説明だけでベクトルを作る（二段構えの 1 段目の当たり方）
+    if let b = opt("--embed-batch").flatMap(Int.init) { e.embedBatchSize = b }
+    let made = e.setFiles(entries, full: !args.contains("--short-desc")) { n, total in if n % 100 == 0 || n == total { FileHandle.standardError.write("  ベクトル化 \(n)/\(total) 件\n".data(using: .utf8)!) } }
     let tVec = Date().timeIntervalSince(t)
     let ec = e.fileEdgeCounts
     print("ファイル \(entries.filter { !$0.isDir }.count) 件・フォルダ \(entries.filter(\.isDir).count) 件（一覧 \(f1(tList * 1000))ms）")

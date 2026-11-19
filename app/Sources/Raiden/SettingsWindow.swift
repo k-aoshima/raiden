@@ -5,7 +5,10 @@ import UniformTypeIdentifiers
 /// 一覧とベクトル化の状態（設定窓の「検索範囲」に出す）
 struct IndexStatus {
     var count = 0
+    /// まだベクトルの無い物を作っている（その間も名前の一致と絞り込みでは候補に出る）
     var embedding: (done: Int, total: Int)?
+    /// 中身の頭を入れた説明文で作り直している（検索はもう全部に効く）
+    var refining: (done: Int, total: Int)?
     var scanning = false
     var ready = false
 }
@@ -223,6 +226,12 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
             label.stringValue = "ベクトルを作成中 \(nf.string(from: d as NSNumber) ?? "\(d)")/\(nf.string(from: t as NSNumber) ?? "\(t)")"
             statusIcon?.image = symbol("arrow.triangle.2.circlepath", size: 14, weight: .medium)
             statusIcon?.contentTintColor = SettingsStyle.accent
+            statusBar?.isHidden = false
+            statusBar?.maxValue = Double(max(t, 1)); statusBar?.doubleValue = Double(d)
+        } else if let (d, t) = st.refining, !st.scanning {
+            label.stringValue = "\(nf.string(from: st.count as NSNumber) ?? "\(st.count)") 件・中身を読んで更新中 \(nf.string(from: d as NSNumber) ?? "\(d)")/\(nf.string(from: t as NSNumber) ?? "\(t)")"
+            statusIcon?.image = symbol("doc.text.magnifyingglass", size: 14, weight: .medium)
+            statusIcon?.contentTintColor = SettingsStyle.subText
             statusBar?.isHidden = false
             statusBar?.maxValue = Double(max(t, 1)); statusBar?.doubleValue = Double(d)
         } else if st.scanning || !st.ready {

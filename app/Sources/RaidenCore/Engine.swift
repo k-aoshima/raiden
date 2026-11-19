@@ -54,6 +54,7 @@ public struct SearchResult: Sendable {
 public struct FileResult: Sendable {
     public let file: FileEntry
     public let score: Float
+    public init(file: FileEntry, score: Float) { self.file = file; self.score = score }
 }
 
 /// 検索の本体。アプリも答え合わせ（raiden-eval）もこれを通す。
@@ -80,6 +81,9 @@ public final class Engine {
     private var fileIndex: [String: Int] = [:]
     private var fileKeys: [QueryFilters.FileKeys] = []
     private var ctxCache: FilterContext?   // filterContext の作り置き（setFiles で捨てる）
+    private var fileBases: [String] = []    // 中身を読まない分の説明文（files と同じ並び）
+    private var targetStamps: [String] = [] // 最終の説明文の stamp
+    private var fileStamps: [String] = []   // いまメモリにあるベクトルの stamp（"" はまだ無い、:s 付きは短い説明だけ）
 
     public init(embedder: Embedder, store: Store? = nil, useDict: Bool = true) {
         self.embedder = embedder
@@ -245,23 +249,59 @@ public final class Engine {
 
     // MARK: - ファイル・フォルダ
 
-    /// ファイル・フォルダの点を入れる。説明文が変わったものだけベクトルを作り直し（Store があれば保存）、
-    /// contains（フォルダ → 中の物）と co_used（同じ日に使った物どうし）の線を張る。作り直した数を返す。
-    @discardableResult
-    public func setFiles(_ entries: [FileEntry], progress: ((Int, Int) -> Void)? = nil) -> Int {
+    /// ベクトル化の残り。short はまだベクトルが無い物（名前・場所・種類の短い説明でまず作る）、
+    /// full は短い説明のベクトルしか無く、中身の頭を入れた説明文で作り直す物。どちらもパス
+    public struct FilePending: Sendable {
+        public var short: [String] = []
+        public var full: [String] = []
+        public var isEmpty: Bool { short.isEmpty && full.isEmpty }
+        public init() {}
+    }
+
+    /// ファイル・フォルダの点を入れて、作るべきベクトルを返す（ベクトル化はしない。embedFiles で裏で進める）。
+    /// 保存済みのベクトル（説明文の元・日付・大きさが同じ物）はそのまま使い、無い物は 0 のベクトルで入れる。
+    /// 0 の物も名前の文字一致（ローマ字・打ち間違いも）と絞り込みのコマンドでは候補に出る。
+    /// contains（フォルダ → 中の物）・co_used・co_time の線もここで張る
+    public func installFiles(_ entries: [FileEntry]) -> FilePending {
         let cm = FileCatalog.childrenMap(entries)
         let bases = entries.map { FileCatalog.baseDescription($0, children: cm[$0.path] ?? []) }
         let model = embedder.identifier
         let stamps = zip(entries, bases).map { Store.hash("\(model)\n\($1)\n\($0.mtime) \($0.size)") }
-        let describe: (Int) -> String = { i in
-            let c = FileCatalog.content(entries[i])
-            return c.isEmpty ? bases[i] : bases[i] + " 中身: " + c
+        let have = store?.storedFileVectors() ?? [:]
+        let zero = [Float](repeating: 0, count: embedder.dimension)
+        var vs: [[Float]] = []
+        vs.reserveCapacity(entries.count)
+        var pending = FilePending()
+        var newNodes: [(entry: FileEntry, description: String, vec: [Float]?, hash: String)] = []
+        lock.lock()
+        let prior = Dictionary(files.enumerated().map { ($1.path, $0) }, uniquingKeysWith: { a, _ in a })
+        let priorStamps = fileStamps, priorVecs = fileCorpus.vecs
+        lock.unlock()
+        for (i, e) in entries.enumerated() {
+            // メモリにあれば使う（Store なしの答え合わせ・保存前の物）
+            if let j = prior[e.path], j < priorStamps.count, j < priorVecs.count {
+                let ps = priorStamps[j]
+                if ps == stamps[i] { vs.append(priorVecs[j]); continue }
+                if ps == stamps[i] + Self.shortMark { vs.append(priorVecs[j]); pending.full.append(e.path); continue }
+            }
+            if let h = have[e.path], !h.vec.isEmpty {
+                if h.hash == stamps[i] { vs.append(h.vec); continue }
+                if h.hash == stamps[i] + Self.shortMark { vs.append(h.vec); pending.full.append(e.path); continue }
+            }
+            vs.append(zero)
+            pending.short.append(e.path)
+            if FileCatalog.hasContent(e) { pending.full.append(e.path) }
+            if have[e.path] == nil { newNodes.append((e, "", nil, "")) }
         }
-        var vs: [[Float]], made: Int
-        if let store {
-            (vs, made) = store.fileVectors(entries, stamps: stamps, describe: describe, embed: { self.embedder.embed($0) }, progress: progress)
-        } else {
-            vs = entries.indices.map { embedder.embed(describe($0)) }; made = entries.count
+        // まだベクトルの無い物も点だけ作っておく（線を張るため）。消えた物の点は消す
+        store?.saveFileNodes(newNodes)
+        let live = Set(entries.map(\.path))
+        store?.deleteFileNodes(have.keys.filter { !live.contains($0) })
+        // メモリのベクトルの stamp: まだ無い物は ""、短い説明だけの物は :s 付き
+        let fullSet = Set(pending.full), shortSet = Set(pending.short)
+        let memStamps = entries.indices.map { i -> String in
+            let p = entries[i].path
+            return shortSet.contains(p) ? "" : fullSet.contains(p) ? stamps[i] + Self.shortMark : stamps[i]
         }
         let contains = FileCatalog.containsEdges(entries)
         let co = FileCatalog.coUsedEdges(entries)
@@ -281,11 +321,84 @@ public final class Engine {
         lock.lock()
         files = entries
         fileKeys = keys
+        fileBases = bases
+        fileStamps = memStamps
+        targetStamps = stamps
         ctxCache = nil
         fileIndex = Dictionary(entries.enumerated().map { ($1.path, $0) }, uniquingKeysWith: { a, _ in a })
         fileCorpus = c
         lock.unlock()
-        return made
+        return pending
+    }
+
+    /// 短い説明だけで作ったベクトルの印（desc_hash の後ろに付ける）
+    static let shortMark = ":s"
+    /// まとめてベクトル化する件数（raiden-eval --bench-embed で決めた。8 と 16 は 1 件あたりほぼ同じで、
+    /// 8 のほうが裏で作っている間の検索の待ちが短い。README 参照）
+    public var embedBatchSize = 8
+
+    /// paths のベクトルを作って Corpus と Store に入れる。full なら中身の頭まで入れた説明文、でなければ名前・場所・種類の短い説明。
+    /// 中身を読まない種類（画像・フォルダ…）は短い説明がそのまま最終の説明文。一覧が変わって消えた・変わった物は飛ばす。作った数を返す
+    @discardableResult
+    public func embedFiles(_ paths: [String], full: Bool) -> Int {
+        lock.lock()
+        let items: [(String, FileEntry, String, String)] = paths.compactMap { p in
+            guard let i = fileIndex[p], i < fileBases.count else { return nil }
+            return (p, files[i], fileBases[i], targetStamps[i])
+        }
+        lock.unlock()
+        guard !items.isEmpty else { return 0 }
+        let descs = items.map { it -> String in
+            guard full else { return it.2 }
+            let c = FileCatalog.content(it.1)
+            return c.isEmpty ? it.2 : it.2 + " 中身: " + c
+        }
+        let vs = embedder.embedBatch(descs, batch: embedBatchSize)
+        var rows: [(entry: FileEntry, description: String, vec: [Float]?, hash: String)] = []
+        lock.lock()
+        for (k, it) in items.enumerated() where vs[k].contains(where: { $0 != 0 }) {
+            let done = full || !FileCatalog.hasContent(it.1)
+            let h = done ? it.3 : it.3 + Self.shortMark
+            rows.append((it.1, descs[k], vs[k], h))
+            // 待っている間に一覧が入れ替わっていたら、同じ物（同じ stamp）のときだけ入れる
+            guard let i = fileIndex[it.0], i < targetStamps.count, targetStamps[i] == it.3 else { continue }
+            fileCorpus.setVec(i, vs[k])
+            fileStamps[i] = h
+        }
+        lock.unlock()
+        store?.saveFileNodes(rows)
+        return rows.count
+    }
+
+    /// ファイル・フォルダの点を入れ、ベクトルを全部作ってから返す（答え合わせ・確かめ用。アプリは installFiles と embedFiles で裏で進める）。
+    /// full: false なら短い説明だけ。作り直した数を返す
+    @discardableResult
+    public func setFiles(_ entries: [FileEntry], full: Bool = true, progress: ((Int, Int) -> Void)? = nil) -> Int {
+        let p = installFiles(entries)
+        let total = p.short.count + (full ? p.full.count : 0)
+        if total > 0 { progress?(0, total) }
+        var made = 0
+        let step = max(embedBatchSize * 4, 64)
+        for (list, f) in [(p.short, false), (full ? p.full : [], true)] {
+            var i = 0
+            while i < list.count {
+                let part = Array(list[i..<min(i + step, list.count)])
+                i += part.count
+                embedFiles(part, full: f)
+                made += part.count
+                progress?(made, total)
+            }
+        }
+        return Set(p.short + (full ? p.full : [])).count
+    }
+
+    /// 一覧に入っているパスか
+    public func hasFile(_ path: String) -> Bool { lock.lock(); defer { lock.unlock() }; return fileIndex[path] != nil }
+
+    /// まだベクトルの無い（0 の）ファイル・フォルダの数（設定窓の「ベクトルを作成中」と合わせる用）
+    public var filesWithoutVector: Int {
+        lock.lock(); defer { lock.unlock() }
+        return fileStamps.filter(\.isEmpty).count
     }
 
     /// ファイルの例（入力文, パス）をメモリに足す（答え合わせ用）

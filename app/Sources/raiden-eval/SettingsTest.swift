@@ -47,6 +47,17 @@ func runSettingsTest(embedder: Embedder) throws {
     let part = RaidenSettings.load(from: su)
     check("読めない項目だけ初期値（maxRows 9・logDays 7・フォルダ 1 つ・透明度は 0.9 まで）",
           part.maxRows == 9 && part.logDays == 7 && part.folders.count == 1 && part.transparency == 0.9)
+    // 前の版の settings.json（knownExcludeDefaults が無い）: 増えた初期値だけを足し、ユーザーが消した前の初期値（Pods）は戻さない
+    try #"{"excludeNames": ["node_modules", ".venv", "venv", "__pycache__", ".git", "DerivedData", "*.tmp"]}"#
+        .write(to: su, atomically: true, encoding: .utf8)
+    let mig = RaidenSettings.load(from: su)
+    check("除外の初期値: 増えた分（build・dist・target・*.log）だけ足し、消した Pods は戻さない・足した物は残る",
+          mig.excludeNames.contains("build") && mig.excludeNames.contains("dist") && mig.excludeNames.contains("target")
+          && mig.excludeNames.contains("*.log") && !mig.excludeNames.contains("Pods") && mig.excludeNames.contains("*.tmp"))
+    var mig2 = mig
+    mig2.excludeNames.removeAll { $0 == "build" }
+    try mig2.save(to: su)
+    check("新しい初期値を消したら、読み直しても戻らない", !RaidenSettings.load(from: su).excludeNames.contains("build"))
     let sc = ScanScope(roots: ["~/x"], excludeDirs: ["~/x/skip"], excludeNames: ["node_modules", "*.tmp", "build?"])
     check("除外の名前（そのまま・* ・?・隠し・.app）",
           sc.excludesName("node_modules") && sc.excludesName("a.tmp") && sc.excludesName("build1") && !sc.excludesName("build10")

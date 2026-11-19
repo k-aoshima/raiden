@@ -177,6 +177,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// FSEvents で見張り始める。全体の見直しより先に始めるので、見直しの間の変化も後で拾える
     private func startWatching(_ e: Engine, scope: ScanScope) {
         let idx = FileIndex(engine: e, scope: scope)
+        idx.background = true   // ベクトル化は embedStep で少しずつ（その間も名前の一致と絞り込みでは出る）
         fileIndex = idx
         appliedScope = scope
         watchFiles(idx, roots: scope.roots)
@@ -197,7 +198,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 rlog(String(format: "ファイルの変化 %d 件・削除 %d 件（ベクトル化 %d 件）%.2fs", st.changed, st.removed, st.embedded, st.seconds))
                 let n = idx.engine.files.count
                 DispatchQueue.main.async { self?.indexStatus.count = n; self?.settingsWindow?.refreshStatus() }
+                self?.pumpEmbedding(idx)
             }
+        }
+    }
+
+    /// fileWork の上でだけ触る
+    private var pumping = false
+    private var pumpStart: (Date, Int) = (Date(), 0)   // 始めた時刻と、そのときの済んだ数
+
+    /// ベクトル化の残りを 1 回分（64 件）ずつ進める。1 回ごとに列に積み直すので、その間の FSEvents や範囲の変更も止まらない。
+    /// まだベクトルの無い物（短い説明）を先に全部作り、中身の頭を入れた作り直しは後で少し間をあけて進める。
+    /// どちらも入力欄を開いている間は止める。fileWork の上で呼ぶ
+    private func pumpEmbedding(_ idx: FileIndex) {
+        guard !pumping else { return }
+        guard idx.hasPending else { publishEmbedding(idx); return }
+        pumping = true
+        pumpStart = (Date(), idx.shortDone + idx.fullDone)
+        stepEmbedding(idx)
+    }
+
+    private func stepEmbedding(_ idx: FileIndex) {
+        guard idx === fileIndex else { pumping = false; return }
+        let visible = DispatchQueue.main.sync { panel.isVisible }
+        if visible {
+            // 入力欄を開いている間は止める（検索の埋め込みを待たせない。まだベクトルの無い物も名前の一致と絞り込みでは出る）
+            fileWork.asyncAfter(deadline: .now() + 1) { [weak self] in self?.stepEmbedding(idx) }
+            return
+        }
+        idx.embedStep()
+        publishEmbedding(idx)
+        if !idx.hasPending {
+            pumping = false
+            rlog(String(format: "ベクトル化を終えた %.1fs（最後の一覧で 短い説明 %d 件・中身あり %d 件）", Date().timeIntervalSince(pumpStart.0), idx.shortTotal, idx.fullTotal))
+            return
+        }
+        let gap: TimeInterval = idx.shortDone >= idx.shortTotal ? 0.05 : 0
+        fileWork.asyncAfter(deadline: .now() + gap) { [weak self] in self?.stepEmbedding(idx) }
+    }
+
+    /// ベクトル化の進み具合を入力欄と設定窓に出す（fileWork の上で呼ぶ）
+    private func publishEmbedding(_ idx: FileIndex) {
+        let s = (idx.shortDone, idx.shortTotal), f = (idx.fullDone, idx.fullTotal)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.indexStatus.embedding = s.0 < s.1 ? s : nil
+            self.indexStatus.refining = f.0 < f.1 ? f : nil
+            self.settingsWindow?.refreshStatus()
         }
     }
 
@@ -221,11 +268,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let progress = progressHandler()
         fileWork.async { [weak self] in
             let st = idx.fullScan(progress: progress)
-            rlog(String(format: "ファイル一覧を作り直し %d 件（ベクトル化 %d 件、例 %d）%.1fs", st.changed, st.embedded, st.examples, st.seconds))
+            rlog(String(format: "ファイル一覧を作り直し %d 件（ベクトル化 %d 件・残り %d 件、例 %d）%.1fs", st.changed, st.embedded,
+                        idx.shortTotal, st.examples, st.seconds))
             let n = idx.engine.files.count
+            self?.pumpEmbedding(idx)
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.indexStatus = IndexStatus(count: n, embedding: nil, scanning: false, ready: true)
+                self.indexStatus.count = n; self.indexStatus.scanning = false; self.indexStatus.ready = true
                 self.settingsWindow?.refreshStatus()
                 guard !self.filesReady else { return }
                 self.filesReady = true
@@ -256,9 +305,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let st = idx.setScope(scope, progress: progress)
             rlog(String(format: "検索範囲を当てた 増えた %d 件・外した %d 件（ベクトル化 %d 件）%.1fs", st.changed, st.removed, st.embedded, st.seconds))
             let n = idx.engine.files.count
+            self?.pumpEmbedding(idx)
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.indexStatus = IndexStatus(count: n, embedding: nil, scanning: false, ready: true)
+                self.indexStatus.count = n; self.indexStatus.scanning = false; self.indexStatus.ready = true
                 self.settingsWindow?.refreshStatus()
                 self.rescan()
             }
@@ -372,6 +422,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if q.isEmpty { panel.setResults([], query: q); return }
         let withFiles = filesReady
         let order = settings.sectionOrder
+        // 一覧を作っている間（起動直後・範囲を足した直後）は、まだ一覧に無い物を Spotlight の名前検索で補う
+        let spotlight = indexStatus.scanning || !indexStatus.ready ? settings.scope : nil
         let item = DispatchWorkItem { [weak self] in
             self?.work.async {
                 guard let self, let e = self.engine else { return }
@@ -380,7 +432,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 DispatchQueue.main.sync { stale = g != self.generation }
                 if stale { return }
                 let t0 = Date()
-                let r = Self.sections(q, engine: e, withFiles: withFiles, order: order)
+                let r = Self.sections(q, engine: e, withFiles: withFiles, order: order, spotlight: spotlight)
                 let ms = Date().timeIntervalSince(t0) * 1000
                 DispatchQueue.main.async {
                     guard g == self.generation else { return }
@@ -418,19 +470,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// 絞り込みで全部出すときの上限（実質なし）
     static let allLimit = 100_000
 
-    static func sections(_ q: String, engine e: Engine, withFiles: Bool, order: SectionOrder = .auto) -> Sections {
+    static func sections(_ q: String, engine e: Engine, withFiles: Bool, order: SectionOrder = .auto, spotlight: ScanScope? = nil) -> Sections {
         // 絞り込みのコマンド（#type #kind #ext #date #path #name）が効いているときは上限で切らず全部出す（パネルはスクロール）
         let filtered = QueryFilters.parse(q).isActive
         let total = filtered ? allLimit : SearchPanelController.maxRows
         let aj = e.searchJudged(q, limit: total)
         var appSec = ResultSection(title: "アプリ", symbol: "app.badge", items: aj.results.map { RowItem(.app($0)) })
         appSec.faded = aj.noMatch
-        guard withFiles else {
+        let fq = QueryFilters.parse(q)
+        let extra = spotlight != nil && !fq.hasSyntax ? SpotlightNames.search(q, scope: spotlight!, limit: 5).filter { !e.hasFile($0.path) } : []
+        guard withFiles || !extra.isEmpty else {
             return Sections(sections: [appSec], notFound: aj.noMatch && !appSec.items.isEmpty, appsNoMatch: aj.noMatch, filesNoMatch: false)
         }
-        let fj = e.searchFilesJudged(q, limit: total)
-        var fileSec = ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: fj.results.map { RowItem(.file($0)) })
-        fileSec.faded = fj.noMatch
+        let fj0 = withFiles ? e.searchFilesJudged(q, limit: total) : nil
+        var fileResults = fj0?.results ?? []
+        var filesNoMatch = fj0?.noMatch ?? false
+        if !extra.isEmpty {
+            // 名前が一致した候補の後ろに入れる（ベクトルの近さだけの候補より前）
+            let nq = Lexical.normalize(q)
+            let k = fileResults.prefix { Lexical.normalize($0.file.stem).contains(nq) }.count
+            fileResults.insert(contentsOf: extra.map { FileResult(file: $0, score: 0) }, at: k)
+            filesNoMatch = false
+        }
+        var fileSec = ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: fileResults.map { RowItem(.file($0)) })
+        fileSec.faded = filesNoMatch
         var fileFirst: Bool
         switch order {
         case .appsFirst: fileFirst = false
@@ -438,13 +501,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .auto:
             let it = QueryIntent.parse(q)
             fileFirst = !it.isEmpty || it.hasRelation
-            if aj.noMatch != fj.noMatch { fileFirst = aj.noMatch }
+            if aj.noMatch != filesNoMatch { fileFirst = aj.noMatch }
         }
         var first = fileFirst ? fileSec : appSec, second = fileFirst ? appSec : fileSec
         if filtered {
             let shown = [first, second].filter { !$0.items.isEmpty }
             let notFound = !shown.isEmpty && shown.allSatisfy(\.faded)
-            return Sections(sections: [first, second], notFound: notFound, appsNoMatch: aj.noMatch, filesNoMatch: fj.noMatch)
+            return Sections(sections: [first, second], notFound: notFound, appsNoMatch: aj.noMatch, filesNoMatch: filesNoMatch)
         }
         let firstMax = 4
         let nSecond = min(second.items.count, total - min(first.items.count, firstMax))
@@ -453,7 +516,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         second.items = Array(second.items.prefix(nSecond))
         let shown = [first, second].filter { !$0.items.isEmpty }
         let notFound = !shown.isEmpty && shown.allSatisfy(\.faded)
-        return Sections(sections: [first, second], notFound: notFound, appsNoMatch: aj.noMatch, filesNoMatch: fj.noMatch)
+        return Sections(sections: [first, second], notFound: notFound, appsNoMatch: aj.noMatch, filesNoMatch: filesNoMatch)
     }
 
     private func open(_ q: String, _ c: Candidate, reveal: Bool) {

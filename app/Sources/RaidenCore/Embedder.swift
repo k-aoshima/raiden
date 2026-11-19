@@ -6,6 +6,12 @@ public protocol Embedder: AnyObject {
     var identifier: String { get }
     var dimension: Int { get }
     func embed(_ text: String) -> [Float]
+    /// まとめてベクトル化する（ファイルの説明文用）。既定は 1 件ずつ embed
+    func embedBatch(_ texts: [String], batch: Int) -> [[Float]]
+}
+
+public extension Embedder {
+    func embedBatch(_ texts: [String], batch: Int) -> [[Float]] { texts.map { embed($0) } }
 }
 
 public enum EmbedderError: Error { case unavailable, assets(String) }

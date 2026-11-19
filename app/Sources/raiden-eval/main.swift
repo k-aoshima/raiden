@@ -91,6 +91,8 @@ if let i = args.firstIndex(of: "--compile"), i + 2 < args.count {
 // --test-filters / --dump-entries: 入力欄の絞り込みコマンドの確かめ（モデル不要。FilterEval.swift）
 if args.contains("--test-filters") { runFilterTests() }
 if let p = opt("--dump-entries") { try dumpEntries(p); exit(0) }
+// --bench-embed: ベクトル化の速さとメモリ（1 件ずつとまとめて。BenchEmbed.swift）
+if args.contains("--bench-embed") { try runBenchEmbed() }
 
 let fpStart = physFootprintMB()
 // --no-extra: 標準アプリ以外の説明の材料（AppExtra）を使わない（前の作りと比べる用）
@@ -149,7 +151,8 @@ if args.contains("--nl") {
 } else {
     let dir = URL(fileURLWithPath: opt("--model-dir") ?? "/Volumes/SSD/raiden-models")
     let units: MLComputeUnits = ["cpu": .cpuOnly, "gpu": .cpuAndGPU, "all": .all][opt("--units") ?? ""] ?? .cpuAndNeuralEngine
-    let b = try BGEEmbedder(modelDir: dir, body: opt("--body") ?? "body.mlmodelc", computeUnits: units)
+    let b = try BGEEmbedder(modelDir: dir, body: opt("--body") ?? "body.mlmodelc", computeUnits: units,
+                            maxTokens: opt("--max-tokens").flatMap(Int.init) ?? 128)
     try b.load()
     embedder = b
     bge = b

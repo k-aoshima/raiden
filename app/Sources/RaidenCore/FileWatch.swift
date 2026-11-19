@@ -195,16 +195,91 @@ public final class FileIndex {
         for k in entries.keys where k.hasPrefix(pre) { entries.removeValue(forKey: k); st.removed += 1 }
     }
 
-    /// Engine に入れ直す。説明文が変わった物だけベクトル化され、消えた物の点と線（例の chose の線も）は Store から消える。
+    /// Engine に入れ直す。一覧はすぐ入れ替わり（ベクトルの無い物も名前の一致と絞り込みでは出る）、
+    /// ベクトル化の残りは大事な物から順に列に積む。background でなければ（答え合わせ・確かめ）、ここで全部作る。
+    /// background でも残りが少なければ（FSEvents の数件の変化）ここで作る。
     /// setFiles で Corpus が作り直されて例が消えるので、保存済みの「入力 → ファイル」の例を入れ直す
     private func commit(progress: ((Int, Int) -> Void)?) -> Stats {
         var st = Stats()
         let list = entries.values.sorted { $0.path < $1.path }
-        st.embedded = engine.setFiles(list, progress: progress)
+        let p = engine.installFiles(list)
+        shortQueue = prioritized(p.short)
+        fullQueue = prioritized(p.full)
+        shortTotal = shortQueue.count; shortDone = 0
+        fullTotal = fullQueue.count; fullDone = 0
+        if !background || shortQueue.count + fullQueue.count <= Self.inlineLimit {
+            st.embedded = embedAll(progress: progress)
+        } else {
+            st.embedded = 0
+            if shortTotal > 0 { progress?(0, shortTotal) }
+        }
         let exs = engine.store?.fileExamples() ?? []
         if !exs.isEmpty { engine.addFileExamples(exs) }
         st.examples = exs.count
         return st
+    }
+
+    /// true なら commit でベクトルを作らず、embedStep で少しずつ進める（アプリ）
+    public var background = false
+    /// background でもその場で作る残りの数（FSEvents の数件の変化はすぐ検索に出したい）
+    static let inlineLimit = 64
+    private var shortQueue: [String] = [], fullQueue: [String] = []
+    /// 短い説明でまだベクトルの無い物の進み具合（設定窓の「ベクトルを作成中 d/t」）
+    public private(set) var shortDone = 0, shortTotal = 0
+    /// 中身の頭を入れた説明文での作り直しの進み具合
+    public private(set) var fullDone = 0, fullTotal = 0
+    public var hasPending: Bool { !shortQueue.isEmpty || !fullQueue.isEmpty }
+
+    /// 残りを全部作る。作った数を返す
+    @discardableResult
+    public func embedAll(progress: ((Int, Int) -> Void)? = nil) -> Int {
+        let total = shortQueue.count + fullQueue.count
+        if total > 0 { progress?(0, total) }
+        var made = 0
+        while hasPending {
+            made += embedStep()
+            progress?(shortDone + fullDone, total)
+        }
+        return made
+    }
+
+    /// 残りを 1 回分（count 件）作る。まだベクトルの無い物（短い説明）が先、中身を入れた作り直しは後。作った数を返す
+    @discardableResult
+    public func embedStep(count: Int = 64) -> Int {
+        if !shortQueue.isEmpty {
+            let part = Array(shortQueue.prefix(count))
+            shortQueue.removeFirst(part.count)
+            shortDone += part.count
+            return engine.embedFiles(part, full: false)
+        }
+        if !fullQueue.isEmpty {
+            let part = Array(fullQueue.prefix(count))
+            fullQueue.removeFirst(part.count)
+            fullDone += part.count
+            return engine.embedFiles(part, full: true)
+        }
+        return 0
+    }
+
+    /// ベクトル化の順番: 最近使った・変えた物（30 日以内、新しい順）→ 検索の記録でよく選ぶ場所の中（回数の多い順）→ 残り（新しい順）
+    func prioritized(_ paths: [String]) -> [String] {
+        guard paths.count > 1 else { return paths }
+        let chosen = engine.store?.chosenFolders() ?? [:]
+        let now = Int(Date().timeIntervalSince1970)
+        func key(_ p: String) -> (Int, Int, Int) {
+            guard let e = entries[p] else { return (3, 0, 0) }
+            let recent = max(e.lastUsed, e.mtime, e.added)
+            if now - recent < 30 * 86400 { return (0, 0, -recent) }
+            var dir = (p as NSString).deletingLastPathComponent, hits = 0
+            for _ in 0..<12 {
+                hits = max(hits, chosen[dir] ?? 0)
+                if roots.contains(dir) || dir.count <= 1 { break }
+                dir = (dir as NSString).deletingLastPathComponent
+            }
+            return hits > 0 ? (1, -hits, -recent) : (2, 0, -recent)
+        }
+        let keys = Dictionary(paths.map { ($0, key($0)) }, uniquingKeysWith: { a, _ in a })
+        return paths.sorted { keys[$0]! < keys[$1]! }
     }
 }
 
@@ -221,6 +296,9 @@ public final class CachedEmbedder: Embedder {
     public init(_ base: Embedder, maxLength: Int = 80, capacity: Int = 4096) {
         self.base = base; self.maxLength = maxLength; self.capacity = capacity
     }
+
+    /// 長い文（ファイルの説明文）用。覚えずにそのまま渡す
+    public func embedBatch(_ texts: [String], batch: Int) -> [[Float]] { base.embedBatch(texts, batch: batch) }
 
     public func embed(_ text: String) -> [Float] {
         guard text.count <= maxLength else { return base.embed(text) }

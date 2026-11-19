@@ -114,6 +114,18 @@ public struct Corpus {
         filesBelow = Array(repeating: 0, count: vecs.count)
     }
 
+    /// 1 点のベクトルを差し替える（裏でベクトル化が進んだとき）
+    public mutating func setVec(_ i: Int, _ v: [Float]) {
+        guard i < vecs.count else { return }
+        vecs[i] = v
+        let d = dim
+        if flat.count == vecs.count * d && v.count == d {
+            flat.withUnsafeMutableBufferPointer { f in for j in 0..<d { f[i * d + j] = v[j] } }
+        } else {
+            flat = vecs.allSatisfy { $0.count == d } ? vecs.flatMap { $0 } : []
+        }
+    }
+
     public mutating func addEdges(contains: [(Int, Int)], coUsed: [(Int, Int, Float)], coTime: [(Int, Int, Float)] = []) {
         for (a, b, w) in coTime {
             adj[a].append(Edge(to: Int32(b), w: w, kind: 3))

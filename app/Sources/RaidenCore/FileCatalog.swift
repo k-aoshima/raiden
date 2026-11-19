@@ -188,6 +188,12 @@ public enum FileCatalog {
         return "\(e.stem) 種類: \(e.kind) \(fam) \(hint) 場所: \(e.parentName)フォルダ"
     }
 
+    /// 中身の頭を説明文に入れる種類か（content が読む拡張子）。それ以外は短い説明がそのまま最終の説明文
+    public static func hasContent(_ e: FileEntry) -> Bool {
+        !e.isDir && contentExts.contains((e.name as NSString).pathExtension.lowercased())
+    }
+    static let contentExts: Set<String> = ["pdf", "txt", "md", "csv", "html", "htm", "docx"]
+
     /// 文書と PDF の中身の頭（PDF は PDFKit、テキスト・md・csv・html はそのまま、docx は AppKit）
     public static func content(_ e: FileEntry, limit: Int = 260) -> String {
         if e.isDir { return "" }
@@ -277,5 +283,30 @@ public enum FileCatalog {
             }
         }
         return w.map { (Int($0.key >> 32), Int($0.key & 0xffffffff), $0.value) }
+    }
+}
+
+/// Spotlight の名前検索（一覧を作っている間の代わり）。範囲の中で、名前に q を含む物を返す（大文字小文字・濁点の違いは同一視）。
+/// 広い範囲を足した直後は一覧づくり（1 件ずつ Spotlight の属性を読む）に数分かかるので、その間も名前では見つかるようにする
+public enum SpotlightNames {
+    public static func search(_ q: String, scope: ScanScope, limit: Int = 20) -> [FileEntry] {
+        let t = q.trimmingCharacters(in: .whitespaces)
+        guard t.count >= 2, !scope.roots.isEmpty else { return [] }
+        let esc = t.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "*", with: "\\*")
+        guard let mq = MDQueryCreate(kCFAllocatorDefault, "kMDItemFSName == \"*\(esc)*\"cd" as CFString, nil, nil) else { return [] }
+        MDQuerySetSearchScope(mq, scope.roots as CFArray, 0)
+        MDQuerySetMaxCount(mq, limit * 4)
+        guard MDQueryExecute(mq, CFOptionFlags(kMDQuerySynchronous.rawValue)) else { return [] }
+        var out: [FileEntry] = []
+        for i in 0..<MDQueryGetResultCount(mq) where out.count < limit {
+            guard let raw = MDQueryGetResultAtIndex(mq, i) else { continue }
+            let item = unsafeBitCast(raw, to: MDItem.self)
+            guard let p = MDItemCopyAttribute(item, kMDItemPath) as? String else { continue }
+            let path = ScanScope.norm(p)
+            guard FileCatalog.isIncluded(path, scope: scope), let e = FileCatalog.entry(path: path) else { continue }
+            out.append(e)
+        }
+        return out
     }
 }

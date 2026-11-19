@@ -5,7 +5,10 @@
     アプリは mmap して使う行だけ読むので、表の大部分はメモリ（footprint）に乗らない。
   - 本体（位置埋め込み〜24 層〜CLS）: Core ML。重みを fp16 / int8 / 4bit などに量子化して比べる。
 
-  HF_HOME=/Volumes/SSD/hf uv run python convert.py --out /Volumes/SSD/raiden-models [--variants fp16,int8,pal4,int4]
+  HF_HOME=/Volumes/SSD/hf uv run python convert.py --out /Volumes/SSD/raiden-models [--variants fp16,int8,pal4,int4] [--batches 1,8,16,32]
+
+入力の形は（件数 B, 長さ L, 1024）。B と L は EnumeratedShapes の組（B は --batches、L は SHAPES）。
+B > 1 はファイルの説明文をまとめてベクトル化する用（BGEEmbedder.embedBatch）。B = 1 は入力 1 文。
 """
 import argparse
 import json
@@ -43,7 +46,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--variants", default="fp16,int8,pal4,int4")
+    ap.add_argument("--batches", default="1,8,16,32")
     args = ap.parse_args()
+    batches = sorted({int(b) for b in args.batches.split(",")} | {1})
     os.makedirs(args.out, exist_ok=True)
 
     tok = AutoTokenizer.from_pretrained(MODEL)
@@ -56,7 +61,7 @@ def main():
     q = np.clip(np.round(emb / scale[:, None]), -127, 127).astype(np.int8)
     q.tofile(os.path.join(args.out, "embed_int8.bin"))
     scale.astype(np.float32).tofile(os.path.join(args.out, "embed_scale.bin"))
-    json.dump({"vocab": int(emb.shape[0]), "dim": int(emb.shape[1]), "shapes": SHAPES, "model": MODEL},
+    json.dump({"vocab": int(emb.shape[0]), "dim": int(emb.shape[1]), "shapes": SHAPES, "batches": batches, "model": MODEL},
               open(os.path.join(args.out, "meta.json"), "w"))
     # トークナイザ（swift-transformers が読む形）
     tok.save_pretrained(os.path.join(args.out, "tokenizer"))
@@ -68,8 +73,8 @@ def main():
     ex = (torch.randn(1, L, emb.shape[1]), torch.ones(1, L, dtype=torch.int32))
     with torch.no_grad():
         traced = torch.jit.trace(body, ex, strict=False)
-    shapes_e = ct.EnumeratedShapes(shapes=[(1, s, emb.shape[1]) for s in SHAPES], default=(1, 32, emb.shape[1]))
-    shapes_m = ct.EnumeratedShapes(shapes=[(1, s) for s in SHAPES], default=(1, 32))
+    shapes_e = ct.EnumeratedShapes(shapes=[(b, s, emb.shape[1]) for b in batches for s in SHAPES], default=(1, 32, emb.shape[1]))
+    shapes_m = ct.EnumeratedShapes(shapes=[(b, s) for b in batches for s in SHAPES], default=(1, 32))
     base = ct.convert(
         traced,
         inputs=[ct.TensorType(name="inputs_embeds", shape=shapes_e, dtype=np.float16),
