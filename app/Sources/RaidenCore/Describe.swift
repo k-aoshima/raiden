@@ -22,7 +22,7 @@ public enum Describe {
         ("zip|archive|tar|gzip", "圧縮ファイル"), ("pages", "文書"), ("epub|ibooks", "電子書籍"),
     ].map { (try! NSRegularExpression(pattern: $0.0), $0.1) }
 
-    /// 日本語名＋英語名＋手書きの説明＋分類＋開けるファイルの種類
+    /// 日本語名＋英語名＋手書きの説明＋分類＋開けるファイルの種類＋いつも開くファイル（OpenWithIndex）＋標準アプリ以外の説明の材料（AppExtra）
     public static func text(_ a: AppEntry, useDict: Bool = true) -> String {
         var s = "\(a.jp) \(a.name)"
         if useDict, let d = appDict[a.bundleID] { s += " " + d }
@@ -34,6 +34,9 @@ public enum Describe {
             fam.append(w)
         }
         if !fam.isEmpty { s += " 開けるファイル: " + fam.joined(separator: " ") }
+        let o = OpenWithIndex.describe(a.opens)
+        if !o.isEmpty { s += " " + o }
+        if !a.extra.isEmpty { s += " " + a.extra }
         return s
     }
 

@@ -10,6 +10,8 @@ public struct AppEntry: Sendable, Hashable {
     public let jp: String        // Finder の表示名（日本語環境なら日本語名）
     public let category: String  // LSApplicationCategoryType
     public let docs: [String]    // CFBundleDocumentTypes から拾った種類名・UTI・拡張子
+    public let extra: String     // 標準アプリ以外の説明の材料（AppExtra）。無ければ空
+    public var opens: [String: Int] = [:]  // 手元のファイルをこのアプリで開く件数（種類 → 件数。OpenWithIndex）
 }
 
 public enum AppCatalog {
@@ -27,8 +29,12 @@ public enum AppCatalog {
         return n
     }
 
-    public static func collect() -> [AppEntry] {
+    /// extras: false で AppExtra と「いつも開くファイル」を使わない（答え合わせで前の作りと比べる用）
+    /// opens: 手元のファイルを開くアプリの一覧。nil なら extras のときだけここで作る
+    public static func collect(extras: Bool = true, opens: OpenWithIndex? = nil) -> [AppEntry] {
         let fm = FileManager.default
+        let ctx = extras ? AppExtra.Context.load() : nil
+        let openCounts = (opens ?? (extras ? OpenWithIndex.build() : OpenWithIndex())).counts()
         var out: [AppEntry] = []
         var seen = Set<String>()
         for dir in dirs {
@@ -54,12 +60,14 @@ public enum AppCatalog {
                 var jp = spotlightName(path) ?? fm.displayName(atPath: path)
                 jp = jp.precomposedStringWithCanonicalMapping
                 if jp.hasSuffix(".app") { jp = String(jp.dropLast(4)) }
+                let nameNFC = name.precomposedStringWithCanonicalMapping
+                let jpNFC = jp.isEmpty ? base.precomposedStringWithCanonicalMapping : jp
+                let extra = ctx.map { AppExtra.text(path: path, info: info, bundleID: bid, names: [jpNFC, nameNFC, base], ctx: $0) } ?? ""
                 out.append(AppEntry(
                     key: key, bundleID: bid, path: path,
-                    name: name.precomposedStringWithCanonicalMapping,
-                    jp: jp.isEmpty ? base.precomposedStringWithCanonicalMapping : jp,
+                    name: nameNFC, jp: jpNFC,
                     category: info["LSApplicationCategoryType"] as? String ?? "",
-                    docs: Array(docs.sorted().prefix(40))))
+                    docs: Array(docs.sorted().prefix(40)), extra: extra, opens: openCounts[key] ?? [:]))
             }
         }
         return out

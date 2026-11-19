@@ -2,6 +2,11 @@
 //
 //   raiden-eval --model-dir <dir> --body body_int8.mlmodelc [--units ane|cpu|gpu|all] [--sweep] [--reload]
 //   raiden-eval --nl     （参考: OS の NLContextualEmbedding）
+//   --no-extra    自作アプリなどの説明の材料（AppExtra）と「いつも開くファイル」を使わない（前の作りと比べる）
+//   --show-desc   説明の材料が付いたアプリの説明文を並べる
+//   --apps-own <path>  自作アプリの問題（既定 ~/Library/Application Support/Raiden/evals/apps-own.json）
+//   --open-bonus <x> / --sweep-open  いつも開くアプリの加点（Engine.openBonus）を変える / 振って比べる
+//   --knn-w <x> / --knn-min <x> / --knn-pow <x> / --sweep-knn  アプリの k近傍法（例の重み・最低の近さ・近さの何乗）
 //
 // 保存済みの例（raiden.sqlite）は読まない。例はこのファイルの EX だけ。
 import CoreML
@@ -9,7 +14,7 @@ import Foundation
 import RaidenCore
 
 let Q: [(String, [String])] = [
-    ("PDFを見るやつ", ["プレビュー"]), ("あのファイルを見るやつ", ["プレビュー", "クイックルック"]),
+    ("PDFを見るやつ", ["プレビュー", "Yomu"]), ("あのファイルを見るやつ", ["プレビュー", "クイックルック"]),
     ("ワードの書類を開くやつ", ["Word", "Pages"]), ("表計算", ["Excel", "Numbers"]),
     ("プレゼン作るやつ", ["Keynote", "PowerPoint"]), ("曲を聴く", ["ミュージック"]),
     ("世界地図見るやつ", ["マップ"]), ("録音するやつ", ["ボイスメモ"]), ("写真を見る", ["写真", "プレビュー"]),
@@ -81,8 +86,22 @@ if let i = args.firstIndex(of: "--compile"), i + 2 < args.count {
 }
 
 let fpStart = physFootprintMB()
-let apps = AppCatalog.collect()
+// --no-extra: 標準アプリ以外の説明の材料（AppExtra）を使わない（前の作りと比べる用）
+let apps = AppCatalog.collect(extras: !args.contains("--no-extra"))
 print("アプリ \(apps.count) 個 / 起動時メモリ \(String(format: "%.0f", fpStart))MB")
+
+// --show-desc: 説明の材料が付いたアプリの説明文を並べて終わる
+if args.contains("--show-desc") {
+    for a in apps where !a.extra.isEmpty || !a.opens.isEmpty { print("[\(a.jp)] \(Describe.text(a))\n") }
+    exit(0)
+}
+
+// 自作アプリの問題（私的な名前を含むのでリポジトリに入れない）。[{"q": 言い方, "gold": [アプリの日本語名]}]
+//   --apps-own <path>（既定 ~/Library/Application Support/Raiden/evals/apps-own.json）。無ければ飛ばす
+struct OwnQ: Decodable { let q: String; let gold: [String] }
+let ownPath = opt("--apps-own") ?? RaidenPaths.support.appendingPathComponent("evals/apps-own.json").path
+let OWN: [(String, [String])] = ((try? JSONDecoder().decode([OwnQ].self, from: Data(contentsOf: URL(fileURLWithPath: ownPath)))) ?? [])
+    .map { ($0.q, $0.gold) }
 
 // トークナイザの答え合わせ: --dump-texts <file> で全文を書き出し、Python で正解を作って --check-tokens <file> <ids.json>
 func allTexts(_ apps: [AppEntry]) -> [String] {
@@ -170,6 +189,11 @@ for a in apps where firstKey[a.jp] == nil { firstKey[a.jp] = a.key }
 rich.addExamples(EX.flatMap { name, qs in qs.compactMap { q in firstKey[name].map { (q, $0) } } })
 print("説明文と例のベクトル化 \(String(format: "%.1f", Date().timeIntervalSince(tA)))s")
 
+// --knn-w / --knn-min / --knn-pow: アプリの k近傍法の重み・数える最低の近さ・近さの何乗を変える（既定は Mix.appDefault）
+if let x = opt("--knn-w").flatMap(Float.init) { rich.appMix.wK = x }
+if let x = opt("--knn-min").flatMap(Float.init) { rich.appMix.knnMinSim = x }
+if let x = opt("--knn-pow").flatMap(Float.init) { rich.appMix.knnSimPow = x }
+
 if args.contains("--files") {
     try runFileEval(embedder: embedder, appQs: Q, appEngine: rich)
     exit(0)
@@ -186,10 +210,48 @@ if args.contains("--sweep") {
     exit(0)
 }
 
+// いつも開くアプリの加点。--no-extra のときは前の作りに合わせて 0
+let noExtra = args.contains("--no-extra")
+for e in [plain, rich] { e.openBonus = noExtra ? 0 : (opt("--open-bonus").flatMap(Float.init) ?? e.openBonus) }
+if args.contains("--sweep-open") {
+    for b in [0.0, 0.05, 0.1, 0.15, 0.2, 0.3] as [Float] {
+        plain.openBonus = b; rich.openBonus = b
+        let r = [run(rich, Q, examples: false, "", verbose: false), run(rich, Q, examples: true, "", verbose: false),
+                 run(rich, PARTIAL, examples: true, "", verbose: false),
+                 run(rich, OWN, examples: false, "", verbose: false), run(rich, OWN, examples: true, "", verbose: false)]
+        print("加点 \(b): " + zip(["25問例なし", "25問例あり", "名前の一部", "自作例なし", "自作例あり"], r)
+            .map { "\($0) \($1.0)/\($1.1)" }.joined(separator: "  "))
+    }
+    exit(0)
+}
+// --sweep-knn: アプリの k近傍法（例の重み・数える最低の近さ・近さの何乗で票にするか）を振る。
+//   答えのある問題を「見つからない」と弾いた数も出す（NoMatchRule.apps と食い違わないかの確かめ）
+if args.contains("--sweep-knn") {
+    let base = rich.appMix
+    let all = Q + PARTIAL + OWN
+    for w in [0.5, 1.0, 1.25, 1.5, 2.0] as [Float] {
+        for ms in [0.0, 0.6] as [Float] {
+            for p in [1.0, 4.0, 6.0, 8.0] as [Float] {
+                rich.appMix = base
+                rich.appMix.wK = w; rich.appMix.knnMinSim = ms; rich.appMix.knnSimPow = p
+                let a = run(rich, Q, examples: true, "", verbose: false)
+                let b = run(rich, PARTIAL, examples: true, "", verbose: false)
+                let c = run(rich, OWN, examples: true, "", verbose: false)
+                let rej = all.filter { rich.searchJudged($0.0, limit: 3).noMatch }.count
+                print("w=\(w) min=\(ms) pow=\(p): 25問 \(a.0)/\(a.1)  名前 \(b.0)/\(b.1)  自作 \(c.0)/\(c.1)  弾いた \(rej)/\(all.count)")
+            }
+        }
+    }
+    exit(0)
+}
 run(plain, Q, examples: false, "例なし・辞書なし")
 run(rich, Q, examples: false, "例なし・辞書あり")
 run(rich, Q, examples: true, "例あり・辞書あり")
 run(rich, PARTIAL, examples: true, "名前の一部")
+if !OWN.isEmpty {
+    run(rich, OWN, examples: false, "自作アプリ・例なし")
+    run(rich, OWN, examples: true, "自作アプリ・例あり")
+}
 print(String(format: "答え合わせ後メモリ footprint %.0fMB / 実メモリ(resident) %.0fMB", physFootprintMB(), residentMB()))
 
 if args.contains("--reload"), let b = bge {

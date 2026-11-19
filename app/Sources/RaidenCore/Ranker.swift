@@ -14,6 +14,7 @@ public struct Mix: Sendable, CustomStringConvertible {
     public var wV: Float = 1, wK: Float = 1, wG: Float = 1
     public var knnK = 5
     public var knnMinSim: Float = 0
+    public var knnSimPow: Float = 1  // 例の票 = 近さ^これ（大きいほど近い例だけが強く効く。1 なら近さそのまま）
     public var seeds = 10            // グラフの入口の数 N
     public var alpha: Float = 0.5    // 1 回たどるごとに掛ける割合
     public var hops = 1
@@ -204,7 +205,8 @@ public enum Ranker {
             for (rank, i) in order.enumerated() {
                 if sims[i] < m.knnMinSim { break }
                 let total = c.exLinks[i].reduce(0) { $0 + $1.1 }
-                for (t, w) in c.exLinks[i] where total > 0 { K[t] += sims[i] / Float(rank + 1) * (w / total) }
+                let sw = m.knnSimPow == 1 ? sims[i] : pow(max(sims[i], 0), m.knnSimPow)
+                for (t, w) in c.exLinks[i] where total > 0 { K[t] += sw / Float(rank + 1) * (w / total) }
             }
         }
         // 入口の点数

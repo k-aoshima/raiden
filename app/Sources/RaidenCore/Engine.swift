@@ -1,12 +1,15 @@
+import AppKit
 import Foundation
 
 /// アプリの並べ方の既定（raiden-eval の --sweep / --combos の結果で決めた。README 参照）
 public extension Mix {
-    /// アプリ: V+K の重みつきの和（k=5、重み 1.0）＋名前の文字一致
+    /// アプリ: V+K の重みつきの和（k=5、重み 1.25、例の票は近さの 6 乗）＋名前の文字一致
+    ///   近さの 6 乗: 近い例（同じ言い方を選び直した 0.9 以上）はほぼそのまま効き、0.6 前後の遠い例は 0.05 ほどに弱まる。
+    ///   例が標準アプリの分しか無いとき、遠い例の票が自作アプリを押し負かすのを避ける（raiden-eval --sweep-knn、README 参照）
     static var appDefault: Mix {
         var m = Mix()
         m.v = true; m.k = true; m.g = false; m.fusion = .sum
-        m.knnK = 5; m.wK = 1.0; m.knnMinSim = 0
+        m.knnK = 5; m.wK = 1.25; m.knnMinSim = 0; m.knnSimPow = 6
         m.prefixBonus = 0.6; m.substrBonus = 0.35; m.fuzzyBonus = 0
         return m
     }
@@ -58,6 +61,9 @@ public struct FileResult: Sendable {
 public final class Engine {
     public let embedder: Embedder
     public var appMix = Mix.appDefault
+    /// 入力に種類の言葉（PDF・ワード・画像…）があるとき、手元のその種類をいちばん多く開くアプリに足す点
+    /// （raiden-eval --sweep-open で決めた。0.05〜0.3 で既存 25 問の例ありは変わらず、自作アプリは大きいほど上がる）
+    public var openBonus: Float = 0.15
     public var fileMix = Mix.fileDefault
     public let useDict: Bool
     public let store: Store?
@@ -65,6 +71,7 @@ public final class Engine {
     private(set) public var apps: [AppEntry] = []
     private var appVecs: [[Float]] = []
     private var byKey: [String: Int] = [:]
+    private var topOpener: [String: Int] = [:]  // 種類 → その種類をいちばん多く開くアプリの番号
     private(set) public var examples: [ExampleNode] = []
     private var exVecs: [[Float]] = []
     private var appCorpus = Corpus()
@@ -78,7 +85,13 @@ public final class Engine {
         self.useDict = useDict
     }
 
-    public func setApps(_ list: [AppEntry]) {
+    /// opens を渡すと、グラフの線 app → file（opens）も Store に張り直す
+    public func setApps(_ list: [AppEntry], opens: OpenWithIndex? = nil) {
+        if let store, let opens { store.replaceOpens(opens.pairs, apps: list) }
+        var top: [String: (Int, Int)] = [:]
+        for (i, a) in list.enumerated() {
+            for (f, n) in a.opens where n > (top[f]?.1 ?? 0) { top[f] = (i, n) }
+        }
         let descs = list.map { Describe.text($0, useDict: useDict) }
         let vs: [[Float]]
         if let store {
@@ -88,6 +101,7 @@ public final class Engine {
         }
         lock.lock()
         apps = list; appVecs = vs
+        topOpener = top.mapValues(\.0)
         byKey = Dictionary(list.enumerated().map { ($1.key, $0) }, uniquingKeysWith: { a, _ in a })
         rebuildAppCorpus()
         lock.unlock()
@@ -168,17 +182,37 @@ public final class Engine {
 
     /// ベクトルを作り済みの入力で並べる（答え合わせで組み合わせを振るとき用）
     public func rankApps(query q: String, vec: [Float], mix: Mix, limit: Int = 8) -> [SearchResult] {
+        rankAppsJudged(query: q, vec: vec, mix: mix, limit: limit).results
+    }
+
+    /// Ranker で並べ、いつも開くアプリの加点を足して並べ直す（lock の外で呼ぶ）
+    private func rankedApps(_ c: Corpus, top: [String: Int], count: Int, query q: String, vec: [Float], mix: Mix, limit: Int) -> [(Int, Float)] {
+        // いつも開くアプリの加点: 全部並べてから足して並べ直す（アプリは百数十個なので軽い）
+        let boost = openBonus > 0 ? Set(QueryIntent.parse(q).families.compactMap { top[$0] }) : []
+        if boost.isEmpty { return Ranker.rank(c, query: q, vec: vec, mix: mix, limit: limit) }
+        return Array(Ranker.rank(c, query: q, vec: vec, mix: mix, limit: count)
+            .map { ($0.0, $0.1 + (boost.contains($0.0) ? openBonus : 0)) }
+            .sorted { $0.1 > $1.1 }.prefix(limit))
+    }
+
+    /// Raiden からファイルを開いたとき、実際に開いたアプリを覚える（file → app の opened_with の線）
+    public func recordOpened(file path: String, appURL: URL?) {
+        guard let store else { return }
+        let app = appURL ?? NSWorkspace.shared.urlForApplication(toOpen: URL(fileURLWithPath: path))
+        guard let app else { return }
+        let key = Bundle(url: app)?.bundleIdentifier ?? app.standardizedFileURL.path
+        // 点の名前は replaceOpens と同じ日本語名にそろえる（一覧に無いアプリだけ .app の名前）
         lock.lock()
-        let c = appCorpus, apps = self.apps
+        let name = byKey[key].map { apps[$0].jp } ?? app.deletingPathExtension().lastPathComponent
         lock.unlock()
-        return Ranker.rank(c, query: q, vec: vec, mix: mix, limit: limit).map { SearchResult(app: apps[$0.0], score: $0.1) }
+        store.recordOpenedWith(file: path, appKey: key, appName: name)
     }
 
     public func rankAppsJudged(query q: String, vec: [Float], mix: Mix, limit: Int = 8, rule: NoMatchRule = .apps) -> Judged<SearchResult> {
         lock.lock()
-        let c = appCorpus, apps = self.apps
+        let c = appCorpus, apps = self.apps, top = topOpener
         lock.unlock()
-        let ranked = Ranker.rank(c, query: q, vec: vec, mix: mix, limit: max(limit, 3))
+        let ranked = rankedApps(c, top: top, count: apps.count, query: q, vec: vec, mix: mix, limit: max(limit, 3))
         let s = NoMatch.signals(c, query: q, vec: vec, mix: mix, ranked: ranked, rankedNoEx: nil, intent: nil, relation: false)
         return Judged(results: ranked.prefix(limit).map { SearchResult(app: apps[$0.0], score: $0.1) },
                       noMatch: rule.isNoMatch(s), signals: s)

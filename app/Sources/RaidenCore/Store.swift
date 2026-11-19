@@ -290,6 +290,51 @@ public final class Store {
         try? exec("COMMIT")
     }
 
+    // MARK: - アプリとファイルの線
+
+    /// app → file の opens（手元のファイルを開くアプリ。OpenWithIndex）を全部張り直す。組は（アプリのキー, パス）。
+    /// まだ点の無いファイルは、ベクトル無しの点として足す（fileVectors が後でベクトルを作る）
+    public func replaceOpens(_ pairs: [(String, String)], apps: [AppEntry]) {
+        lock.lock(); defer { lock.unlock() }
+        let names = Dictionary(apps.map { ($0.key, $0.jp) }, uniquingKeysWith: { a, _ in a })
+        var appIds: [String: Int64] = [:]
+        try? exec("BEGIN")
+        if let del = prepare("DELETE FROM edges WHERE kind = 'opens'") { sqlite3_step(del); sqlite3_finalize(del) }
+        if let st = prepare("INSERT OR REPLACE INTO edges(from_id, to_id, kind, weight, last_used) VALUES(?,?,'opens',1,?)") {
+            for (k, p) in pairs {
+                guard let name = names[k] else { continue }  // 一覧に無いアプリ（ヘルパーなど）は張らない
+                let a = appIds[k] ?? upsertNode(kind: "app", key: k, name: name, description: name, vector: nil, hash: nil)
+                appIds[k] = a
+                let f = upsertNode(kind: "file", key: p, name: (p as NSString).lastPathComponent,
+                                   description: (p as NSString).lastPathComponent, vector: nil, hash: nil)
+                guard a >= 0, f >= 0 else { continue }
+                sqlite3_reset(st)
+                sqlite3_bind_int64(st, 1, a); sqlite3_bind_int64(st, 2, f); sqlite3_bind_int64(st, 3, now)
+                sqlite3_step(st)
+            }
+            sqlite3_finalize(st)
+        }
+        try? exec("COMMIT")
+    }
+
+    /// Raiden から開いたファイルと、実際に開いたアプリ（file → app の opened_with。重みは回数）
+    public func recordOpenedWith(file path: String, appKey: String, appName: String) {
+        lock.lock(); defer { lock.unlock() }
+        try? exec("BEGIN")
+        let f = upsertNode(kind: "file", key: path, name: (path as NSString).lastPathComponent,
+                           description: (path as NSString).lastPathComponent, vector: nil, hash: nil)
+        let a = upsertNode(kind: "app", key: appKey, name: appName, description: appName, vector: nil, hash: nil)
+        if f >= 0, a >= 0, let st = prepare("""
+            INSERT INTO edges(from_id, to_id, kind, weight, last_used) VALUES(?,?,'opened_with',1,?)
+            ON CONFLICT(from_id, to_id, kind) DO UPDATE SET weight = weight + 1, last_used = excluded.last_used
+            """) {
+            sqlite3_bind_int64(st, 1, f); sqlite3_bind_int64(st, 2, a); sqlite3_bind_int64(st, 3, now)
+            sqlite3_step(st)
+            sqlite3_finalize(st)
+        }
+        try? exec("COMMIT")
+    }
+
     public func edgeCount(kind: String) -> Int {
         lock.lock(); defer { lock.unlock() }
         guard let st = prepare("SELECT COUNT(*) FROM edges WHERE kind=?") else { return 0 }

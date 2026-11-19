@@ -40,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        LoginItem.syncAtLaunch()
         setupStatusItem()
         setupHotKey()
         panel.onQuery = { [weak self] q in self?.query(q) }
@@ -65,7 +66,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let store = try Store()
             // 入力文と例のベクトルは覚えておく（ファイル一覧を作り直すたびに例を入れ直すため）
             let e = Engine(embedder: CachedEmbedder(b), store: store)
-            e.setApps(AppCatalog.collect())
+            let opens = OpenWithIndex.build()
+            e.setApps(AppCatalog.collect(opens: opens), opens: opens)
             e.loadExamples()
             bge = b
             engine = e
@@ -86,7 +88,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func rescan() {
         work.async { [weak self] in
             guard let e = self?.engine else { return }
-            e.setApps(AppCatalog.collect())
+            let opens = OpenWithIndex.build()
+            e.setApps(AppCatalog.collect(opens: opens), opens: opens)
         }
     }
 
@@ -242,6 +245,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 ws.open([url], withApplicationAt: finder, configuration: cfg) { _, err in
                     if let err { NSLog("Raiden: 開けませんでした %@", "\(err)") }
                 }
+            } else if let appURL = ws.urlForApplication(toOpen: url) {
+                // 開くアプリを先に決めて開き、その組を覚える（file → app の opened_with の線）
+                let cfg = NSWorkspace.OpenConfiguration()
+                cfg.activates = true
+                ws.open([url], withApplicationAt: appURL, configuration: cfg) { [weak self] _, err in
+                    if let err { NSLog("Raiden: 開けませんでした %@", "\(err)"); return }
+                    self?.fileWork.async { self?.engine?.recordOpened(file: r.file.path, appURL: appURL) }
+                }
             } else if !ws.open(url) {
                 NSLog("Raiden: 開けませんでした %@", r.file.path)
             }
@@ -298,6 +309,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         parent.submenu = sub
         menu.addItem(parent)
         menu.addItem(withTitle: "アプリ一覧を更新", action: #selector(rescanNow), keyEquivalent: "").target = self
+        let login = NSMenuItem(title: "ログイン時に起動", action: #selector(toggleLogin(_:)), keyEquivalent: "")
+        login.target = self
+        login.state = LoginItem.isOn ? .on : .off
+        menu.addItem(login)
         menu.addItem(.separator())
         menu.addItem(withTitle: "Raiden を終了", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusItem.menu = menu
@@ -305,6 +320,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openPanel() { toggle() }
     @objc private func rescanNow() { rescan() }
+    @objc private func toggleLogin(_ s: NSMenuItem) {
+        LoginItem.set(s.state != .on)
+        s.state = LoginItem.isOn ? .on : .off
+    }
     @objc private func setUnload(_ s: NSMenuItem) {
         unloadMinutes = s.tag
         unloadItems.forEach { $0.state = $0.tag == s.tag ? .on : .off }
