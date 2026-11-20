@@ -331,6 +331,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .app(let r):
             if reveal {
                 ws.selectFile(r.app.path, inFileViewerRootedAtPath: "")
+            } else if r.app.bundleID == Bundle.main.bundleIdentifier {
+                // Raiden 自身を選んだら設定窓を開く（常駐していて開く窓が無いため）
+                DispatchQueue.main.async { [weak self] in self?.openSettings() }
             } else {
                 let cfg = NSWorkspace.OpenConfiguration()
                 cfg.activates = true
