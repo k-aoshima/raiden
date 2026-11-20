@@ -1,6 +1,6 @@
 // 答え合わせ。アプリと同じ Engine.search で 25 個の曖昧な言い方を並べ、1位・3位以内の数を出す。
 //
-//   raiden-eval --model-dir <dir> --body body_int8.mlmodelc [--units ane|cpu|gpu|all] [--sweep] [--reload]
+//   raiden-eval --model-dir <dir> --body body_int8.mlmodelc [--units ane|cpu|gpu|all（無ければ meta.json の units）] [--sweep] [--reload]
 //   raiden-eval --nl     （参考: OS の NLContextualEmbedding）
 //   --no-extra    自作アプリなどの説明の材料（AppExtra）と「いつも開くファイル」を使わない（前の作りと比べる）
 //   --show-desc   説明の材料か他社アプリの辞書が付いたアプリの説明文を並べる
@@ -94,6 +94,13 @@ if let p = opt("--dump-entries") { try dumpEntries(p); exit(0) }
 // --bin-mode asym|hamming|twoStage [--bin-n 100]: ファイル・フォルダの 2 値のベクトルの並べ方（BinVec.mode）を変える
 if let m = opt("--bin-mode").flatMap(BinVec.Mode.init(rawValue:)) { BinVec.mode = m }
 if let n = opt("--bin-n").flatMap(Int.init) { BinVec.twoStageN = n }
+// --plan <body.mlmodelc>: どの演算が ANE に載るか（AnePlan.swift）
+if let p = opt("--plan") {
+    let sem = DispatchSemaphore(value: 0)
+    Task { do { try await runAnePlan(p) } catch { print("plan: \(error)") }; sem.signal() }
+    sem.wait()
+    exit(0)
+}
 // --bench-embed: ベクトル化の速さとメモリ（1 件ずつとまとめて。BenchEmbed.swift）
 if args.contains("--bench-embed") { try runBenchEmbed() }
 if args.contains("--bench-binary") { runBenchBinary() }
@@ -154,10 +161,17 @@ if args.contains("--nl") {
     embedder = try NLEmbedder()
 } else {
     let dir = URL(fileURLWithPath: opt("--model-dir") ?? "/Volumes/SSD/raiden-models")
-    let units: MLComputeUnits = ["cpu": .cpuOnly, "gpu": .cpuAndGPU, "all": .all][opt("--units") ?? ""] ?? .cpuAndNeuralEngine
+    // --units を付けなければモデルの meta.json に従う（ANE 版は ANE、前の版は CPU）
+    let units: MLComputeUnits? = ["cpu": .cpuOnly, "gpu": .cpuAndGPU, "all": .all, "ane": .cpuAndNeuralEngine][opt("--units") ?? ""]
     let b = try BGEEmbedder(modelDir: dir, body: opt("--body") ?? "body.mlmodelc", computeUnits: units,
                             maxTokens: opt("--max-tokens").flatMap(Int.init) ?? 128)
     try b.load()
+    // --no-wait-ane: ANE の読み込みを待たずに始める（読み終わるまでの CPU の代わりを確かめる用）
+    if b.aneProgress.total > 0 && !args.contains("--no-wait-ane") {
+        let tw = Date()
+        let ok = b.waitForANE()
+        print(String(format: "ANE の読み込み %@ %.1fs", ok ? "済み" : "失敗（CPU で続ける）", Date().timeIntervalSince(tw)))
+    }
     embedder = b
     bge = b
 }
