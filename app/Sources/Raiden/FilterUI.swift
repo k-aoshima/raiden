@@ -44,7 +44,7 @@ final class FilterInput {
         self.panel = panel
         self.field = field
         ghostLabel.font = field.font
-        ghostLabel.textColor = NSColor(white: 0.62, alpha: 1)
+        ghostLabel.textColor = PanelStyle.onBandFainter
         ghostLabel.lineBreakMode = .byClipping
         ghostLabel.isHidden = true
         content.addSubview(ghostLabel)
@@ -497,7 +497,7 @@ final class ChipBar: NSView {
     static func pill(_ text: String, symbol name: String, filled: Bool, closable: Bool = false, faint: Bool = false) -> TapPill {
         let v = PillView(filled: filled)
         let icon = NSImageView(image: symbol(name, size: 10, weight: .semibold) ?? NSImage())
-        icon.contentTintColor = filled ? NSColor(srgbRed: 0.0, green: 0.36, blue: 0.85, alpha: 1) : PanelStyle.subText
+        icon.contentTintColor = filled ? PanelStyle.indigo : PanelStyle.subText
         let l = NSTextField(labelWithString: text)
         l.font = .systemFont(ofSize: 11, weight: .medium)
         l.textColor = filled ? PanelStyle.text : (faint ? PanelStyle.faint : PanelStyle.subText)
@@ -551,7 +551,7 @@ final class PillView: TapPill {
     override func draw(_ dirtyRect: NSRect) {
         let p = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 11, yRadius: 11)
         if filled {
-            NSColor(srgbRed: 0.0, green: 0.42, blue: 1.0, alpha: 0.10).setFill()
+            PanelStyle.pillFill.setFill()
             p.fill()
         } else {
             NSColor(white: 0, alpha: 0.14).setStroke()
