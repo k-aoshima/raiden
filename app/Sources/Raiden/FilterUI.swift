@@ -459,16 +459,18 @@ final class FilterInput {
         ghostLabel.sizeToFit()
         let h = ghostLabel.frame.height
         // 文字の終わりの位置は、入力中なら編集用の欄の組版から取る（字の幅を足し算すると余白の分ずれる）
-        var endX = field.frame.minX + (field.stringValue as NSString).size(withAttributes: [.font: font]).width + 2
+        var endX = field.frame.minX + (field.stringValue as NSString).size(withAttributes: [.font: font]).width
         if let tv = field.currentEditor() as? NSTextView, let lm = tv.layoutManager, let tc = tv.textContainer,
            let sup = ghostLabel.superview {
+            // 全体の幅（usedRect）は 1 文字消した直後に古い幅が残ることがあるので、最後の字の右端を見る
             lm.ensureLayout(for: tc)
-            let used = lm.usedRect(for: tc)
-            let p = tv.convert(NSPoint(x: tv.textContainerOrigin.x + used.maxX, y: 0), to: sup)
-            endX = p.x
+            let n = lm.numberOfGlyphs
+            let right = n == 0 ? tc.lineFragmentPadding
+                : lm.boundingRect(forGlyphRange: NSRange(location: n - 1, length: 1), in: tc).maxX
+            endX = tv.convert(NSPoint(x: tv.textContainerOrigin.x + right, y: 0), to: sup).x
         }
-        // ラベル自身の左の余白（2pt）の分だけ左へ寄せて、打った文字の直後から始める
-        let x = endX - 2
+        // カーソルの幅の分だけ離して、打った文字の直後から始める
+        let x = endX + 2
         ghostLabel.frame = NSRect(x: x, y: field.frame.midY - h / 2,
                                   width: min(ghostLabel.frame.width, max(0, field.frame.maxX - x)), height: h)
         ghostLabel.isHidden = false
@@ -811,6 +813,30 @@ enum FocusTest {
         type(c, "t")
         key(c, #selector(NSResponder.deleteBackward(_:)))
         expect(c.queryText == "請求 #date ", "触った後の Backspace は 1 文字消す「\(c.queryText)」")
+
+        // 5c) 打ちかけの補完（薄い文字）は打った文字の直後から始まる（カーソルに重ならない）
+        c = make()
+        type(c, "#kind sc")
+        if let t = tv(c), let lm = t.layoutManager, let tc = t.textContainer, let sup = c.filterInput.ghostLabel.superview,
+           !c.filterInput.ghostLabel.isHidden {
+            let n = lm.numberOfGlyphs
+            let last = lm.boundingRect(forGlyphRange: NSRange(location: n - 1, length: 1), in: tc)
+            let textEnd = t.convert(NSPoint(x: t.textContainerOrigin.x + last.maxX, y: 0), to: sup).x
+            let g = c.filterInput.ghostLabel
+            let inset = g.cell?.titleRect(forBounds: g.bounds).minX ?? 0
+            let ghostStart = g.frame.minX + inset
+            expect(ghostStart >= textEnd + 1 && ghostStart <= textEnd + 4, "補完は打った文字の直後（終わり \(Int(textEnd)) → 補完 \(Int(ghostStart))）")
+        } else { expect(false, "補完が出ていない") }
+        // 1 文字消した後も合っている
+        type(c, "r"); key(c, #selector(NSResponder.deleteBackward(_:)))
+        if let t = tv(c), let lm = t.layoutManager, let tc = t.textContainer, let sup = c.filterInput.ghostLabel.superview,
+           !c.filterInput.ghostLabel.isHidden {
+            let n = lm.numberOfGlyphs
+            let last = lm.boundingRect(forGlyphRange: NSRange(location: n - 1, length: 1), in: tc)
+            let textEnd = t.convert(NSPoint(x: t.textContainerOrigin.x + last.maxX, y: 0), to: sup).x
+            let gs = c.filterInput.ghostLabel.frame.minX
+            expect(c.queryText == "#kind sc" && gs >= textEnd + 1 && gs <= textEnd + 4, "1 文字消した後も補完は直後（終わり \(Int(textEnd)) → 補完 \(Int(gs))）「\(c.queryText)」")
+        } else { expect(false, "1 文字消した後に補完が出ていない「\(c.queryText)」") }
 
         // 6) 候補が多いとき: 行は一度に全部作らず、↓ で選ぶとスクロールする
         c = make()
