@@ -374,6 +374,10 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     private var glassView: NSView?
     private var veilView: VeilView?
     private var bandView: BandView?
+    /// 入力欄の左の稲妻（# を打ったら光らせる）
+    private var boltView: NSImageView?
+    /// 前に見た入力欄の # の数（増えたら光らせる）
+    private var lastHashCount = 0
     private var effectView: NSVisualEffectView?
     /// 絞り込みのコマンド（#kind ss #date 7d）の一覧・チップ・ゴーストテキスト（FilterUI.swift）
     let filterInput = FilterInput()
@@ -452,6 +456,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         content.layer?.masksToBounds = true
 
         let glyph = NSImageView(image: symbol("bolt.fill", size: 20, weight: .semibold) ?? NSImage())
+        boltView = glyph
         glyph.contentTintColor = PanelStyle.onBand
         field.isBordered = false
         field.drawsBackground = false
@@ -608,6 +613,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
 
     func show() {
         field.stringValue = ""
+        lastHashCount = 0
         filterInput.reset()
         setResults([], query: "")
         if let f = NSWorkspace.shared.frontmostApplication, f.bundleIdentifier != Bundle.main.bundleIdentifier { previousApp = f }
@@ -661,7 +667,10 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     }
 
     /// 見本を撮るとき用（入力欄の文字を入れる）
-    func setQueryText(_ s: String) { field.stringValue = s }
+    func setQueryText(_ s: String) {
+        field.stringValue = s
+        lastHashCount = s.reduce(0) { $0 + ($1 == "#" || $1 == "＃" ? 1 : 0) }
+    }
 
     /// 入力欄をいつでも打てる状態に戻す（一覧を選んだ・チップを押した・行を押した後）。
     /// caretToEnd: カーソルを末尾に。すでに編集中なら makeFirstResponder は呼ばない（呼ぶと全選択になる）
@@ -1015,7 +1024,43 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     // MARK: NSTextFieldDelegate
 
     func controlTextDidChange(_ obj: Notification) {
+        let n = field.stringValue.reduce(0) { $0 + ($1 == "#" || $1 == "＃" ? 1 : 0) }
+        if n > lastHashCount { flashBolt() }
         filterInput.textDidChange()
+        lastHashCount = field.stringValue.reduce(0) { $0 + ($1 == "#" || $1 == "＃" ? 1 : 0) }
+    }
+
+    /// 稲妻をピカッと光らせる（0.45 秒）。白い光の輪が広がって消え、印が一瞬大きくなる。
+    /// 「視差効果を減らす」がオンなら大きさは変えず光だけ
+    func flashBolt() {
+        guard let v = boltView, let l = v.layer else { return }
+        let dur = 0.45
+        let glow = CAAnimationGroup()
+        let color = CABasicAnimation(keyPath: "shadowColor")
+        color.fromValue = NSColor.white.cgColor; color.toValue = NSColor.white.cgColor
+        let radius = CAKeyframeAnimation(keyPath: "shadowRadius")
+        radius.values = [2, 12, 4]; radius.keyTimes = [0, 0.3, 1]
+        let opacity = CAKeyframeAnimation(keyPath: "shadowOpacity")
+        opacity.values = [0.45, 1, 0]; opacity.keyTimes = [0, 0.25, 1]
+        var parts: [CAAnimation] = [color, radius, opacity]
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            // 層の基準点は左下なので、真ん中を中心に大きくする
+            let c = CGPoint(x: l.bounds.midX, y: l.bounds.midY)
+            func scale(_ k: CGFloat) -> NSValue {
+                var t = CATransform3DMakeTranslation(c.x, c.y, 0)
+                t = CATransform3DScale(t, k, k, 1)
+                return NSValue(caTransform3D: CATransform3DTranslate(t, -c.x, -c.y, 0))
+            }
+            let pop = CAKeyframeAnimation(keyPath: "transform")
+            pop.values = [scale(1), scale(1.38), scale(0.94), scale(1)]
+            pop.keyTimes = [0, 0.22, 0.6, 1]
+            parts.append(pop)
+        }
+        glow.animations = parts
+        glow.duration = dur
+        glow.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        l.removeAnimation(forKey: "flash")
+        l.add(glow, forKey: "flash")
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
