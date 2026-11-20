@@ -387,7 +387,7 @@ final class FilterInput {
         let rows = displayed(p).map { it -> RowItem in
             var title = it.title
             if !it.alias.isEmpty { title += "    " + it.alias }
-            if let c = it.count { title += "  ·  \(c) 件" }
+            if let c = it.count { title += "  ·  \(FilterCompletion.countText(c)) 件" }
             let hint = p.mode == .save || p.mode == .alias ? "↩ 決める" : "↩ 選ぶ　Tab"
             return RowItem(title: title, sub: it.detail, iconImage: symbol(it.symbol, size: 18, weight: .regular),
                            hint: it.badge.isEmpty ? hint : it.badge + "　" + hint)
@@ -491,7 +491,7 @@ final class ChipBar: NSView {
         if !next.isEmpty {
             stack.addArrangedSubview(Self.caption("続けて"))
             for it in next {
-                let b = Self.pill(it.title + (it.count.map { " \($0)" } ?? ""), symbol: it.symbol, filled: false)
+                let b = Self.pill(it.title + (it.count.map { " " + FilterCompletion.countText($0) } ?? ""), symbol: it.symbol, filled: false)
                 b.onTap = { onNext(it) }
                 stack.addArrangedSubview(b)
             }

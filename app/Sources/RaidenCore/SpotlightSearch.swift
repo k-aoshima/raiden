@@ -598,7 +598,10 @@ public final class SpotlightSearch: @unchecked Sendable {
 
     /// 条件に合う物の数（値の候補の件数用の目安。exactCountMax 件以下なら除外・パッケージの中を引く。多いときは Spotlight の数のまま）。
     /// max を超えたら max を返す
-    public func count(_ f: QueryFilters, max: Int = 10_000, now: Date = Date()) -> Int {
+    /// 件数を数える上限。ここまで行ったら「1万件以上」と出す（FilterCompletion.countText）
+    public static let countCap = 10_000
+
+    public func count(_ f: QueryFilters, max: Int = SpotlightSearch.countCap, now: Date = Date()) -> Int {
         lock.lock(); let g = generation; lock.unlock()
         let r = Self.request(f, now: now)
         guard let q = MDQueryCreate(kCFAllocatorDefault, Self.queryString(r) as CFString, nil, nil) else { return 0 }

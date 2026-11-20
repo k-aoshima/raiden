@@ -189,6 +189,11 @@ public enum FilterCompletion {
 
     /// text: 入力欄の文字（決まったチップは含まない）。committed: チップにしたコマンド（件数を数える条件に入れる）。
     /// context: 件数を数える口（無ければ件数なし）。memory: 検索の記録から覚えた使い方（よく使う組み合わせ・値・場所）
+    /// 一覧に出す件数の文字。数える上限まで行ったら「1万以上」（それより多いかは数えていないので、上限の数そのものは出さない）
+    public static func countText(_ c: Int) -> String {
+        c >= SpotlightSearch.countCap ? "1万以上" : "\(c)"
+    }
+
     public static func palette(for text: String, committed: [String] = [], context: FilterSource? = nil,
                                memory: FilterMemory = .empty, now: Date = Date()) -> Palette? {
         let chars = Array(text)

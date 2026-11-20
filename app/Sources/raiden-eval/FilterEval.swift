@@ -98,6 +98,7 @@ func runFilterTests() {
     let redone = FileEntry(path: NSHomeDirectory() + "/Desktop/上書き.png", mtime: ts("2026-11-19 10:00"), created: ts("2026-11-18 10:00"), added: ts("2026-11-18 10:00"))
     expect(p("#date today").matches(redone) && !p("#date yesterday").matches(redone), "#date は最後に触った日（昨日作って今日上書きした物は今日だけ）")
     expect(p("#created yesterday").matches(redone) && !p("#modified yesterday").matches(redone), "作成日・変更日で探せば昨日も出る")
+    expect(FilterCompletion.countText(10_000) == "1万以上" && FilterCompletion.countText(9_999) == "9999", "上限まで数えたら 1万以上")
     expect(p("#created 2026-09-01").matches(pdf) && !p("#modified 2026-09-01").matches(pdf), "#created / #modified")
     expect(p("#kind pdf #path 仕事 #date 2026-09").matches(pdf) && !p("#kind pdf #path 仕事 #date 2026-10").matches(pdf), "かつ")
     expect(p("#path Desktop #path 仕事").matches(pdf) && p("#path Desktop #path 仕事").matches(ss), "#path 2 回は「または」")
