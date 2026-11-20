@@ -76,14 +76,14 @@ final class BandView: NSView {
         CATransaction.commit()
     }
 
-    /// 稲光: 帯が一瞬白く光って、2 回目の弱い光のあと消える（0.6 秒）
+    /// 稲光: 帯が一瞬白く光って消える（1 回だけ、0.5 秒）
     func flash() {
         wantsLayer = true
         needsLayout = true; layoutSubtreeIfNeeded()
         let a = CAKeyframeAnimation(keyPath: "opacity")
-        a.values = [0, 0.38, 0.05, 0.2, 0]
-        a.keyTimes = [0, 0.08, 0.3, 0.42, 1]
-        a.duration = 0.6
+        a.values = [0, 0.38, 0]
+        a.keyTimes = [0, 0.12, 1]
+        a.duration = 0.5
         flashLayer.add(a, forKey: "flash")
     }
 
@@ -1056,7 +1056,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         lastHashCount = field.stringValue.reduce(0) { $0 + ($1 == "#" || $1 == "＃" ? 1 : 0) }
     }
 
-    /// 稲妻をピカッと光らせる（0.9 秒）。帯全体が一瞬白く光り、稲妻の白い光が広がって消え、印が大きくなって戻る。
+    /// 稲妻をピカッと光らせる（0.9 秒）。帯全体が一瞬白く 1 回光り、稲妻の白い光が広がって消え、印が大きくなって戻る。
     /// 「視差効果を減らす」がオンなら大きさは変えず光だけ
     func flashBolt() {
         bandView?.flash()
