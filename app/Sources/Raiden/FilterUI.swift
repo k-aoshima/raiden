@@ -123,7 +123,7 @@ final class FilterInput {
         suggestions = palette == nil ? FilterSuggest.suggest(text, committed: committed, memory: mem, source: src) : []
         updateGhost()
         if let p = palette {
-            panel.setResults(paletteSections(p), query: currentQuery, extra: [paletteHeader(p)], palette: true)
+            panel.setResults(paletteSections(p), query: currentQuery, extra: committedBar() + [paletteHeader(p)], palette: true)
         } else {
             panel.onQuery?(currentQuery)
         }
@@ -395,6 +395,14 @@ final class FilterInput {
         return [ResultSection(title: "候補", symbol: "list.bullet", items: rows)]
     }
 
+    /// 一覧を出している間も、もう付いている条件（チップ）を一覧の上に出す（今どこまで絞っているか分かるように）
+    private func committedBar() -> [(NSView, CGFloat)] {
+        let chips = QueryFilters.parse(committed.joined(separator: " "), now: now()).chips
+        if chips.isEmpty { return [] }
+        return [(ChipBar(chips: chips, notes: [], next: [], onNext: { _ in },
+                         onRemove: { [weak self] c in self?.removeChip(c) }), ChipBar.height)]
+    }
+
     private func paletteHeader(_ p: FilterCompletion.Palette) -> (NSView, CGFloat) {
         let title: String, sym: String
         switch p.mode {
@@ -616,6 +624,7 @@ enum FilterSnapshots {
         }
         Snapshot.capture(panel("#"), dir + "/option-commands.png")
         Snapshot.capture(panel("#date "), dir + "/option-date-values.png")
+        Snapshot.capture(panel("#type ", committed: ["#date 7d"]), dir + "/option-values-with-chips.png")
         Snapshot.capture(panel("#kind sc"), dir + "/option-ghost.png")
 
         // チップが 2 つ付いた状態（#kind ss #date 7d）。候補は見本
