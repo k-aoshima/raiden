@@ -61,6 +61,32 @@ final class VeilView: NSView {
 
 /// 入力欄の帯（藍のグラデーションに斜めの光）。上の角はパネルの切り抜きで丸くなる
 final class BandView: NSView {
+    /// ピカッと光るときの白い面（ふだんは見えない）
+    private let flashLayer = CALayer()
+
+    override func layout() {
+        super.layout()
+        if flashLayer.superlayer == nil, let l = layer {
+            flashLayer.backgroundColor = NSColor.white.cgColor
+            flashLayer.opacity = 0
+            l.addSublayer(flashLayer)
+        }
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        flashLayer.frame = bounds
+        CATransaction.commit()
+    }
+
+    /// 稲光: 帯が一瞬白く光って、2 回目の弱い光のあと消える（0.6 秒）
+    func flash() {
+        wantsLayer = true
+        needsLayout = true; layoutSubtreeIfNeeded()
+        let a = CAKeyframeAnimation(keyPath: "opacity")
+        a.values = [0, 0.38, 0.05, 0.2, 0]
+        a.keyTimes = [0, 0.08, 0.3, 0.42, 1]
+        a.duration = 0.6
+        flashLayer.add(a, forKey: "flash")
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         let a = PanelStyle.bandAlpha
         let g = NSGradient(colors: [NSColor(srgbRed: 0.173, green: 0.153, blue: 0.722, alpha: a),   // #2C27B8
@@ -1030,18 +1056,19 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         lastHashCount = field.stringValue.reduce(0) { $0 + ($1 == "#" || $1 == "＃" ? 1 : 0) }
     }
 
-    /// 稲妻をピカッと光らせる（0.45 秒）。白い光の輪が広がって消え、印が一瞬大きくなる。
+    /// 稲妻をピカッと光らせる（0.9 秒）。帯全体が一瞬白く光り、稲妻の白い光が広がって消え、印が大きくなって戻る。
     /// 「視差効果を減らす」がオンなら大きさは変えず光だけ
     func flashBolt() {
+        bandView?.flash()
         guard let v = boltView, let l = v.layer else { return }
-        let dur = 0.45
+        let dur = 0.9
         let glow = CAAnimationGroup()
         let color = CABasicAnimation(keyPath: "shadowColor")
         color.fromValue = NSColor.white.cgColor; color.toValue = NSColor.white.cgColor
         let radius = CAKeyframeAnimation(keyPath: "shadowRadius")
-        radius.values = [2, 12, 4]; radius.keyTimes = [0, 0.3, 1]
+        radius.values = [2, 20, 16, 4]; radius.keyTimes = [0, 0.15, 0.45, 1]
         let opacity = CAKeyframeAnimation(keyPath: "shadowOpacity")
-        opacity.values = [0.45, 1, 0]; opacity.keyTimes = [0, 0.25, 1]
+        opacity.values = [0.45, 1, 1, 0]; opacity.keyTimes = [0, 0.12, 0.45, 1]
         var parts: [CAAnimation] = [color, radius, opacity]
         if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             // 層の基準点は左下なので、真ん中を中心に大きくする
@@ -1052,13 +1079,12 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
                 return NSValue(caTransform3D: CATransform3DTranslate(t, -c.x, -c.y, 0))
             }
             let pop = CAKeyframeAnimation(keyPath: "transform")
-            pop.values = [scale(1), scale(1.38), scale(0.94), scale(1)]
-            pop.keyTimes = [0, 0.22, 0.6, 1]
+            pop.values = [scale(1), scale(1.6), scale(1.45), scale(0.92), scale(1)]
+            pop.keyTimes = [0, 0.14, 0.32, 0.65, 1]
             parts.append(pop)
         }
         glow.animations = parts
         glow.duration = dur
-        glow.timingFunction = CAMediaTimingFunction(name: .easeOut)
         l.removeAnimation(forKey: "flash")
         l.add(glow, forKey: "flash")
     }
