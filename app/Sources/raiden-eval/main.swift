@@ -200,6 +200,12 @@ if args.contains("--scope-run") {
     exit(0)
 }
 
+// --bench-apply --roots ~/Project --file-store <scratch の新しいファイル>: FSEvents の変化を当てる手間（ApplyBench.swift）
+if args.contains("--bench-apply") {
+    try runApplyBench(embedder: embedder)
+    exit(0)
+}
+
 // --settings-test --store <path>: 設定の読み書き・検索範囲の差し替え・検索の記録・動作の記録を確かめる（SettingsTest.swift）
 if args.contains("--settings-test") {
     try runSettingsTest(embedder: embedder)

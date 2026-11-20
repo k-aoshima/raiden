@@ -99,6 +99,7 @@ public enum NoMatch {
                                intent: QueryIntent?, relation: Bool, allow: [Bool]? = nil, exact: [Int: Float] = [:]) -> MatchSignals {
         var s = MatchSignals()
         guard let first = ranked.first else { return s }
+        let allow = c.liveAllow(allow)   // 消した印の点（差分で直したときの穴）は数えない
         s.top1 = first.1
         s.top2 = ranked.count > 1 ? ranked[1].1 : first.1 - 1
         let r0 = rankedNoEx ?? ranked

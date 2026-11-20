@@ -133,12 +133,106 @@ public struct Corpus {
 
     private mutating func setNames(_ raw: [[String]], meta: [Meta?]?) {
         n = raw.count
-        names = raw.map { Array(Set($0.map(Lexical.normalize).filter { !$0.isEmpty })) }
-        romaji = raw.map { Lexical.canonRomaji(Lexical.romaji($0.first ?? "")) }
-        grams = names.map { Lexical.bigrams($0.joined(separator: " ")) }
+        names = raw.map(Self.normNames)
+        romaji = raw.map(Self.romajiOf)
+        grams = names.map(Self.gramsOf)
         self.meta = meta ?? Array(repeating: nil, count: n)
         adj = Array(repeating: [], count: n)
         filesBelow = Array(repeating: 0, count: n)
+        familiesBelow = [:]
+        alive = Array(repeating: true, count: n)
+        deadCount = 0
+    }
+
+    static func normNames(_ raw: [String]) -> [String] { Array(Set(raw.map(Lexical.normalize).filter { !$0.isEmpty })) }
+    static func romajiOf(_ raw: [String]) -> String { Lexical.canonRomaji(Lexical.romaji(raw.first ?? "")) }
+    static func gramsOf(_ names: [String]) -> Set<String> { Lexical.bigrams(names.joined(separator: " ")) }
+
+    // MARK: - 差分で直す（ファイル・フォルダ。FSEvents の数件の変化で全部を作り直さない）
+    //
+    // 添字をずらさないため、消した点は印（alive = false）を付けて検索から外すだけにし、足した点は後ろに足す。
+    // 印がたまったら Engine が全部入れ直して詰める（FileIndex の compact*、起動時と 1 日 1 回の見直しでも詰まる）。
+    // co_used / co_time の線は全部入れ直すときだけ作り直す（足した点には付かず、重みの割り算もそのまま）。
+
+    /// 生きている点か（false は消した印。並べる・数えるときは外す）
+    public private(set) var alive: [Bool] = []
+    /// 消した印の数
+    public private(set) var deadCount = 0
+
+    /// 絞り込み（allow）に消した印を重ねる。印が無ければ allow のまま
+    public func liveAllow(_ allow: [Bool]?) -> [Bool]? {
+        guard deadCount > 0 else { return allow }
+        guard let allow, allow.count == n else { return alive }
+        return zip(allow, alive).map { $0 && $1 }
+    }
+
+    /// 2 値のベクトルの点を後ろに 1 つ足す（ベクトル無し・線無し）。足した添字を返す
+    public mutating func appendItem(names raw: [String], meta m: Meta?) -> Int {
+        precondition(isBinary)
+        let nn = Self.normNames(raw)
+        names.append(nn); romaji.append(Self.romajiOf(raw)); grams.append(Self.gramsOf(nn))
+        meta.append(m); adj.append([]); filesBelow.append(0); alive.append(true)
+        codes.append(contentsOf: repeatElement(0, count: BinVec.bytes)); present.append(false)
+        n += 1
+        return n - 1
+    }
+
+    /// 点の名前と時間・種類を差し替える（同じパスの物が変わったとき）
+    public mutating func updateItem(_ i: Int, names raw: [String], meta m: Meta?) {
+        let nn = Self.normNames(raw)
+        names[i] = nn; romaji[i] = Self.romajiOf(raw); grams[i] = Self.gramsOf(nn)
+        meta[i] = m
+    }
+
+    /// ベクトルを外す（説明文が変わってまだ作っていない）
+    public mutating func clearCode(_ i: Int) { if isBinary && i < n { present[i] = false } }
+
+    /// 点を消した印にする。つながっている点からの線も外す（下のファイル数は先に addBelow で引いておく）
+    public mutating func kill(_ i: Int) {
+        guard i < n, alive[i] else { return }
+        for e in adj[i] { let t = Int(e.to); if t != i { adj[t].removeAll { $0.to == Int32(i) } } }
+        adj[i] = []
+        names[i] = []; romaji[i] = ""; grams[i] = []; meta[i] = nil
+        if isBinary { present[i] = false }
+        filesBelow[i] = 0; familiesBelow[i] = nil
+        alive[i] = false
+        deadCount += 1
+    }
+
+    /// contains の線（フォルダ parent → 中の物 child）を 1 本足す
+    public mutating func addContains(parent: Int, child: Int) {
+        adj[parent].append(Edge(to: Int32(child), w: 1, kind: 0))
+        adj[child].append(Edge(to: Int32(parent), w: 1, kind: 1))
+    }
+
+    /// ファイル i の上のフォルダ（contains の線を上へ、最大 64 段）の「下のファイル数と種類」に delta を足す。
+    /// addEdges の数え方と同じ（フォルダ自身は数えない）
+    public mutating func addBelow(_ i: Int, _ delta: Int) {
+        guard i < n, let md = meta[i], !md.families.contains("folder") else { return }
+        var cur = i
+        for _ in 0..<64 {
+            guard let up = adj[cur].first(where: { $0.kind == 1 }) else { return }
+            let p = Int(up.to)
+            guard meta[p]?.families.contains("folder") ?? false else { return }
+            filesBelow[p] += delta
+            var fam = familiesBelow[p] ?? [:]
+            for f in md.families { fam[f, default: 0] += delta; if fam[f] == 0 { fam[f] = nil } }
+            familiesBelow[p] = filesBelow[p] > 0 ? fam : nil
+            cur = p
+        }
+    }
+
+    /// 消した点に向いた例の線を外す。線が 1 本も残らない例は例ごと外す（全部入れ直したときと同じになる）
+    public mutating func removeLinks(to dead: Set<Int>) {
+        guard !dead.isEmpty else { return }
+        var keep: [Int] = []
+        for j in exLinks.indices {
+            exLinks[j].removeAll { dead.contains($0.0) }
+            if !exLinks[j].isEmpty { keep.append(j) }
+        }
+        guard keep.count < exLinks.count else { return }
+        exText = keep.map { exText[$0] }; exVecs = keep.map { exVecs[$0] }
+        exLinks = keep.map { exLinks[$0] }; exGrams = keep.map { exGrams[$0] }
     }
 
     /// 1 点の 2 値のベクトルを差し替える（裏でベクトル化が進んだとき）
@@ -207,10 +301,12 @@ public enum Ranker {
                             intent: QueryIntent? = nil, rel: (anchor: [Float], target: [Float])? = nil,
                             limit: Int = 8, allow: [Bool]? = nil) -> [(Int, Float)] {
         if m.relation, let it = intent, it.hasRelation, let rel {
-            // 絞り込み（allow）があるときは全部並べてから当てはまる物だけ残す
+            // 絞り込み（allow）があるときは全部並べてから当てはまる物だけ残す（消した印の点は rankRelation の中で外す）
             guard let allow else { return rankRelation(c, it, rel, m, limit) }
             return Array(rankRelation(c, it, rel, m, c.count).filter { allow[$0.0] }.prefix(limit))
         }
+        // 消した印の点（差分で直したときの穴）は絞り込みと同じく候補から外す
+        let allow = c.liveAllow(allow)
         let n = c.count
         if n == 0 { return [] }
         let nq = Lexical.normalize(q)
@@ -385,7 +481,9 @@ public enum Ranker {
         let na = Lexical.normalize(it.anchor)
         var seedScore = [Float](repeating: 0, count: n)
         let aDots = c.dots(rel.anchor), tDots = c.dots(rel.target)
+        let dead = c.deadCount > 0
         for i in 0..<n {
+            if dead && !c.alive[i] { seedScore[i] = -.infinity; continue }
             var s = aDots[i]
             for nn in c.names[i] where na.count >= 2 && (nn.contains(na) || na.contains(nn) && nn.count >= 3) { s += m.substrBonus }
             seedScore[i] = s
@@ -419,7 +517,7 @@ public enum Ranker {
             frontier = Array(next.sorted { $0.value > $1.value }.prefix(m.seeds).map { ($0.key, $0.value) })
         }
         var score = [Float](repeating: -9, count: n)
-        for i in 0..<n where P[i] > 0 && !seedSet.contains(i) {
+        for i in 0..<n where P[i] > 0 && !seedSet.contains(i) && (!dead || c.alive[i]) {
             var s = P[i] + m.relWT * tDots[i]
             if let md = c.meta[i] {
                 if !it.families.isEmpty && !it.families.isDisjoint(with: md.families) {
@@ -433,7 +531,9 @@ public enum Ranker {
         var out = topIndices(score, limit).filter { score[$0] > -9 }.map { ($0, score[$0]) }
         if out.count < limit {
             let have = Set(out.map(\.0))
-            let fill = topIndices(tDots, limit * 2).filter { !have.contains($0) }
+            var td = tDots
+            if dead { for i in 0..<n where !c.alive[i] { td[i] = -.infinity } }
+            let fill = topIndices(td, limit * 2).filter { !have.contains($0) }
             out += fill.prefix(limit - out.count).map { ($0, tDots[$0] - 1) }
         }
         return out

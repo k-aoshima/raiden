@@ -201,7 +201,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if !st.rescanned.isEmpty {
                     rlog("FSEvents の履歴が途切れたので見直し \(st.rescanned.map(RaidenSettings.tilde))")
                 }
-                rlog(String(format: "ファイルの変化 %d 件・削除 %d 件（ベクトル化 %d 件）%.2fs", st.changed, st.removed, st.embedded, st.seconds))
+                rlog(String(format: "ファイルの変化 %d 件・削除 %d 件（%@、ベクトル化 %d 件）%.2fs", st.changed, st.removed,
+                            st.incremental ? "差分" : "全部入れ直し", st.embedded, st.seconds))
                 let n = idx.engine.files.count
                 DispatchQueue.main.async { self?.indexStatus.count = n; self?.settingsWindow?.refreshStatus() }
                 self?.pumpEmbedding(idx)

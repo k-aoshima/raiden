@@ -76,7 +76,18 @@ public final class Engine {
     private(set) public var examples: [ExampleNode] = []
     private var exVecs: [[Float]] = []
     private var appCorpus = Corpus()
-    private(set) public var files: [FileEntry] = []
+    /// ファイル・フォルダの点（fileCorpus と同じ並び）。差分で直したときは消した印の点も残る（fileCorpus.alive）
+    private var slots: [FileEntry] = []
+    /// 一覧に入っているファイル・フォルダ（消した印の点は除く）
+    public var files: [FileEntry] {
+        lock.lock(); defer { lock.unlock() }
+        guard fileCorpus.deadCount > 0, fileCorpus.alive.count == slots.count else { return slots }
+        return slots.indices.compactMap { fileCorpus.alive[$0] ? slots[$0] : nil }
+    }
+    /// 差分で直したときの消した印の数（たまったら FileIndex が全部入れ直して詰める）
+    public var fileDeadCount: Int { lock.lock(); defer { lock.unlock() }; return fileCorpus.deadCount }
+    /// 点の数（消した印も含む）
+    public var fileSlotCount: Int { lock.lock(); defer { lock.unlock() }; return slots.count }
     private var fileCorpus = Corpus()
     private var fileIndex: [String: Int] = [:]
     private var fileKeys: [QueryFilters.FileKeys] = []
@@ -264,11 +275,18 @@ public final class Engine {
     /// 0 の物も名前の文字一致（ローマ字・打ち間違いも）と絞り込みのコマンドでは候補に出る。
     /// contains（フォルダ → 中の物）・co_used・co_time の線もここで張る
     public func installFiles(_ entries: [FileEntry]) -> FilePending {
+        var tm: [(String, Double)] = []
+        var tt = Date()
+        func lap(_ name: String) { let n = Date(); tm.append((name, n.timeIntervalSince(tt))); tt = n }
         let cm = FileCatalog.childrenMap(entries)
+        lap("childrenMap")
         let bases = entries.map { FileCatalog.baseDescription($0, children: cm[$0.path] ?? []) }
+        lap("baseDescription")
         let model = embedder.identifier
         let stamps = zip(entries, bases).map { Store.hash("\(model)\n\($1)\n\($0.mtime) \($0.size)") }
+        lap("hash")
         let have = store?.storedFileCodes() ?? [:]
+        lap("storedFileCodes")
         let zero = [UInt8](repeating: 0, count: BinVec.bytes)
         var codes: [UInt8] = []
         codes.reserveCapacity(entries.count * BinVec.bytes)
@@ -277,7 +295,7 @@ public final class Engine {
         var pending = FilePending()
         var newNodes: [(entry: FileEntry, code: [UInt8]?, hash: String)] = []
         lock.lock()
-        let prior = Dictionary(files.enumerated().map { ($1.path, $0) }, uniquingKeysWith: { a, _ in a })
+        let prior = fileIndex
         let priorStamps = fileStamps, priorCorpus = fileCorpus
         lock.unlock()
         for (i, e) in entries.enumerated() {
@@ -300,33 +318,43 @@ public final class Engine {
             if FileCatalog.hasContent(e) { pending.full.append(e.path) }
             if have[e.path] == nil { newNodes.append((e, nil, "")) }
         }
+        lap("codes")
         // まだベクトルの無い物も点だけ作っておく（線を張るため）。消えた物の点は消す
         store?.saveFileNodes(newNodes)
         let live = Set(entries.map(\.path))
         store?.deleteFileNodes(have.keys.filter { !live.contains($0) })
+        lap("saveFileNodes+deleteFileNodes")
         // メモリのベクトルの stamp: まだ無い物は ""、短い説明だけの物は :s 付き
         let fullSet = Set(pending.full), shortSet = Set(pending.short)
         let memStamps = entries.indices.map { i -> String in
             let p = entries[i].path
             return shortSet.contains(p) ? "" : fullSet.contains(p) ? stamps[i] + Self.shortMark : stamps[i]
         }
+        lap("memStamps")
         let contains = FileCatalog.containsEdges(entries)
+        lap("containsEdges")
         let co = FileCatalog.coUsedEdges(entries)
+        lap("coUsedEdges")
         let ct = FileCatalog.coTimeEdges(entries)
+        lap("coTimeEdges")
         if let store {
             store.replaceFileEdges(kind: "contains", contains.map { (entries[$0.0].path, entries[$0.1].path, 1) })
             store.replaceFileEdges(kind: "co_used", co.map { (entries[$0.0].path, entries[$0.1].path, $0.2) })
             store.replaceFileEdges(kind: "co_time", ct.map { (entries[$0.0].path, entries[$0.1].path, $0.2) })
         }
+        lap("replaceFileEdges")
         var c = Corpus()
         c.setItems(names: entries.map { [$0.stem] }, codes: codes, present: present, meta: entries.map {
             Corpus.Meta(families: Set($0.families), times: [$0.lastUsed, $0.mtime, $0.added].filter { $0 > 0 },
                         added: $0.added, downloaded: $0.downloaded)
         })
+        lap("Corpus.setItems")
         c.addEdges(contains: contains, coUsed: co, coTime: ct)
+        lap("Corpus.addEdges")
         let keys = entries.map(QueryFilters.FileKeys.init)
+        lap("FileKeys")
         lock.lock()
-        files = entries
+        slots = entries
         fileKeys = keys
         fileBases = bases
         fileStamps = memStamps
@@ -334,8 +362,173 @@ public final class Engine {
         ctxCache = nil
         fileIndex = Dictionary(entries.enumerated().map { ($1.path, $0) }, uniquingKeysWith: { a, _ in a })
         fileCorpus = c
+        fileGeneration += 1
         lock.unlock()
+        lap("fileIndex+入れ替え")
+        lastInstallTiming = tm
         return pending
+    }
+
+    /// 最後の installFiles の段ごとの秒数（raiden-eval --bench-apply で出す）
+    public private(set) var lastInstallTiming: [(String, Double)] = []
+    /// 一覧を入れ替えるたびに増やす（filterContext の作り置きが古くないか見る）
+    private var fileGeneration = 0
+
+    static func fileMeta(_ e: FileEntry) -> Corpus.Meta {
+        Corpus.Meta(families: Set(e.families), times: [e.lastUsed, e.mtime, e.added].filter { $0 > 0 },
+                    added: e.added, downloaded: e.downloaded)
+    }
+
+    /// FSEvents の変化（数件〜数百件）を差分で当てる。installFiles と同じ列（FileIndex の列）から呼ぶ。
+    /// upsert は足した・変わった物（同じパスがあれば差し替え、無ければ後ろに足す）、remove は消えた物のパス。
+    /// 消した点は印を付けて検索から外すだけで添字はずらさない（印は全部入れ直すときに詰まる）。
+    /// 説明文を作り直すのは、変わった物と、中の物が増減・変化したフォルダ（親）だけ。contains の線と「下のファイル数と種類」も
+    /// その分だけ直す。co_used / co_time の線は作り直さない（全部入れ直すときだけ）。
+    /// 返すのは、この変化で作るべきベクトル（installFiles と同じ形）
+    public func patchFiles(upsert: [FileEntry], remove: [String]) -> FilePending {
+        var tm: [(String, Double)] = []
+        var tt = Date()
+        func lap(_ name: String) { let n = Date(); tm.append((name, n.timeIntervalSince(tt))); tt = n }
+        func parent(_ p: String) -> String { (p as NSString).deletingLastPathComponent }
+        let model = embedder.identifier
+        let upPaths = Set(upsert.map(\.path))
+        var pending = FilePending()
+        var killed: [String] = []            // Store から消す点
+        var recreated = Set<String>()        // ファイル ↔ フォルダが入れ替わった物（Store の点を作り直す）
+        var touchedParents = Set<String>()   // 中の物が増減・変化したフォルダ
+        var newIdx: [Int] = [], descIdx = Set<Int>()
+        var newEdges: [(String, String)] = []
+
+        lock.lock()
+        // 1. 消す: 先に上のフォルダの「下のファイル数」から引いてから印を付ける（フォルダごと消えるとき、上へたどる線が先に切れないように）
+        var dead: [Int] = []
+        for p in remove where !upPaths.contains(p) {
+            guard let i = fileIndex[p] else { continue }
+            dead.append(i)
+        }
+        for e in upsert {
+            if let i = fileIndex[e.path], slots[i].isDir != e.isDir { dead.append(i); recreated.insert(e.path) }
+        }
+        for i in dead { fileCorpus.addBelow(i, -1) }
+        for i in dead {
+            let p = slots[i].path
+            fileCorpus.kill(i)
+            fileIndex[p] = nil
+            fileBases[i] = ""; targetStamps[i] = ""; fileStamps[i] = ""
+            killed.append(p)
+            touchedParents.insert(parent(p))
+        }
+        fileCorpus.removeLinks(to: Set(dead))
+        lap("消す")
+        // 2. 足す・差し替える
+        for e in upsert {
+            touchedParents.insert(parent(e.path))
+            if let i = fileIndex[e.path] {
+                slots[i] = e
+                fileKeys[i] = QueryFilters.FileKeys(e)
+                fileCorpus.updateItem(i, names: [e.stem], meta: Self.fileMeta(e))
+                descIdx.insert(i)
+                continue
+            }
+            let k = fileCorpus.appendItem(names: [e.stem], meta: Self.fileMeta(e))
+            slots.append(e); fileKeys.append(QueryFilters.FileKeys(e))
+            fileBases.append(""); targetStamps.append(""); fileStamps.append("")
+            fileIndex[e.path] = k
+            newIdx.append(k); descIdx.insert(k)
+        }
+        // 3. contains の線: 足した物と、まだ親との線が無い物（親が後から入ってきた）を親につなぎ、上のフォルダの数に足す
+        var below: [Int] = []
+        for i in descIdx where !fileCorpus.adj[i].contains(where: { $0.kind == 1 }) {
+            guard let j = fileIndex[parent(slots[i].path)] else { continue }
+            fileCorpus.addContains(parent: j, child: i)
+            newEdges.append((slots[j].path, slots[i].path))
+            below.append(i)
+        }
+        for i in below { fileCorpus.addBelow(i, 1) }
+        lap("足す・線")
+        // 4. 説明文: 変わった物と親だけ作り直し、stamp が同じならベクトルはそのまま
+        for p in touchedParents { if let j = fileIndex[p] { descIdx.insert(j) } }
+        var ask: [(Int, String)] = []   // メモリに合うベクトルが無い物（Store を引く）
+        for i in descIdx {
+            let e = slots[i]
+            let kids = e.isDir ? fileCorpus.adj[i].compactMap { $0.kind == 0 ? slots[Int($0.to)] : nil } : []
+            let base = FileCatalog.baseDescription(e, children: kids)
+            let stamp = Store.hash("\(model)\n\(base)\n\(e.mtime) \(e.size)")
+            fileBases[i] = base
+            targetStamps[i] = stamp
+            let ps = fileStamps[i]
+            if fileCorpus.present[i] && (ps == stamp || ps == stamp + Self.shortMark) {
+                if ps != stamp { pending.full.append(e.path) }
+                continue
+            }
+            ask.append((i, stamp))
+        }
+        lap("説明文")
+        let have = store?.fileCodes(ask.map { slots[$0.0].path }) ?? [:]
+        var newNodes: [(entry: FileEntry, code: [UInt8]?, hash: String)] = []
+        for (i, stamp) in ask {
+            let e = slots[i]
+            if let h = have[e.path], !recreated.contains(e.path), h.code.count == BinVec.bytes,
+               h.hash == stamp || h.hash == stamp + Self.shortMark {
+                fileCorpus.setCode(i, h.code)
+                fileStamps[i] = h.hash
+                if h.hash != stamp { pending.full.append(e.path) }
+                continue
+            }
+            fileCorpus.clearCode(i)
+            fileStamps[i] = ""
+            pending.short.append(e.path)
+            if FileCatalog.hasContent(e) { pending.full.append(e.path) }
+            if have[e.path] == nil || recreated.contains(e.path) { newNodes.append((e, nil, "")) }
+        }
+        ctxCache = nil
+        fileGeneration += 1
+        let newPaths = Set(newIdx.map { slots[$0].path })
+        lock.unlock()
+        lap("ベクトル")
+        // 5. Store: 消えた点（線と、向いていた例の chose の線も一緒に消える）→ 新しい点 → contains の線
+        if let store {
+            store.deleteFileNodes(killed)
+            store.saveFileNodes(newNodes)
+            store.addFileEdges(kind: "contains", newEdges.map { ($0.0, $0.1, 1) })
+            // 足した物に向いた例があれば、全部入れ直したときと同じく例の線をつなぐ
+            if !newPaths.isEmpty {
+                let exs = store.fileExamples().filter { newPaths.contains($0.1) }
+                if !exs.isEmpty { addFileExamples(exs) }
+            }
+        }
+        lap("Store")
+        lastPatchTiming = tm
+        return pending
+    }
+
+    /// 最後の patchFiles の段ごとの秒数
+    public private(set) var lastPatchTiming: [(String, Double)] = []
+
+    /// 生きている点ごとの中身の要約（パス → 文字列）と、例（"#examples"）。差分で直した状態と全部入れ直した状態を比べる用。
+    /// co_used / co_time の線は差分では作り直さないので入れない
+    public func fileStateDigest() -> [String: String] {
+        lock.lock(); defer { lock.unlock() }
+        let c = fileCorpus
+        var out: [String: String] = [:]
+        for i in slots.indices where c.deadCount == 0 || c.alive[i] {
+            let e = slots[i]
+            let md = c.meta[i]
+            let kids = c.adj[i].filter { $0.kind == 0 }.map { slots[Int($0.to)].path }.sorted()
+            let up = c.adj[i].filter { $0.kind == 1 }.map { slots[Int($0.to)].path }
+            let code = c.present[i] ? Store.hash(c.code(i).map { String($0) }.joined(separator: ",")) : "-"
+            let fb = (c.familiesBelow[i] ?? [:]).sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",")
+            let k = fileKeys[i]
+            out[e.path] = [fileBases[i], targetStamps[i], fileStamps[i], code,
+                           md.map { "\($0.families.sorted()) \($0.times) \($0.added) \($0.downloaded)" } ?? "nil",
+                           "下 \(c.filesBelow[i]) [\(fb)]", "中 \(kids)", "親 \(up)",
+                           "名 \(c.names[i].sorted()) \(c.romaji[i])", "鍵 \(k.ext) \(k.name) \(k.parent)",
+                           "\(e.size) \(e.mtime) \(e.kind)"].joined(separator: " | ")
+        }
+        out["#examples"] = zip(c.exText, c.exLinks).map { t, ls in
+            t + " → " + ls.map { "\(slots[$0.0].path)×\($0.1)" }.sorted().joined(separator: ",")
+        }.sorted().joined(separator: " / ")
+        return out
     }
 
     /// 短い説明だけで作ったベクトルの印（desc_hash の後ろに付ける）
@@ -351,7 +544,7 @@ public final class Engine {
         lock.lock()
         let items: [(String, FileEntry, String, String)] = paths.compactMap { p in
             guard let i = fileIndex[p], i < fileBases.count else { return nil }
-            return (p, files[i], fileBases[i], targetStamps[i])
+            return (p, slots[i], fileBases[i], targetStamps[i])
         }
         lock.unlock()
         guard !items.isEmpty else { return 0 }
@@ -417,7 +610,7 @@ public final class Engine {
     /// ファイル・フォルダの最終の説明文（files と同じ並び。答え合わせで 2 値の目盛りを合わせ直す用。中身を読むので重い）
     public var fileDescriptions: [String] {
         lock.lock()
-        let fs = files, bs = fileBases
+        let fs = slots, bs = fileBases
         lock.unlock()
         return zip(fs, bs).map { e, b in
             let ct = FileCatalog.content(e)
@@ -446,10 +639,17 @@ public final class Engine {
     public var filterContext: FilterContext {
         lock.lock()
         if let c = ctxCache, c.appCount == apps.count { lock.unlock(); return c }
-        let fs = files, keys = fileKeys, n = apps.count
+        var fs = slots, keys = fileKeys
+        let n = apps.count, gen = fileGeneration
+        let alive = fileCorpus.deadCount > 0 && fileCorpus.alive.count == fs.count ? fileCorpus.alive : nil
         lock.unlock()
+        if let alive {
+            let live = fs.indices.filter { alive[$0] }
+            fs = live.map { fs[$0] }
+            if keys.count == alive.count { keys = live.map { keys[$0] } }
+        }
         let c = FilterContext(files: fs, keys: keys.count == fs.count ? keys : nil, appCount: n)
-        lock.lock(); if fs.count == files.count { ctxCache = c }; lock.unlock()
+        lock.lock(); if gen == fileGeneration { ctxCache = c }; lock.unlock()
         return c
     }
 
@@ -475,9 +675,11 @@ public final class Engine {
         none.filters = f
         guard f.allowsFiles, f.isActive || !f.text.isEmpty else { return none }
         lock.lock()
-        let fs = files, keys = fileKeys
+        let fs = slots, keys = fileKeys
+        let alive = fileCorpus.deadCount > 0 && fileCorpus.alive.count == fs.count ? fileCorpus.alive : nil
         lock.unlock()
-        let allow: [Bool]? = f.isActive ? fs.indices.map { f.matches(fs[$0], keys: keys.count == fs.count ? keys[$0] : nil) } : nil
+        let allow: [Bool]? = f.isActive ? fs.indices.map { (alive?[$0] ?? true) && f.matches(fs[$0], keys: keys.count == fs.count ? keys[$0] : nil) }
+            : alive
         if let allow, !allow.contains(true) { none = Judged(results: [], noMatch: true, signals: MatchSignals()); none.filters = f; return none }
         var j: Judged<FileResult>
         if f.text.isEmpty {
@@ -500,7 +702,7 @@ public final class Engine {
     public func rankFiles(query q: String, vec: [Float], mix: Mix, intent: QueryIntent?,
                           rel: (anchor: [Float], target: [Float])? = nil, limit: Int = 8) -> [FileResult] {
         lock.lock()
-        let c = fileCorpus, fs = files
+        let c = fileCorpus, fs = slots
         lock.unlock()
         let relation = mix.relation && (intent?.hasRelation ?? false) && rel != nil
         var ranked = Ranker.rank(c, query: q, vec: vec, mix: mix, intent: intent, rel: rel, limit: max(limit, rerankN))
@@ -533,8 +735,8 @@ public final class Engine {
         guard rerankN > 0, c.isBinary, !ranked.isEmpty else { return (ranked, [:]) }
         let top = Array(ranked.prefix(rerankN))
         lock.lock()
-        let keys = top.map { $0.0 < targetStamps.count ? files[$0.0].path + "\n" + targetStamps[$0.0] : "" }
-        let items = top.map { $0.0 < files.count ? (files[$0.0], fileBases[$0.0]) : nil }
+        let keys = top.map { $0.0 < targetStamps.count ? slots[$0.0].path + "\n" + targetStamps[$0.0] : "" }
+        let items = top.map { $0.0 < slots.count ? (slots[$0.0], fileBases[$0.0]) : nil }
         lock.unlock()
         exactLock.lock()
         var vs = keys.map { exactCache[$0] }
@@ -568,7 +770,7 @@ public final class Engine {
                                 rel: (anchor: [Float], target: [Float])? = nil, limit: Int = 8,
                                 rule: NoMatchRule = .files, allow: [Bool]? = nil) -> Judged<FileResult> {
         lock.lock()
-        let c = fileCorpus, fs = files
+        let c = fileCorpus, fs = slots
         lock.unlock()
         let allow = allow.flatMap { $0.count == fs.count ? $0 : nil }
         let relation = mix.relation && (intent?.hasRelation ?? false) && rel != nil

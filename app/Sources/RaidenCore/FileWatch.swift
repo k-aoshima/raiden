@@ -94,7 +94,17 @@ public final class FileIndex {
         public var seconds: Double = 0
         /// FSEvents の履歴が途切れて中を見直した場所（全体を見直したときは roots）
         public var rescanned: [String] = []
+        /// 差分で当てたか（false は全部入れ直した）
+        public var incremental = false
     }
+
+    /// 足した・変わった・消えた物がこれより多ければ、差分でなく全部入れ直す（解凍・git の大きな切り替えなど）。
+    /// raiden-eval --bench-apply で決めた（README の FSEvents の節）。0 なら毎回全部入れ直す（前の作り）
+    public var incrementalLimit = 5000
+    /// 消した印がこの割合（点の数に対して）を超えたら、全部入れ直して詰める
+    public var compactRatio = 0.1
+    /// ただし印がこれより少なければ詰めない
+    public var compactMin = 2000
 
     public init(engine: Engine, scope: ScanScope = .default) {
         self.engine = engine
@@ -143,10 +153,21 @@ public final class FileIndex {
 
     /// FSEvents の変化を当てる。追加・変更・名前変更はその物を作り直し、消えた物は中の物ごと外す。
     /// 中の物が増減したフォルダは説明文（中身の名前と数）が変わるので、親も作り直す。
+    /// いまの一覧を全部入れ直す（消した印を詰める。読み直しはしない）
+    @discardableResult
+    public func rebuild(progress: ((Int, Int) -> Void)? = nil) -> Stats {
+        let t0 = Date()
+        var st = commit(progress: progress)
+        st.changed = entries.count
+        st.seconds = Date().timeIntervalSince(t0)
+        return st
+    }
+
     @discardableResult
     public func apply(_ c: FSWatcher.Change) -> Stats {
         let t0 = Date()
         var st = Stats()
+        var upserted = Set<String>(), removed = Set<String>()
         // roots より上（"/" など）で履歴が途切れたら全体を見直す
         if c.rescan.contains(where: { r in roots.contains { $0 == r || $0.hasPrefix(r + "/") } }) {
             var full = fullScan()
@@ -156,9 +177,9 @@ public final class FileIndex {
         st.rescanned = Array(c.rescan)
         var touched = Set<String>()
         for r in c.rescan {
-            removeTree(r, keepSelf: true, &st)
+            removed.formUnion(removeTree(r, keepSelf: true, &st))
             for e in FileCatalog.collect(roots: [r], scope: scope) where FileCatalog.isIncluded(e.path, scope: scope) {
-                entries[e.path] = e; st.changed += 1
+                entries[e.path] = e; st.changed += 1; upserted.insert(e.path)
             }
             touched.insert(r)
         }
@@ -169,23 +190,41 @@ public final class FileIndex {
             guard FileCatalog.isIncluded(p, scope: scope) else { continue }
             if let e = FileCatalog.entry(path: p) {
                 let isNew = entries[p] == nil
-                entries[p] = e; st.changed += 1
+                entries[p] = e; st.changed += 1; upserted.insert(p)
                 // 入ってきたフォルダ（移動・解凍）は中も拾う
                 if e.isDir && isNew {
                     for x in FileCatalog.collect(roots: [p], scope: scope) where FileCatalog.isIncluded(x.path, scope: scope) {
-                        entries[x.path] = x; st.changed += 1
+                        entries[x.path] = x; st.changed += 1; upserted.insert(x.path)
                     }
                 }
             } else {
-                removeTree(p, keepSelf: false, &st)
+                removed.formUnion(removeTree(p, keepSelf: false, &st))
             }
         }
         for p in parents.subtracting(touched) where entries[p] != nil {
-            if let e = FileCatalog.entry(path: p) { entries[p] = e } else { removeTree(p, keepSelf: false, &st) }
+            if let e = FileCatalog.entry(path: p) { entries[p] = e; upserted.insert(p) } else { removed.formUnion(removeTree(p, keepSelf: false, &st)) }
         }
         // 範囲の中で増えた・変わった・消えた物が無ければ入れ直さない。入れ直しは全件を並べ直すので、~/Project のように
         // 16 万件あると 1 回 30 秒かかり、除外した場所（.git・build など）への書き込みのたびに走ってベクトル化が進まなかった
         if st.changed == 0 && st.removed == 0 {
+            st.seconds = Date().timeIntervalSince(t0)
+            return st
+        }
+        removed.subtract(upserted)
+        let n = engine.fileSlotCount
+        // 数件〜数千件の変化は差分で当てる（全部入れ直すと ~/Project 16 万件で 1 回 30 秒かかり、その間ベクトル化が止まる）
+        if n > 0 && upserted.count + removed.count <= incrementalLimit {
+            let list = upserted.compactMap { entries[$0] }.sorted { $0.path < $1.path }
+            let p = engine.patchFiles(upsert: list, remove: Array(removed))
+            let dead = engine.fileDeadCount
+            if dead >= compactMin && Double(dead) > compactRatio * Double(engine.fileSlotCount) {
+                // 消した印がたまったので詰める
+                let s2 = commit(progress: nil)
+                st.embedded = s2.embedded; st.examples = s2.examples
+            } else {
+                st.embedded = enqueue(p)
+                st.incremental = true
+            }
             st.seconds = Date().timeIntervalSince(t0)
             return st
         }
@@ -195,10 +234,40 @@ public final class FileIndex {
         return st
     }
 
-    private func removeTree(_ p: String, keepSelf: Bool, _ st: inout Stats) {
-        if !keepSelf, entries.removeValue(forKey: p) != nil { st.removed += 1 }
+    /// 差分で出たベクトル化の残りを列の先頭に足す（今の列は並べ直さない。変わったばかりの物はどうせ一番先）。
+    /// 少なければ（inlineLimit 以下）その場で作る。作った数を返す
+    private func enqueue(_ p: Engine.FilePending) -> Int {
+        guard !p.isEmpty else { return 0 }
+        let short = prioritized(p.short), full = prioritized(p.full)
+        let s = Set(short), f = Set(full)
+        if !s.isEmpty { let before = shortQueue.count; shortQueue.removeAll { s.contains($0) }; shortTotal -= before - shortQueue.count }
+        if !f.isEmpty { let before = fullQueue.count; fullQueue.removeAll { f.contains($0) }; fullTotal -= before - fullQueue.count }
+        if !background || short.count + full.count <= Self.inlineLimit {
+            // その場で作る（列には入れない）
+            var made = 0
+            var i = 0
+            while i < short.count { let part = Array(short[i..<min(i + 64, short.count)]); i += part.count; made += engine.embedFiles(part, full: false) }
+            i = 0
+            while i < full.count { let part = Array(full[i..<min(i + 64, full.count)]); i += part.count; made += engine.embedFiles(part, full: true) }
+            if !background { embedAll() }
+            return Set(short).union(full).count
+        }
+        shortQueue.insert(contentsOf: short, at: 0); shortTotal += short.count
+        fullQueue.insert(contentsOf: full, at: 0); fullTotal += full.count
+        return 0
+    }
+
+    /// 消えた物と（フォルダなら）中の物を一覧から外し、外したパスを返す。中を探すのはフォルダのときと keepSelf のときだけ
+    /// （ファイル 1 件の削除で 16 万件を総なめしない）
+    @discardableResult
+    private func removeTree(_ p: String, keepSelf: Bool, _ st: inout Stats) -> [String] {
+        var out: [String] = []
+        let wasDir = entries[p]?.isDir ?? false
+        if !keepSelf, entries.removeValue(forKey: p) != nil { st.removed += 1; out.append(p) }
+        guard keepSelf || wasDir else { return out }
         let pre = p + "/"
-        for k in entries.keys where k.hasPrefix(pre) { entries.removeValue(forKey: k); st.removed += 1 }
+        for k in entries.keys where k.hasPrefix(pre) { entries.removeValue(forKey: k); st.removed += 1; out.append(k) }
+        return out
     }
 
     /// Engine に入れ直す。一覧はすぐ入れ替わり（ベクトルの無い物も名前の一致と絞り込みでは出る）、

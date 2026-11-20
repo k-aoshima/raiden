@@ -280,6 +280,50 @@ public final class Store {
         return have
     }
 
+    /// storedFileCodes の一部だけ（差分で直すとき。key で 1 件ずつ引く）
+    public func fileCodes(_ keys: [String]) -> [String: (hash: String, code: [UInt8])] {
+        guard !keys.isEmpty else { return [:] }
+        lock.lock(); defer { lock.unlock() }
+        var have: [String: (hash: String, code: [UInt8])] = [:]
+        guard let st = prepare("SELECT desc_hash, vector FROM nodes WHERE kind IN ('file','folder') AND key = ?") else { return have }
+        defer { sqlite3_finalize(st) }
+        for k in keys {
+            sqlite3_reset(st); bind(st, 1, k)
+            guard sqlite3_step(st) == SQLITE_ROW else { continue }
+            let n = Int(sqlite3_column_bytes(st, 1))
+            var code: [UInt8] = []
+            if n == BinVec.bytes, let p = sqlite3_column_blob(st, 1) {
+                code = Array(UnsafeBufferPointer(start: p.assumingMemoryBound(to: UInt8.self), count: n))
+            }
+            have[k] = (text(st, 0), code)
+        }
+        return have
+    }
+
+    /// ファイル・フォルダどうしの線を足す（差分で直すとき。replaceFileEdges と違い、その種類の線を消さない）。組はパス
+    public func addFileEdges(kind: String, _ pairs: [(String, String, Float)]) {
+        guard !pairs.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        guard let q = prepare("SELECT id FROM nodes WHERE kind IN ('file','folder') AND key = ?") else { return }
+        defer { sqlite3_finalize(q) }
+        func id(_ k: String) -> Int64? {
+            sqlite3_reset(q); bind(q, 1, k)
+            return sqlite3_step(q) == SQLITE_ROW ? sqlite3_column_int64(q, 0) : nil
+        }
+        try? exec("BEGIN")
+        if let st = prepare("INSERT OR REPLACE INTO edges(from_id, to_id, kind, weight, last_used) VALUES(?,?,?,?,?)") {
+            for (a, b, w) in pairs {
+                guard let x = id(a), let y = id(b) else { continue }
+                sqlite3_reset(st)
+                sqlite3_bind_int64(st, 1, x); sqlite3_bind_int64(st, 2, y); bind(st, 3, kind)
+                sqlite3_bind_double(st, 4, Double(w)); sqlite3_bind_int64(st, 5, now)
+                sqlite3_step(st)
+            }
+            sqlite3_finalize(st)
+        }
+        try? exec("COMMIT")
+    }
+
     /// ファイル・フォルダの点を書く。保存するのはパス・名前・desc_hash（説明文の元・日付・大きさのハッシュ）と 2 値のベクトルだけ。
     /// 説明文は保存しない（要るときは FileCatalog から作り直す）。code が nil なら点だけ作ってベクトルは触らない（線を張るため）
     public func saveFileNodes(_ rows: [(entry: FileEntry, code: [UInt8]?, hash: String)]) {
