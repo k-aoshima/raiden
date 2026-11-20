@@ -61,32 +61,6 @@ final class VeilView: NSView {
 
 /// 入力欄の帯（藍のグラデーションに斜めの光）。上の角はパネルの切り抜きで丸くなる
 final class BandView: NSView {
-    /// ピカッと光るときの白い面（ふだんは見えない）
-    private let flashLayer = CALayer()
-
-    override func layout() {
-        super.layout()
-        if flashLayer.superlayer == nil, let l = layer {
-            flashLayer.backgroundColor = NSColor.white.cgColor
-            flashLayer.opacity = 0
-            l.addSublayer(flashLayer)
-        }
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        flashLayer.frame = bounds
-        CATransaction.commit()
-    }
-
-    /// 稲光: 帯が一瞬白く光って消える（1 回だけ、0.5 秒）
-    func flash() {
-        wantsLayer = true
-        needsLayout = true; layoutSubtreeIfNeeded()
-        let a = CAKeyframeAnimation(keyPath: "opacity")
-        a.values = [0, 0.38, 0]
-        a.keyTimes = [0, 0.12, 1]
-        a.duration = 0.5
-        flashLayer.add(a, forKey: "flash")
-    }
-
     override func draw(_ dirtyRect: NSRect) {
         let a = PanelStyle.bandAlpha
         let g = NSGradient(colors: [NSColor(srgbRed: 0.173, green: 0.153, blue: 0.722, alpha: a),   // #2C27B8
@@ -1056,10 +1030,9 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         lastHashCount = field.stringValue.reduce(0) { $0 + ($1 == "#" || $1 == "＃" ? 1 : 0) }
     }
 
-    /// 稲妻をピカッと光らせる（0.9 秒）。帯全体が一瞬白く 1 回光り、稲妻の白い光が広がって消え、印が大きくなって戻る。
+    /// 稲妻をピカッと光らせる（0.9 秒）。稲妻の白い光が広がって消え、印が大きくなって戻る。
     /// 「視差効果を減らす」がオンなら大きさは変えず光だけ
     func flashBolt() {
-        bandView?.flash()
         guard let v = boltView, let l = v.layer else { return }
         let dur = 0.9
         let glow = CAAnimationGroup()
