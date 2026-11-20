@@ -81,7 +81,7 @@ final class BandView: NSView {
     }
 }
 
-/// 帯の上の入力欄の編集部品。変換中の文字の下線を金にする（日本語入力が付ける線の太さはそのまま、色だけ変える）
+/// 帯の上の入力欄の編集部品。変換中の文字の下線を白にする（日本語入力が付ける線の太さはそのまま、色だけ変える）
 final class BandFieldEditor: NSTextView {
     override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
         let m: NSMutableAttributedString
@@ -92,7 +92,7 @@ final class BandFieldEditor: NSTextView {
             var hasLine = false
             m.enumerateAttribute(.underlineStyle, in: all) { v, _, _ in if v != nil { hasLine = true } }
             if !hasLine { m.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: all) }
-            m.addAttribute(.underlineColor, value: PanelStyle.gold, range: all)
+            m.addAttribute(.underlineColor, value: PanelStyle.onBand, range: all)
         }
         super.setMarkedText(m, selectedRange: selectedRange, replacementRange: replacementRange)
     }
@@ -1051,7 +1051,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         tv.isFieldEditor = true
         tv.insertionPointColor = PanelStyle.gold
         tv.selectedTextAttributes = [.backgroundColor: NSColor(white: 1, alpha: 0.28), .foregroundColor: PanelStyle.onBand]
-        tv.markedTextAttributes = [.underlineStyle: NSUnderlineStyle.single.rawValue, .underlineColor: PanelStyle.gold,
+        tv.markedTextAttributes = [.underlineStyle: NSUnderlineStyle.single.rawValue, .underlineColor: PanelStyle.onBand,
                                    .foregroundColor: PanelStyle.onBand]
         return tv
     }()
