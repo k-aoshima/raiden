@@ -809,15 +809,20 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             v.alphaValue = 0
             content.addSubview(v)
         }
+        // 下端は弱くつなぐ（プレビューを出していない入力欄だけの時に、中身の最低の高さがパネルを押し広げないように）
+        let pb = preview.bottomAnchor.constraint(equalTo: content.bottomAnchor)
+        pb.priority = .defaultLow
+        let lb = previewLine.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14)
+        lb.priority = .defaultLow
         NSLayoutConstraint.activate([
             preview.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Self.width),
             preview.widthAnchor.constraint(equalToConstant: FilePreviewPane.width),
             preview.topAnchor.constraint(equalTo: content.topAnchor, constant: Self.fieldHeight + 1),
-            preview.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            pb,
             previewLine.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Self.width),
             previewLine.widthAnchor.constraint(equalToConstant: 1),
             previewLine.topAnchor.constraint(equalTo: content.topAnchor, constant: Self.fieldHeight + 14),
-            previewLine.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14),
+            lb,
         ])
     }
 
