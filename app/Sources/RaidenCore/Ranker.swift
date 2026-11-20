@@ -114,6 +114,24 @@ public struct Corpus {
     public init() {}
     public var count: Int { n }
 
+    // 名前の索引（NameIndex）。setItems で作り直す。作った後に名前が変わった点は nameDirty に入れ、索引を使わず前の比べ方で見る
+    private(set) var nameIndex: NameIndex?
+    private(set) var nameDirty = Set<Int>()
+    public var nameIndexSummary: String { nameIndex.map { $0.summary + " 変わった点 \(nameDirty.count)" } ?? "なし" }
+    /// 名前の索引の大きさ（バイト）と作った秒数
+    public var nameIndexStats: (bytes: Int, seconds: Double) { (nameIndex?.bytes ?? 0, nameIndex?.buildSeconds ?? 0) }
+
+    /// 名前の索引を今の names / romaji で作り直す（一覧を差分で直した後、変わった点がたまったときに呼ぶ）
+    public mutating func rebuildNameIndex() {
+        nameIndex = NameIndex(names: names, romaji: romaji)
+        nameDirty = []
+    }
+
+    /// 点 i の名前・読みを索引を作った後に変えた（または消した）印。後ろに足した点は印が無くても前の比べ方で見る
+    public mutating func markNameChanged(_ i: Int) {
+        if let ix = nameIndex, i < ix.count { nameDirty.insert(i) }
+    }
+
     public mutating func setItems(names raw: [[String]], vecs: [[Float]], meta: [Meta?]? = nil) {
         self.vecs = vecs
         isBinary = false; codes = []
@@ -142,6 +160,7 @@ public struct Corpus {
         familiesBelow = [:]
         alive = Array(repeating: true, count: n)
         deadCount = 0
+        rebuildNameIndex()
     }
 
     static func normNames(_ raw: [String]) -> [String] { Array(Set(raw.map(Lexical.normalize).filter { !$0.isEmpty })) }
@@ -182,6 +201,7 @@ public struct Corpus {
         let nn = Self.normNames(raw)
         names[i] = nn; romaji[i] = Self.romajiOf(raw); grams[i] = Self.gramsOf(nn)
         meta[i] = m
+        markNameChanged(i)
     }
 
     /// ベクトルを外す（説明文が変わってまだ作っていない）
@@ -193,6 +213,7 @@ public struct Corpus {
         for e in adj[i] { let t = Int(e.to); if t != i { adj[t].removeAll { $0.to == Int32(i) } } }
         adj[i] = []
         names[i] = []; romaji[i] = ""; grams[i] = []; meta[i] = nil
+        markNameChanged(i)
         if isBinary { present[i] = false }
         filesBelow[i] = 0; familiesBelow[i] = nil
         alive[i] = false
@@ -295,8 +316,55 @@ public struct Corpus {
 }
 
 public enum Ranker {
+    /// 段ごとの時間（ms）を足していく（raiden-eval --bench-rank で使う。nil なら測らない）
+    nonisolated(unsafe) public static var profile: [String: Double]?
+    @inline(__always) static func lap(_ name: String, _ t: inout UInt64) {
+        guard profile != nil else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        profile![name, default: 0] += Double(now - t) / 1e6
+        t = now
+    }
+
     /// 上位 limit 件の（添字, 点数）を返す
     /// rel: つながりの言い方の anchor / target のベクトル（mix.relation のときだけ使う）
+    /// 名前の索引を使うか（false なら全件の名前を 1 件ずつ見る。答え合わせで比べる用）
+    nonisolated(unsafe) public static var useNameIndex = true
+
+    /// 名前の文字一致の点数（全件）。先頭・単語の先頭 prefixBonus、途中 substrBonus、
+    /// どちらも無ければ読みのローマ字に打ち間違い 1 文字まで fuzzyBonus（0 文字違い ×1、1 文字違い ×0.8）
+    public static func nameBonus(_ c: Corpus, query q: String, mix m: Mix) -> [Float] {
+        let n = c.count
+        let nq = Lexical.normalize(q)
+        var bonus = [Float](repeating: 0, count: n)
+        let asciiQ = nq.allSatisfy { $0.isASCII }
+        let rq = asciiQ ? Lexical.canonRomaji(nq.filter { $0.isLetter || $0.isNumber }) : ""
+        guard !nq.isEmpty && !(asciiQ && nq.count < 2) else { return bonus }
+        if useNameIndex, let ix = c.nameIndex, ix.count <= n, ix.fill(nq: nq, rq: rq, mix: m, &bonus) {
+            // 索引で見ない点（1 文字が 1 コードポイントでない名前・作った後に変わった点・後ろに足した点）は前の比べ方で
+            for i in ix.slow { bonus[i] = nameBonus(c, i, nq: nq, rq: rq, mix: m) }
+            for i in c.nameDirty where i < n { bonus[i] = nameBonus(c, i, nq: nq, rq: rq, mix: m) }
+            for i in ix.count..<n { bonus[i] = nameBonus(c, i, nq: nq, rq: rq, mix: m) }
+            return bonus
+        }
+        for i in 0..<n { bonus[i] = nameBonus(c, i, nq: nq, rq: rq, mix: m) }
+        return bonus
+    }
+
+    /// 1 件の名前の文字一致（索引を使わない比べ方）
+    static func nameBonus(_ c: Corpus, _ i: Int, nq: String, rq: String, mix m: Mix) -> Float {
+        var best: Float = 0
+        for nn in c.names[i] {
+            let words = nn.split(whereSeparator: { " -_.".contains($0) })
+            if nn.hasPrefix(nq) || words.contains(where: { $0.hasPrefix(nq) }) { best = max(best, m.prefixBonus) }
+            else if nn.contains(nq) { best = max(best, m.substrBonus) }
+        }
+        if best == 0 && m.fuzzyBonus > 0 && rq.count >= 3 && !c.romaji[i].isEmpty {
+            let d = Lexical.approxSubstringDistance(rq, in: c.romaji[i])
+            if d == 0 || (d == 1 && rq.count >= 4) { best = m.fuzzyBonus * (d == 0 ? 1 : 0.8) }
+        }
+        return best
+    }
+
     public static func rank(_ c: Corpus, query q: String, vec v: [Float], mix m: Mix,
                             intent: QueryIntent? = nil, rel: (anchor: [Float], target: [Float])? = nil,
                             limit: Int = 8, allow: [Bool]? = nil) -> [(Int, Float)] {
@@ -309,29 +377,15 @@ public enum Ranker {
         let allow = c.liveAllow(allow)
         let n = c.count
         if n == 0 { return [] }
+        var tp = profile != nil ? DispatchTime.now().uptimeNanoseconds : 0
         let nq = Lexical.normalize(q)
         // 名前の文字一致（全方式に共通）
-        var bonus = [Float](repeating: 0, count: n)
-        let asciiQ = nq.allSatisfy { $0.isASCII }
-        let rq = asciiQ ? Lexical.canonRomaji(nq.filter { $0.isLetter || $0.isNumber }) : ""
-        if !nq.isEmpty && !(asciiQ && nq.count < 2) {
-            for i in 0..<n {
-                var best: Float = 0
-                for nn in c.names[i] {
-                    let words = nn.split(whereSeparator: { " -_.".contains($0) })
-                    if nn.hasPrefix(nq) || words.contains(where: { $0.hasPrefix(nq) }) { best = max(best, m.prefixBonus) }
-                    else if nn.contains(nq) { best = max(best, m.substrBonus) }
-                }
-                if best == 0 && m.fuzzyBonus > 0 && rq.count >= 3 && !c.romaji[i].isEmpty {
-                    let d = Lexical.approxSubstringDistance(rq, in: c.romaji[i])
-                    if d == 0 || (d == 1 && rq.count >= 4) { best = m.fuzzyBonus * (d == 0 ? 1 : 0.8) }
-                }
-                bonus[i] = best
-            }
-        }
+        let bonus = nameBonus(c, query: q, mix: m)
+        lap("名前の一致", &tp)
         // V
         var V = [Float](repeating: 0, count: n)
         if m.v { V = c.dots(v) }
+        lap("ベクトル", &tp)
         // K
         var K = [Float](repeating: 0, count: n)
         if m.k && !c.exVecs.isEmpty {
@@ -344,6 +398,7 @@ public enum Ranker {
                 for (t, w) in c.exLinks[i] where total > 0 { K[t] += sw / Float(rank + 1) * (w / total) }
             }
         }
+        lap("k近傍法", &tp)
         // 入口の点数
         var pre = [Float](repeating: 0, count: n)
         let qg = Lexical.bigrams(nq)
@@ -387,6 +442,7 @@ public enum Ranker {
                 _ = a
             }
         }
+        lap("入口・グラフ", &tp)
         // 時間・種類
         var adjust = [Float](repeating: 0, count: n)
         if m.intents, let it = intent, !it.isEmpty {
@@ -450,6 +506,7 @@ public enum Ranker {
                 if k >= m.crowdMin { adjust[i] += m.folderCrowd * Float(k) }
             }
         }
+        lap("時間・種類・フォルダ", &tp)
         // 足し合わせ
         var score = [Float](repeating: 0, count: n)
         switch m.fusion {
@@ -466,11 +523,14 @@ public enum Ranker {
             }
             for i in 0..<n { score[i] += bonus[i] + adjust[i] }
         }
+        lap("足し合わせ", &tp)
         // 絞り込み（入力欄のコマンド）: 当てはまらない物は候補から外す
         if let allow {
             for i in 0..<n where !allow[i] { score[i] = -.infinity }
+            defer { lap("絞り込み・上位", &tp) }
             return topIndices(score, limit).filter { allow[$0] }.map { ($0, score[$0]) }
         }
+        defer { lap("絞り込み・上位", &tp) }
         return topIndices(score, limit).map { ($0, score[$0]) }
     }
 
@@ -613,7 +673,17 @@ public enum Lexical {
 
     /// q が t のどこかの部分に「何文字の直しで」一致するか（Sellers のアルゴリズム）
     public static func approxSubstringDistance(_ q: String, in t: String) -> Int {
-        let a = Array(q.utf8), b = Array(t.utf8)
+        let a = Array(q.utf8)
+        if a.isEmpty { return 0 }
+        if a.count <= 64 {
+            var t = t
+            return t.withUTF8 { Myers(a).distance($0) }
+        }
+        return approxSubstringDistanceDP(a, Array(t.utf8))
+    }
+
+    /// 前の作り（Sellers の表を 1 列ずつ）。64 バイトを超える入力と、ビット並列の版の確かめ用
+    public static func approxSubstringDistanceDP(_ a: [UInt8], _ b: [UInt8]) -> Int {
         if a.isEmpty { return 0 }
         var prev = Array(0...a.count)
         var best = prev[a.count]

@@ -310,3 +310,6 @@ public enum SpotlightNames {
         return out
     }
 }
+
+/// 一覧を書き出して読み直す用（raiden-eval の計測で、広い範囲の FileCatalog.collect を毎回やり直さない）
+extension FileEntry: Codable {}

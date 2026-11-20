@@ -154,6 +154,13 @@ if let i = args.firstIndex(of: "--check-tokens"), i + 2 < args.count {
     exit(0)
 }
 
+// --bench-rank --roots ~/Project --entries <scratch のファイル>: 広い範囲で Ranker.rank の段ごとの時間と、
+// 名前の索引あり・なしの比べ（RankBench.swift）。並べ方の時間だけ見るので、入力のベクトルは文字列から作る乱数（モデルを読まない）
+if args.contains("--bench-rank") {
+    runBenchRank(embedder: HashEmbedder())
+    exit(0)
+}
+
 let embedder: Embedder
 var bge: BGEEmbedder?
 let t0 = Date()
