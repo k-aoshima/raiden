@@ -380,7 +380,10 @@ final class FilterInput {
     /// 件数のある値を先に、0 件は下に回す（行数は検索の候補と同じ 9 まで。コマンドの一覧は全部）
     func displayed(_ p: FilterCompletion.Palette) -> [FilterCompletion.Item] {
         let n = p.mode == .commands ? 20 : SearchPanelController.maxRows
-        return Array((p.items.filter { $0.count != 0 } + p.items.filter { $0.count == 0 }).prefix(n))
+        // 0 件は後ろへ。ただし打ったとおりの値（並べ方で先頭にした物）はそのまま先頭
+        let typed = p.partial.isEmpty ? nil : p.items.first.flatMap { Describe.normalize($0.insert) == Describe.normalize(p.partial) ? $0 : nil }
+        let rest = typed == nil ? p.items : Array(p.items.dropFirst())
+        return Array(((typed.map { [$0] } ?? []) + rest.filter { $0.count != 0 } + rest.filter { $0.count == 0 }).prefix(n))
     }
 
     private func paletteSections(_ p: FilterCompletion.Palette) -> [ResultSection] {
@@ -407,6 +410,9 @@ final class FilterInput {
         let title: String, sym: String
         switch p.mode {
         case .commands: title = "絞り込みのコマンド"; sym = "line.3.horizontal.decrease"
+        case .values(let c) where [.date, .modified, .created].contains(c):
+            // 日付の書き方は一覧に出ないので見出しで見せる
+            title = "\(c.name) の値　11-14・11月・11-1..11-14 とも打てる"; sym = "calendar"
         case .values(let c): title = "\(c.name) の値" + (context?() == nil ? "" : "（件数はほかの条件の中で）"); sym = "line.3.horizontal.decrease"
         case .save: title = "今の条件に名前を付けて保存"; sym = "bookmark"
         case .alias: title = "辞書に足す言い方"; sym = "book"
@@ -625,6 +631,7 @@ enum FilterSnapshots {
         Snapshot.capture(panel("#"), dir + "/option-commands.png")
         Snapshot.capture(panel("#date "), dir + "/option-date-values.png")
         Snapshot.capture(panel("#type ", committed: ["#date 7d"]), dir + "/option-values-with-chips.png")
+        Snapshot.capture(panel("#date 11-1"), dir + "/option-date-typed.png")
         Snapshot.capture(panel("#kind sc"), dir + "/option-ghost.png")
 
         // チップが 2 つ付いた状態（#kind ss #date 7d）。候補は見本

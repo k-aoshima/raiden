@@ -488,7 +488,7 @@ public struct QueryFilters: Sendable {
 
     // MARK: - 期間
 
-    /// today / yesterday / 7d / 2w / 3m / 1y / 2026 / 2026-11 / 2026-11-14 / 11-14 / a..b / 今日・昨日・今週・先週・今月・先月・今年・去年
+    /// today / yesterday / 7d / 2w / 3m / 1y / 2026 / 2026-11 / 2026-11-14 / 11-14 / 11月14日 / 11月 / a..b / 今日・昨日・今週・先週・今月・先月・今年・去年
     public static func parseDate(_ v0: String, now: Date) -> (ClosedRange<Int>, String)? {
         let v = Describe.normalize(v0).replacingOccurrences(of: "〜", with: "..").replacingOccurrences(of: "~", with: "..")
         if let r = v.range(of: "..") {
@@ -528,7 +528,7 @@ public struct QueryFilters: Sendable {
             return (1..<mt.numberOfRanges).compactMap { Range(mt.range(at: $0), in: v).flatMap { Int(v[$0]) } }
         }
         // 直近 N 日・週・か月・年（QueryIntent の「直近N日」と同じく、N 日前の 0 時から今日の終わりまで）
-        if let re = try? NSRegularExpression(pattern: "^([0-9]+)(d|w|m|y|日|週|週間|か月|ヶ月|カ月|ヵ月|月|年)$"),
+        if let re = try? NSRegularExpression(pattern: "^([0-9]+)(d|w|m|y|日|週|週間|か月|ヶ月|カ月|ヵ月|年)$"),
            let mt = re.firstMatch(in: v, range: NSRange(v.startIndex..., in: v)),
            let nr = Range(mt.range(at: 1), in: v), let ur = Range(mt.range(at: 2), in: v), let n = Int(v[nr]), n > 0, n <= 100 {
             let u = String(v[ur])
@@ -546,6 +546,17 @@ public struct QueryFilters: Sendable {
                   cal.component(.month, from: dt) == mo, cal.component(.day, from: dt) == d else { return nil }
             return dt
         }
+        // 日本語の書き方（2026年11月14日・11月14日・2026年11月・11月）は 2026-11-14 の形に直して読む
+        if v.contains("年") || v.contains("月") || v.hasSuffix("日") {
+            var t = v.replacingOccurrences(of: "年", with: "-").replacingOccurrences(of: "月", with: "-").replacingOccurrences(of: "日", with: "")
+            while t.hasSuffix("-") { t.removeLast() }
+            // 「11月」だけ: 今年のその月（まだ来ていない月なら去年）
+            if v.hasSuffix("月"), !v.contains("年"), let mo = Int(t), var a = ymd(cal.component(.year, from: now), mo, 1) {
+                if a > now { a = ymd(cal.component(.year, from: now) - 1, mo, 1)! }
+                return (r(a, cal.date(byAdding: .month, value: 1, to: a)!), "\(mo)月")
+            }
+            if t != v, !t.isEmpty { return single(t, now: now) }
+        }
         let sep = "[-/.]"
         if let x = m("(20[0-9]{2})"), x.count == 1, let a = ymd(x[0], 1, 1) {
             return (r(a, cal.date(byAdding: .year, value: 1, to: a)!), "\(x[0])年")
@@ -554,14 +565,14 @@ public struct QueryFilters: Sendable {
             return (r(a, cal.date(byAdding: .month, value: 1, to: a)!), "\(x[0])年\(x[1])月")
         }
         if let x = m("(20[0-9]{2})" + sep + "([0-9]{1,2})" + sep + "([0-9]{1,2})"), x.count == 3, let a = ymd(x[0], x[1], x[2]) {
-            return (r(a, cal.date(byAdding: .day, value: 1, to: a)!), "\(x[0])/\(x[1])/\(x[2])")
+            return (r(a, cal.date(byAdding: .day, value: 1, to: a)!), "\(x[0])-\(x[1])-\(x[2])")
         }
         // 月-日（今年。まだ来ていない日なら去年）
         if let x = m("([0-9]{1,2})" + sep + "([0-9]{1,2})"), x.count == 2 {
             var y = cal.component(.year, from: now)
             guard var a = ymd(y, x[0], x[1]) else { return nil }
             if a > now { y -= 1; guard let b = ymd(y, x[0], x[1]) else { return nil }; a = b }
-            return (r(a, cal.date(byAdding: .day, value: 1, to: a)!), "\(x[0])/\(x[1])")
+            return (r(a, cal.date(byAdding: .day, value: 1, to: a)!), "\(x[0])-\(x[1])")
         }
         return nil
     }

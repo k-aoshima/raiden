@@ -141,7 +141,7 @@ public enum FilterCompletion {
 
     public static let commandItems: [(QueryFilters.Command, String, String, String)] = [
         (.kind, "doc", "種類で絞る", "例: pdf, image, ss, pdf,doc"),
-        (.date, "clock", "期間で絞る（使った日・変更日・作成日）", "例: 7d, today, 2026-11, 11-14..11-16"),
+        (.date, "clock", "期間で絞る（使った日・変更日・作成日）", "例: 7d, today, 11-14, 11月, 11-1..11-14"),
         (.type, "square.grid.2x2", "ファイル・フォルダ・アプリだけ", "例: f, d, app"),
         (.ext, "tag", "拡張子で絞る", "例: pdf, docx, pdf,docx"),
         (.path, "folder", "場所（パスの一部）で絞る", "例: Desktop, ~/Documents/仕事"),
@@ -156,6 +156,19 @@ public enum FilterCompletion {
         ("today", "今日"), ("yesterday", "昨日"), ("7d", "直近7日"), ("2w", "直近2週間"), ("1m", "直近1か月"), ("3m", "直近3か月"),
         ("今週", "今週"), ("先週", "先週"), ("今月", "今月"), ("先月", "先月"), ("今年", "今年"), ("去年", "去年"), ("1y", "直近1年"),
     ]
+    /// おととい〜13 日前の 1 日ずつの候補（insert は「11-18」）
+    static func recentDays(now: Date) -> [Item] {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: now)
+        let wd = ["日", "月", "火", "水", "木", "金", "土"]
+        return (2...13).compactMap { n in
+            guard let d = cal.date(byAdding: .day, value: -n, to: today) else { return nil }
+            let c = cal.dateComponents([.month, .day, .weekday], from: d)
+            let v = "\(c.month!)-\(c.day!)"
+            return Item(title: "\(v)（\(wd[c.weekday! - 1])）", detail: n == 2 ? "おととい" : "\(n)日前", symbol: "calendar", insert: v)
+        }
+    }
+
     static let kindValues: [(String, String, String, [String])] = [
         ("pdf", "PDF", "doc.richtext", []), ("image", "画像", "photo", ["img", "画像", "写真"]),
         ("ss", "スクショ", "camera.viewfinder", ["screenshot", "スクショ"]),
@@ -370,12 +383,17 @@ public enum FilterCompletion {
             out = dateValues.filter { hit(partial, [$0.0, $0.1]) }.map {
                 Item(title: $0.1, detail: $0.0 == $0.1 ? "" : $0.0, symbol: "clock", insert: $0.0)
             }
+            // 日付を打たずに選べるよう、おととい〜13 日前を 1 日ずつ（「11-18（火）」）。打ちかけなら当たる物だけ
+            out += recentDays(now: now).filter { partial.isEmpty || $0.insert.hasPrefix(partial) || $0.title.hasPrefix(partial) }
             // 手で打った日付（2026-11、11-14..11-16）が読めればそれを先頭に
             if !partial.isEmpty, let (_, l) = QueryFilters.parseDate(partial, now: now),
                !out.contains(where: { Describe.normalize($0.insert) == Describe.normalize(partial) }) {
                 out.insert(Item(title: l, detail: partial, symbol: "calendar", insert: partial), at: 0)
             }
             out = counted(out)
+            // 1 日ずつの候補は、数えて 0 件の日を出さない（一覧が長くなるだけなので）
+            let days = Set(recentDays(now: now).map(\.insert))
+            out = out.filter { !(days.contains($0.insert) && $0.count == 0 && $0.insert != partial) }
         case .kind, .ext:
             // カンマ区切りの最後の 1 つだけを候補で補う（pdf,do → pdf,doc）
             let ps = partial.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
@@ -415,7 +433,12 @@ public enum FilterCompletion {
             return []
         }
         // 並べ方: よく使う値 → 件数のある値（種類・拡張子は多い順）→ 0 件
+        let typed = Describe.normalize(partial)
         let ranked = out.enumerated().sorted { a, b in
+            // 打ったとおりの値（「11-1」）は件数が 0 でも先頭（Enter で打ったものが決まるように）
+            let ta = !typed.isEmpty && Describe.normalize(a.element.insert) == typed
+            let tb = !typed.isEmpty && Describe.normalize(b.element.insert) == typed
+            if ta != tb { return ta }
             if !keepOrder {
                 let ua = memory.use(cmd, [a.element.insert, a.element.title] + a.element.also)
                 let ub = memory.use(cmd, [b.element.insert, b.element.title] + b.element.also)
@@ -483,6 +506,8 @@ public enum FilterCompletion {
     public static func ghost(_ p: Palette) -> (text: String, item: Item)? {
         guard case .values = p.mode, !p.partial.isEmpty else { return nil }
         let n = Describe.normalize(p.partial)
+        // 打ったとおりの値が候補の先頭にあれば補わない（「11-1」に「6」を足して 11-16 にしない）
+        if let f = p.items.first, Describe.normalize(f.insert) == n { return nil }
         let items = p.items.filter { $0.count != 0 } + p.items.filter { $0.count == 0 }
         for it in items {
             let forms = [it.insert] + it.also + [it.title]
