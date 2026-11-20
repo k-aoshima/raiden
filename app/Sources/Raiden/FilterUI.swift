@@ -5,7 +5,7 @@ import RaidenCore
 ///
 ///   「#」を打つと、よく使う組み合わせ・保存した名前・コマンドの一覧、「#date 」で値の候補（件数つき）を候補の場所に出す。
 ///   ↑↓ で選び、Enter / Tab で決める。値まで決まったコマンドはチップ（committed）にして入力欄から抜き、入力欄の下に並べる。
-///   入力欄の先頭で Backspace / ← を押すと最後のチップを文字に戻して直せる（続けて押すと前の条件へ）。⌘Backspace で全部のチップを消す。チップの × を押してもその 1 つを消す。
+///   入力欄の先頭で Backspace / ← を押すと最後のチップを外してそのコマンドの値の一覧に戻る（続けて押すと前のチップの一覧へ）。⌘Backspace で全部のチップを消す。チップの × を押してもその 1 つを消す。
 ///   打ちかけの値はゴーストテキスト（薄い文字）で補い、→ / Tab で決める。一覧が出ている間の Esc は一覧だけ閉じる。
 ///   「#」を打たなくても、「pdf」「先週」のような言葉から絞り込みの候補を入力欄の下に薄く出し、Tab / → で決めたときだけチップにする。
 ///   「#保存 名前」（⌘S）で今のチップに名前を付けて保存、「#alias 言い方」で辞書に足す（行き先を選ぶ状態になる）。
@@ -24,6 +24,8 @@ final class FilterInput {
     /// #alias の行き先を選んでいる間の言い方と、元の入力欄（取りやめたら戻す）
     private(set) var aliasPhrase: String?
     private var aliasBackup: (text: String, committed: [String])?
+    /// ← / Backspace で前の条件へ戻したときの入力欄の文字と、打っていた言葉（触らずにもう一度押したらさらに戻る）
+    private var stepBack: (shown: String, rest: String)?
     let ghostLabel = NSTextField(labelWithString: "")
     /// 値の候補の件数を数える口（AppDelegate が渡す。今は Engine.filterContext、一覧が無くなったら Spotlight 側の物）
     var context: (() -> FilterSource?)?
@@ -59,6 +61,7 @@ final class FilterInput {
         notice = nil
         aliasPhrase = nil
         aliasBackup = nil
+        stepBack = nil
         clipMode = false
         ghostLabel.isHidden = true
         panel?.setPlaceholder(nil)
@@ -86,6 +89,7 @@ final class FilterInput {
     func textDidChange() {
         guard let field else { return }
         notice = nil
+        stepBack = nil
         if aliasPhrase == nil, !clipMode, let ex = FilterCompletion.extractCommitted(field.stringValue, now: now()) {
             committed += ex.commands
             field.stringValue = ex.text
@@ -189,9 +193,11 @@ final class FilterInput {
             if atEnd, palette == nil, let s = suggestions.first { acceptSuggestion(s); return true }
             return false
         case #selector(NSResponder.deleteBackward(_:)), #selector(NSResponder.moveLeft(_:)):
-            // 入力欄の先頭で ← / Backspace: 最後のチップを文字に戻して直せるようにする（前の条件へ戻る）
+            // ← / Backspace で 1 つ前の条件へ戻る: 最後のチップを外し、そのコマンドの値の一覧（「#type 」）を出す。
+            // 戻した直後（入力欄を触っていない間）にもう一度押すと、さらに前のチップのコマンドの一覧へ
+            if let sb = stepBack, field.stringValue == sb.shown { stepBackOnce(rest: sb.rest); return true }
             guard atStart, !committed.isEmpty else { return false }
-            reopenLastChip()
+            stepBackOnce(rest: field.stringValue)
             return true
         case #selector(NSResponder.deleteToBeginningOfLine(_:)):
             guard field.stringValue.isEmpty, !committed.isEmpty else { return false }
@@ -255,14 +261,23 @@ final class FilterInput {
         panel?.focusField()
     }
 
-    /// 最後のチップを入力欄の頭に文字で戻す（「#date 7d」）。カーソルはその後ろ。もう一度 Backspace で値から消していける
-    private func reopenLastChip() {
-        guard let field, let panel, let last = committed.popLast() else { return }
-        let rest = field.stringValue
-        field.stringValue = rest.isEmpty ? last : last + " " + rest
+    /// 1 つ前の条件へ戻る。最後のチップを外して入力欄を「（打っていた言葉） #type 」にし、値の一覧を出す。
+    /// チップが残っていなければコマンドを消して打っていた言葉だけに戻す
+    private func stepBackOnce(rest r: String) {
+        guard let field, let panel else { return }
+        let rest = r.trimmingCharacters(in: .whitespaces)
+        if let last = committed.popLast() {
+            let cmd = last.split(separator: " ", maxSplits: 1).first.map(String.init) ?? last
+            let shown = (rest.isEmpty ? "" : rest + " ") + cmd + " "
+            field.stringValue = shown
+            stepBack = (shown, rest)
+        } else {
+            field.stringValue = rest
+            stepBack = nil
+        }
+        dismissedText = nil
         refresh()
-        panel.focusField(caretToEnd: false)
-        field.currentEditor()?.selectedRange = NSRange(location: (last as NSString).length, length: 0)
+        panel.focusField()
     }
 
     /// チップの × を押したとき: そのコマンドのチップを全部外す
@@ -743,25 +758,32 @@ enum FocusTest {
         c.filterInput.acceptNext("#kind ss")
         expect(focused(c), "札を押した後も入力欄が first responder")
         key(c, #selector(NSResponder.deleteBackward(_:)))
-        expect(c.filterInput.committed.isEmpty && c.queryText == "#kind ss" && focused(c), "Backspace でチップを文字に戻す「\(c.queryText)」")
-        for _ in 0..<8 { key(c, #selector(NSResponder.deleteBackward(_:))) }
+        expect(c.filterInput.committed.isEmpty && c.queryText == "#kind " && c.filterInput.palette?.mode == .values(.kind) && focused(c),
+               "Backspace で #kind の値の一覧に戻る「\(c.queryText)」")
+        key(c, #selector(NSResponder.deleteBackward(_:)))
+        expect(c.queryText.isEmpty && c.filterInput.palette == nil, "もう一度でコマンドも消える「\(c.queryText)」")
         type(c, "y")
-        expect(c.queryText == "y", "戻した文字を消した後に打てる「\(c.queryText)」")
+        expect(c.queryText == "y", "戻した後に打てる「\(c.queryText)」")
 
-        // 5b) #を繋げたとき: 先頭で ← / Backspace を押すたびに前の条件へ戻る
+        // 5b) #を繋げたとき: ← / Backspace を押すたびに 1 つ前のコマンドの値の一覧へ戻る
         c = make()
-        type(c, "#type app "); type(c, "#date 7d "); type(c, "請求")
-        expect(c.filterInput.committed == ["#type app", "#date 7d"] && c.queryText == "請求", "2 つのチップ \(c.filterInput.committed)「\(c.queryText)」")
-        tv(c)?.setSelectedRange(NSRange(location: 0, length: 0))
+        type(c, "#date 7d "); type(c, "#type app ")
+        expect(c.filterInput.committed == ["#date 7d", "#type app"] && c.queryText.isEmpty, "2 つのチップ \(c.filterInput.committed)")
         key(c, #selector(NSResponder.moveLeft(_:)))
-        expect(c.filterInput.committed == ["#type app"] && c.queryText == "#date 7d 請求", "← で #date 7d を文字に戻す「\(c.queryText)」")
-        expect(tv(c)?.selectedRange().location == 8, "カーソルは戻した条件の後ろ")
-        expect(c.filterInput.currentQuery == "#type app #date 7d 請求", "戻しても絞り込みは同じ \(c.filterInput.currentQuery)")
+        expect(c.filterInput.committed == ["#date 7d"] && c.queryText == "#type " && c.filterInput.palette?.mode == .values(.type), "1 回戻ると #type の一覧「\(c.queryText)」")
+        key(c, #selector(NSResponder.deleteBackward(_:)))
+        expect(c.filterInput.committed.isEmpty && c.queryText == "#date " && c.filterInput.palette?.mode == .values(.date), "2 回戻ると #date の一覧「\(c.queryText)」")
         key(c, #selector(NSResponder.moveLeft(_:)))
-        expect(c.filterInput.committed.count == 1, "先頭でなければ ← はふつうにカーソルを動かす")
+        expect(c.queryText.isEmpty && c.filterInput.palette == nil && focused(c), "3 回で何も無い入力欄")
+        // 打っていた言葉は残す。打ち直したらふつうの Backspace
+        c = make()
+        type(c, "#date 7d "); type(c, "請求")
         tv(c)?.setSelectedRange(NSRange(location: 0, length: 0))
         key(c, #selector(NSResponder.deleteBackward(_:)))
-        expect(c.filterInput.committed.isEmpty && c.queryText == "#type app #date 7d 請求", "Backspace でさらに前の条件へ「\(c.queryText)」")
+        expect(c.filterInput.committed.isEmpty && c.queryText == "請求 #date " && c.filterInput.palette?.mode == .values(.date), "言葉を残して #date の一覧「\(c.queryText)」")
+        type(c, "t")
+        key(c, #selector(NSResponder.deleteBackward(_:)))
+        expect(c.queryText == "請求 #date ", "触った後の Backspace は 1 文字消す「\(c.queryText)」")
 
         // 6) 候補が多いとき: 行は一度に全部作らず、↓ で選ぶとスクロールする
         c = make()
