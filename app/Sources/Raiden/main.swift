@@ -76,6 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.async { self?.finishSession(chosen: nil) }
         }
         panel.filterInput.context = { [weak self] in self?.filesReady == true ? self?.engine?.filterContext : nil }
+        setupFilterHooks()
         panel.setStatus("準備中…", symbol: "hourglass")
         work.async { [weak self] in self?.boot() }
         // 取りこぼしの保険（1 日 1 回、アプリもファイルも全体を見直す）と、古い検索の記録の掃除
@@ -95,6 +96,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !exists, let m = UserDefaults.standard.object(forKey: "unloadAfterMinutes") as? Int { settings.unloadMinutes = m }
         PanelStyle.transparency = settings.transparency
         SearchPanelController.maxRows = settings.maxRows
+        SavedFilters.set(settings.savedFilters)
+        PhraseDictionary.set(settings.dictionary)
         panel.applyTransparency()
     }
 
@@ -112,6 +115,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if old.scope != s.scope { scheduleScopeApply() }
         if old.transparency != s.transparency { previewTransparency(s.transparency) }
         if old.maxRows != s.maxRows { SearchPanelController.maxRows = s.maxRows }
+        if old.savedFilters != s.savedFilters { SavedFilters.set(s.savedFilters) }
+        if old.dictionary != s.dictionary { PhraseDictionary.set(s.dictionary) }
         if old.unloadMinutes != s.unloadMinutes { unloadItems.forEach { $0.state = $0.tag == s.unloadMinutes ? .on : .off } }
         if old.logDays != s.logDays { pruneSearchLog() }
         if old.folders != s.folders || old.excludeFolders != s.excludeFolders || old.excludeNames != s.excludeNames {
@@ -161,6 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // 読み込みの間に設定窓で範囲を変えていたら、今の設定で始める
                 self.startFiles(e, scope: self.settings.scope)
                 self.pruneSearchLog()
+                self.refreshFilterMemory()
             }
         } catch {
             rlogError("起動に失敗 \(error)")
@@ -639,6 +645,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             entry.chosenRank = cands.firstIndex { $0.key == key && $0.kind == k }.map { $0 + 1 }
         }
         logWork.async { store.logSearch(entry) }
+        refreshFilterMemory()
+    }
+
+    // MARK: 「#」の覚えた使い方・保存した名前・辞書（FilterMemory.swift, PhraseDictionary.swift, FilterUI.swift）
+
+    /// 検索の記録から覚えた「#」の使い方（よく使う組み合わせ・値・場所・選ばずに閉じた言い方）。記録を書くたびに読み直す
+    private(set) var filterMemory = FilterMemory.empty
+
+    private func setupFilterHooks() {
+        panel.filterInput.memory = { [weak self] in self?.filterMemory ?? .empty }
+        panel.filterInput.onSave = { [weak self] sf in
+            guard let self else { return false }
+            let over = self.settings.savedFilters.contains { Describe.normalize($0.name) == Describe.normalize(sf.name) }
+            self.updateSettings { s in
+                s.savedFilters.removeAll { Describe.normalize($0.name) == Describe.normalize(sf.name) }
+                s.savedFilters.append(sf)
+            }
+            rlog("絞り込みを保存 #\(sf.name) = \(sf.text)")
+            return over
+        }
+        panel.filterInput.onAddDictionary = { [weak self] e in self?.addDictionary(e) ?? false }
+        panel.dictionaryCandidates = { [weak self] q in DictionaryLookup.candidates(q, apps: self?.engine?.apps ?? []) }
+    }
+
+    /// 辞書に足す（同じ言い方は置き換える）。置き換えたら true
+    @discardableResult
+    func addDictionary(_ e: DictEntry) -> Bool {
+        let r = PhraseDictionary.adding(e, to: settings.dictionary)
+        updateSettings { $0.dictionary = r.list }
+        rlog("辞書に\(r.replaced ? "置き換え" : "追加")「\(e.phrase)」→ \(e.name)")
+        return r.replaced
+    }
+
+    private func refreshFilterMemory() {
+        guard let store else { return }
+        logWork.async { [weak self] in
+            let m = FilterMemory.build(from: store.searchLog(limit: 3000))
+            DispatchQueue.main.async { self?.filterMemory = m }
+        }
+    }
+
+    func filterCombos() -> [FilterMemory.Combo] { filterMemory.combos }
+
+    func appChoices() -> [(String, String)] {
+        (engine?.apps ?? []).map { ($0.jp, $0.path) }.sorted { $0.0.localizedStandardCompare($1.0) == .orderedAscending }
     }
 
     private func pruneSearchLog() {

@@ -13,7 +13,7 @@ import Foundation
 ///   コマンドと読むのは、入力の先頭か空白の直後の「#」「＃」＋文字だけ（「C#」「#1」は普通の文字）。
 public struct QueryFilters: Sendable {
     public enum Command: String, Sendable, CaseIterable {
-        case kind, type, ext, date, modified, created, path, name
+        case kind, type, ext, date, modified, created, path, name, with, near
         public var takesValue: Bool { true }
         public var name: String { QueryFilters.mark + rawValue }
         /// 短い別名（find / fd と同じ 1 文字）。#date は無し
@@ -26,6 +26,8 @@ public struct QueryFilters: Sendable {
             case .created: return "#c"
             case .path: return "#p"
             case .name: return "#n"
+            case .with: return "#w"
+            case .near: return "#nr"
             case .date: return nil
             }
         }
@@ -58,6 +60,10 @@ public struct QueryFilters: Sendable {
     public var notes: [String] = []       // 「#size は使えません」など
     /// 値がまだ無い・打ちかけのコマンド（"" は「#」だけ）。絞り込みには使わない
     public var pending: String?
+    /// 「#保存 名前」の名前（打ちかけも）。nil は保存の書き方ではない
+    public var saving: String?
+    /// 「#alias 言い方」の言い方（打ちかけも）。nil は辞書に足す書き方ではない
+    public var aliasing: String?
     public var dates: [Command: DateCond] = [:]
     public var types: Set<String> = []    // f / d / app
     public var kinds: Set<String> = []    // FileCatalog.families の名前（folder・app も）
@@ -65,19 +71,28 @@ public struct QueryFilters: Sendable {
     public var exts: Set<String> = []
     public var paths: [String] = []
     public var names: [String] = []       // Describe.normalize 済み
+    /// #with（一緒に使った物）・#near（同じプロジェクトの物）の基準のファイル・フォルダ。~ を広げた絶対パス（NFC）か、
+    /// ~ / で始まらない値は書かれたとおり（名前）。値は 1 つで、2 回書いたら後の方。
+    /// matches では見ない（実行は検索の土台の担当。Spotlight に問い合わせて絞る）
+    public var withPath: String?
+    public var nearPath: String?
     var labels: [Command: [String]] = [:]
     /// チップの並び（付けた順。同じコマンドは 1 つにまとめる）
     public private(set) var order: [Command] = []
 
     var hasKind: Bool { !kinds.isEmpty || !kindExts.isEmpty }
     /// 絞り込みが効いているか
-    public var isActive: Bool { !types.isEmpty || hasKind || !exts.isEmpty || !dates.isEmpty || !paths.isEmpty || !names.isEmpty }
+    public var isActive: Bool {
+        !types.isEmpty || hasKind || !exts.isEmpty || !dates.isEmpty || !paths.isEmpty || !names.isEmpty || hasRelation
+    }
+    /// #with か #near が付いている（手元の matches では絞れず、土台の側で絞る条件）
+    public var hasRelation: Bool { withPath != nil || nearPath != nil }
     /// アプリを頼んだか（#type app / #kind app）
     public var wantsApps: Bool { types.contains("app") || kinds.contains("app") }
     /// アプリを候補に出すか（ファイルにしか効かない条件が付いていれば出さない）
     public var allowsApps: Bool {
         (types.isEmpty || types.contains("app")) && (!hasKind || kinds.contains("app"))
-            && exts.isEmpty && dates.isEmpty && paths.isEmpty
+            && exts.isEmpty && dates.isEmpty && paths.isEmpty && !hasRelation
     }
     /// ファイル・フォルダを候補に出すか（アプリだけを頼んだときは出さない）
     public var allowsFiles: Bool {
@@ -96,7 +111,14 @@ public struct QueryFilters: Sendable {
         ("created", .created), ("c", .created), ("作成日", .created),
         ("path", .path), ("p", .path), ("in", .path), ("場所", .path),
         ("name", .name), ("n", .name), ("名前", .name),
+        ("with", .with), ("w", .with), ("一緒", .with),
+        ("near", .near), ("nr", .near), ("近く", .near),
     ]
+
+    /// 今の条件に名前を付けて保存するときの書き方（#保存 仕事のPDF）。絞り込みには使わず、入力欄が受け取る
+    public static let saveWords = ["save", "保存"]
+    /// 辞書に足すときの書き方（#alias 黒い画面）。絞り込みには使わず、入力欄が受け取る
+    public static let aliasWords = ["alias", "dict", "辞書"]
 
     /// #type の別名（前の版の名前）。#app → #type app、#folder → #type d、#file → #type f。
     /// 「#t #app」のように #type の値の位置に来たら値として読む
@@ -116,6 +138,10 @@ public struct QueryFilters: Sendable {
     public static func expandShorthands(_ toks: [String]) -> [String] {
         var out: [String] = []
         for t in toks {
+            if let n = commandName(t), !n.isEmpty, command(named: n) == nil, let sf = SavedFilters.find(n) {
+                out += sf.commands.flatMap { tokenize($0) }
+                continue
+            }
             if let v = shorthand(t) {
                 if let p = out.last, let pn = commandName(p), command(named: pn) == .type { out.append(v) } else { out += ["#type", v] }
             } else { out.append(t) }
@@ -209,10 +235,15 @@ public struct QueryFilters: Sendable {
             f.hasSyntax = true
             let isLast = i == toks.count - 1
             if name.isEmpty { if isLast && !trailingSpace { f.pending = "" }; i += 1; continue }
+            // #保存 名前: 後ろは全部、保存する名前（入力欄が扱う）
+            if saveWords.contains(name) { f.pending = "save"; f.saving = toks[(i + 1)...].joined(separator: " "); break }
+            // #alias 言い方: 後ろは全部、辞書に足す言い方
+            if aliasWords.contains(name) { f.pending = "alias"; f.aliasing = toks[(i + 1)...].joined(separator: " "); break }
             guard let cmd = command(named: name) else {
                 // 打ちかけ（「#da」）は知らせない。空白を打った後や途中にあれば知らせる
                 if isLast && !trailingSpace && (aliases.contains(where: { Describe.normalize($0.0).hasPrefix(Describe.normalize(name)) })
-                                                || isShorthandPrefix(name)) {
+                                                || isShorthandPrefix(name) || SavedFilters.hasPrefix(name)
+                                                || (saveWords + aliasWords).contains(where: { $0.hasPrefix(name) })) {
                     f.pending = name
                 } else {
                     f.notes.append("#\(name) は使えません")
@@ -256,6 +287,8 @@ public struct QueryFilters: Sendable {
             if !f.exts.isEmpty { others.append("#ext") }
             for c in [Command.date, .modified, .created] where f.dates[c] != nil { others.append(c.name) }
             if !f.paths.isEmpty { others.append("#path") }
+            if f.withPath != nil { others.append("#with") }
+            if f.nearPath != nil { others.append("#near") }
             if !others.isEmpty { f.notes.append("アプリ（#type app）と \(others.joined(separator: "・")) は一緒に使えません") }
         }
         f.text = f.hasSyntax ? rest.joined(separator: " ") : query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -322,6 +355,15 @@ public struct QueryFilters: Sendable {
             if !names.contains(n) { names.append(n) }
             remember(.name, ["「\(v)」"])
             return "「\(v)」"
+        case .with, .near:
+            let p = v.trimmingCharacters(in: .whitespaces)
+            if p.isEmpty { return nil }
+            let full = p.hasPrefix("~") || p.hasPrefix("/")
+                ? (p as NSString).expandingTildeInPath.precomposedStringWithCanonicalMapping : p.precomposedStringWithCanonicalMapping
+            if cmd == .with { withPath = full } else { nearPath = full }
+            let l = (full as NSString).lastPathComponent
+            remember(cmd, [l], replace: true)
+            return l
         }
     }
 
@@ -335,6 +377,8 @@ public struct QueryFilters: Sendable {
         case .ext: f.exts = []
         case .path: f.paths = []
         case .name: f.names = []
+        case .with: f.withPath = nil
+        case .near: f.nearPath = nil
         }
         f.labels[c] = nil
         f.order.removeAll { $0 == c }
@@ -365,7 +409,8 @@ public struct QueryFilters: Sendable {
         return parent.hasPrefix(home + "/") ? String(parent.dropFirst(home.count + 1)) : (parent == home ? "" : parent)
     }
 
-    /// ファイル・フォルダが条件に当てはまるか（候補の絞り込みも、値の候補の件数も、この関数で数える）
+    /// ファイル・フォルダが条件に当てはまるか（候補の絞り込みも、値の候補の件数も、この関数で数える）。
+    /// #with・#near は見ない（手元の一覧では決められない。土台の側で絞る）
     public func matches(_ e: FileEntry, keys k0: FileKeys? = nil) -> Bool {
         if !types.isEmpty && !types.contains(e.isDir ? "d" : "f") { return false }
         let k = k0 ?? FileKeys(e)
@@ -429,6 +474,8 @@ public struct QueryFilters: Sendable {
             case .ext: return Chip(command: c, symbol: "tag", label: "拡張子: " + v)
             case .path: return Chip(command: c, symbol: "folder", label: "場所: " + v)
             case .name: return Chip(command: c, symbol: "textformat", label: "名前: " + v)
+            case .with: return Chip(command: c, symbol: "link", label: "一緒に使った: " + v)
+            case .near: return Chip(command: c, symbol: "point.3.connected.trianglepath.dotted", label: "同じプロジェクト: " + v)
             }
         }
     }

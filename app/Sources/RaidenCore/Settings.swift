@@ -100,6 +100,8 @@ public struct RaidenSettings: Codable, Equatable, Sendable {
     public var transparency = RaidenSettings.defaultTransparency  // 入力欄と設定窓の透け具合（0 = 白い、0.9 = いちばん透ける）
     // 学習
     public var learn = true                    // 選んだ結果を覚える
+    public var dictionary: [DictEntry] = []       // 辞書（言い方 → アプリ / ファイル・フォルダ / 「#」の条件）
+    public var savedFilters: [SavedFilter] = []  // 名前を付けて保存した絞り込み（#仕事のPDF → #ext pdf #path 仕事）
     // 記録
     public var logSearches = true              // 検索の記録を残す
     public var logDays = 90                    // 残す日数
@@ -130,7 +132,7 @@ public struct RaidenSettings: Codable, Equatable, Sendable {
 
     // 項目ごとに読めなければ初期値（古い版・壊れた値で全部が初期値に戻らないように）
     enum CodingKeys: String, CodingKey {
-        case version, folders, excludeFolders, excludeNames, knownExcludeDefaults, hotKey, unloadMinutes, maxRows, sectionOrder, transparency, learn, logSearches, logDays
+        case version, folders, excludeFolders, excludeNames, knownExcludeDefaults, hotKey, unloadMinutes, maxRows, sectionOrder, transparency, learn, dictionary, savedFilters, logSearches, logDays
     }
 
     public init(from d: Decoder) throws {
@@ -151,6 +153,8 @@ public struct RaidenSettings: Codable, Equatable, Sendable {
         sectionOrder = get(.sectionOrder, def.sectionOrder)
         transparency = min(max(get(.transparency, def.transparency), Self.transparencyRange.lowerBound), Self.transparencyRange.upperBound)
         learn = get(.learn, def.learn)
+        dictionary = get(.dictionary, def.dictionary).filter { !$0.phrase.isEmpty && !$0.key.isEmpty }
+        savedFilters = get(.savedFilters, def.savedFilters).filter { !$0.name.isEmpty && !$0.commands.isEmpty }
         logSearches = get(.logSearches, def.logSearches)
         logDays = max(1, get(.logDays, def.logDays))
     }

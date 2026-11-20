@@ -43,6 +43,12 @@ protocol SettingsHost: AnyObject {
     func teach(_ e: SearchLogEntry, completion: @escaping (String?) -> Void)
     /// 透け具合を入力欄に当てる（保存はしない。スライダーを動かしている間）
     func previewTransparency(_ t: Double)
+    /// 検索の記録から数えた「#」のよく使う組み合わせ（学習タブに出す）
+    func filterCombos() -> [FilterMemory.Combo]
+}
+
+extension SettingsHost {
+    func filterCombos() -> [FilterMemory.Combo] { [] }
 }
 
 /// 左の一覧の 1 行（アイコン＋名前）。選択中は面の色だけ
@@ -108,6 +114,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
     /// 足したが件数が多すぎてオフのままにしたフォルダ
     private var largeOff: [String: Int] = [:]
     private var notesDraft: [(String, String)]?
+    /// 学習タブの辞書・保存した絞り込みの編集中の値（SettingsLearning.swift）
+    let learningState = LearningPaneState()
     private var hotKeyMessage: String?
     private var rebuildPending = false
 
@@ -193,7 +201,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
         switch tab {
         case .scope: content = scopePane()
         case .general: content = generalPane()
-        case .learning: content = learningPane()
+        case .learning: content = learningPaneV2(learningState)
         case .log: content = logPane()
         }
         let v = scrollPane(content)
@@ -285,7 +293,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
         return scroll
     }
 
-    private func header(_ t: Tab, _ desc: String) -> NSView {
+    func header(_ t: Tab, _ desc: String) -> NSView {
         let v = NSView()
         v.translatesAutoresizingMaskIntoConstraints = false
         let ic = sIcon(t.symbol, size: 18, color: SettingsStyle.accent, weight: .semibold)
@@ -305,13 +313,13 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
         return v
     }
 
-    private func card(_ rows: [NSView]) -> CardView {
+    func card(_ rows: [NSView]) -> CardView {
         let c = CardView()
         for r in rows { c.add(r) }
         return c
     }
 
-    private func spacer(_ h: CGFloat) -> NSView {
+    func spacer(_ h: CGFloat) -> NSView {
         let v = NSView()
         v.translatesAutoresizingMaskIntoConstraints = false
         v.heightAnchor.constraint(equalToConstant: h).isActive = true
@@ -464,7 +472,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
     }
 
     /// 行: 先頭の部品・アイコン・題（~/ のパス）・後ろの部品
-    private func itemRow(icon: NSView, title: String, detail: String? = nil, dim: Bool = false,
+    func itemRow(icon: NSView, title: String, detail: String? = nil, dim: Bool = false,
                          leading: [NSView] = [], trailing: [NSView]) -> NSView {
         let row = NSView()
         row.translatesAutoresizingMaskIntoConstraints = false
@@ -668,78 +676,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
 
     // MARK: - 学習
 
-    private func learningPane() -> [NSView] {
-        guard let host else { return [] }
-        let s = host.settings
-        var out: [NSView] = [header(.learning, "選んで開いた「言い方 → 物」を例として覚え、次から上に出します。")]
-        out.append(card([
-            formRow("brain", "選んだ結果を覚える", detail: "オフにしても、今までに覚えた例は効きます",
-                    trailing: [sSwitch(s.learn) { [weak self] on in self?.host?.updateSettings { $0.learn = on } }]),
-        ]))
-
-        let ex = host.learnedExamples()
-        out.append(spacer(4))
-        out.append(sectionTitle("覚えた例（\(Self.num(ex.count)) 件）", symbol: "text.badge.checkmark",
-                                trailing: [sButton("全部消す", symbol: "trash", small: true) { [weak self] in self?.confirmClearLearned() }]))
-        let list = ScrollList(maxHeight: 236, empty: "まだありません")
-        list.setRows(ex.prefix(500).map { e in
-            let icon = sIcon(e.kind == "app" ? "app.badge" : e.kind == "folder" ? "folder" : "doc", size: 13)
-            icon.widthAnchor.constraint(equalToConstant: 18).isActive = true
-            let del = sIconButton("trash", tip: "この例を消す") { [weak self] in
-                self?.host?.deleteLearned(e)
-                self?.reload()
-            }
-            let meta = sLabel("\(e.count) 回・\(Self.date(e.lastUsed))", size: 11, color: SettingsStyle.subText)
-            return itemRow(icon: icon, title: "「\(e.query)」 → \(e.name)", trailing: [meta, del])
-        })
-        out.append(list)
-
-        // app-notes
-        out.append(spacer(4))
-        let notes = notesDraft ?? host.appNotes()
-        if notesDraft == nil { notesDraft = notes }
-        out.append(sectionTitle("アプリの説明（app-notes.json）", symbol: "square.and.pencil", trailing: [
-            sButton("追加", symbol: "plus", small: true) { [weak self] in self?.notesDraft?.append(("", "")); self?.reload() },
-            sButton("保存", symbol: "checkmark", small: true) { [weak self] in self?.saveNotes() },
-        ]))
-        let nc = CardView()
-        nc.add(formRow("info.circle", "説明の少ないアプリに一言書くと当たりやすくなります（キーは bundle id か名前）",
-                       height: 38, iconColor: SettingsStyle.faint))
-        for (i, (k, v)) in notes.enumerated() {
-            let kf = NSTextField(string: k)
-            kf.placeholderString = "com.example.app か名前"
-            let vf = NSTextField(string: v)
-            vf.placeholderString = "何をするアプリか"
-            for f in [kf, vf] {
-                f.font = .systemFont(ofSize: 12)
-                f.bezelStyle = .roundedBezel
-                f.translatesAutoresizingMaskIntoConstraints = false
-            }
-            kf.onAction { [weak self] c in self?.notesDraft?[i].0 = c.stringValue }
-            vf.onAction { [weak self] c in self?.notesDraft?[i].1 = c.stringValue }
-            kf.tag = i * 2; vf.tag = i * 2 + 1
-            kf.delegate = self; vf.delegate = self
-            let del = sIconButton("minus.circle", tip: "消す") { [weak self] in self?.notesDraft?.remove(at: i); self?.reload() }
-            let row = NSView()
-            row.translatesAutoresizingMaskIntoConstraints = false
-            for x in [kf, vf, del] as [NSView] { row.addSubview(x) }
-            NSLayoutConstraint.activate([
-                row.heightAnchor.constraint(equalToConstant: 40),
-                kf.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 14),
-                kf.widthAnchor.constraint(equalToConstant: 170),
-                kf.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-                vf.leadingAnchor.constraint(equalTo: kf.trailingAnchor, constant: 8),
-                vf.trailingAnchor.constraint(equalTo: del.leadingAnchor, constant: -10),
-                vf.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-                del.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -14),
-                del.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            ])
-            nc.add(row)
-        }
-        out.append(nc)
-        return out
-    }
-
     /// app-notes の欄を打っている途中も下書きに残す（保存を押す前に再描画されても消えないように）
     func controlTextDidChange(_ obj: Notification) {
         guard let f = obj.object as? NSTextField, !(f is NSTokenField), var d = notesDraft else { return }
@@ -827,15 +763,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
         nf.setRows(host.notFoundSearches().prefix(200).map { e in
             let icon = sIcon("magnifyingglass", size: 13, color: SettingsStyle.faint)
             icon.widthAnchor.constraint(equalToConstant: 18).isActive = true
-            let teach = sButton("正解を教える…", symbol: "hand.point.up.left", small: true) { [weak self] in
-                self?.host?.teach(e) { err in
-                    DispatchQueue.main.async {
-                        if let err {
-                            let a = NSAlert(); a.messageText = "教えられませんでした"; a.informativeText = err; a.runModal()
-                        }
-                        self?.reload()
-                    }
-                }
+            let teach = sButton("辞書に足す…", symbol: "book", small: true) { [weak self] in
+                self?.addDictionary(phrase: e.query)
             }
             return itemRow(icon: icon, title: "「\(e.query)」", trailing: [sLabel(Self.date(e.ts), size: 11, color: SettingsStyle.subText), teach])
         })
@@ -852,7 +781,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
     private func confirmClearLog() {
         let a = NSAlert()
         a.messageText = "検索の記録を全部消しますか？"
-        a.informativeText = "最近の検索と見つからなかった言い方の記録が消え、元に戻せません。覚えた例は残ります。"
+        a.informativeText = "最近の検索と見つからなかった言い方の記録が消え、元に戻せません。辞書と選んで開いた記録は残ります。"
         a.addButton(withTitle: "全部消す")
         a.addButton(withTitle: "やめる")
         a.alertStyle = .warning

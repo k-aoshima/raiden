@@ -3,9 +3,12 @@ import RaidenCore
 
 /// 入力欄の絞り込みコマンド（#kind ss #date 7d …）の画面側。SearchPanelController からは数か所だけ呼ぶ。
 ///
-///   「#」を打つとコマンドの一覧、「#date 」で値の候補（件数つき）を候補の場所に出す。↑↓ で選び、Enter / Tab で決める。
-///   値まで決まったコマンドはチップ（committed）にして入力欄から抜き、入力欄の下に並べる。入力欄が空のときの Backspace で最後のチップを消す。
+///   「#」を打つと、よく使う組み合わせ・保存した名前・コマンドの一覧、「#date 」で値の候補（件数つき）を候補の場所に出す。
+///   ↑↓ で選び、Enter / Tab で決める。値まで決まったコマンドはチップ（committed）にして入力欄から抜き、入力欄の下に並べる。
+///   入力欄が空のときの Backspace で最後のチップ、⌘Backspace で全部のチップを消す。チップの × を押してもその 1 つを消す。
 ///   打ちかけの値はゴーストテキスト（薄い文字）で補い、→ / Tab で決める。一覧が出ている間の Esc は一覧だけ閉じる。
+///   「#」を打たなくても、「pdf」「先週」のような言葉から絞り込みの候補を入力欄の下に薄く出し、Tab / → で決めたときだけチップにする。
+///   「#保存 名前」（⌘S）で今のチップに名前を付けて保存、「#alias 言い方」で辞書に足す（行き先を選ぶ状態になる）。
 final class FilterInput {
     weak var panel: SearchPanelController?
     private weak var field: NSTextField?
@@ -14,11 +17,26 @@ final class FilterInput {
     private(set) var palette: FilterCompletion.Palette?
     private var ghost: (text: String, item: FilterCompletion.Item)?
     private var dismissedText: String?
+    /// 「#」を打たずに出す絞り込みの候補（入力欄の下）
+    private(set) var suggestions: [FilterSuggest.Suggestion] = []
+    /// 入力欄の下に一度だけ出す一言（「#仕事のPDF を保存しました」）。次に打つと消える
+    private(set) var notice: String?
+    /// #alias の行き先を選んでいる間の言い方と、元の入力欄（取りやめたら戻す）
+    private(set) var aliasPhrase: String?
+    private var aliasBackup: (text: String, committed: [String])?
     let ghostLabel = NSTextField(labelWithString: "")
-    /// 値の候補の件数を数える一覧（AppDelegate が Engine.filterContext を渡す）
-    var context: (() -> FilterContext?)?
+    /// 値の候補の件数を数える口（AppDelegate が渡す。今は Engine.filterContext、一覧が無くなったら Spotlight 側の物）
+    var context: (() -> FilterSource?)?
+    /// 検索の記録から覚えた使い方（よく使う組み合わせ・値・場所・選ばずに閉じた言い方）
+    var memory: () -> FilterMemory = { .empty }
+    /// 名前を付けて保存したとき（AppDelegate が settings.json に書く）。上書きなら true を返す
+    var onSave: ((SavedFilter) -> Bool)?
+    /// 辞書に足したとき（AppDelegate が settings.json に書く）。置き換えたなら true を返す
+    var onAddDictionary: ((DictEntry) -> Bool)?
     /// 見本・確かめ用の基準日
     var now: () -> Date = { Date() }
+
+    var isPickingAlias: Bool { aliasPhrase != nil }
 
     func attach(_ panel: SearchPanelController, field: NSTextField, content: NSView) {
         self.panel = panel
@@ -35,13 +53,23 @@ final class FilterInput {
         palette = nil
         ghost = nil
         dismissedText = nil
+        suggestions = []
+        notice = nil
+        aliasPhrase = nil
+        aliasBackup = nil
         ghostLabel.isHidden = true
+        panel?.setPlaceholder(nil)
     }
 
     /// 検索に渡す文字（チップ＋入力欄）。コマンドが無ければ今までどおり前後の空白を落とす。
-    /// コマンドがあるときは後ろの空白を残す（打ちかけか打ち終えたかの見分けに使う）
+    /// コマンドがあるときは後ろの空白を残す（打ちかけか打ち終えたかの見分けに使う）。
+    /// #alias の行き先を選んでいる間は入力欄の文字（空なら言い方そのもの）で探す
     var currentQuery: String {
         let text = field?.stringValue ?? ""
+        if let a = aliasPhrase {
+            let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return t.isEmpty ? a : t
+        }
         let raw = (committed + [text]).filter { !$0.isEmpty }.joined(separator: " ")
         let trimmedHead = String(raw.drop { $0.isWhitespace })
         if committed.isEmpty && !QueryFilters.parse(trimmedHead).hasSyntax {
@@ -53,7 +81,8 @@ final class FilterInput {
     /// 入力が変わったとき（SearchPanelController.controlTextDidChange から）
     func textDidChange() {
         guard let field else { return }
-        if let ex = FilterCompletion.extractCommitted(field.stringValue, now: now()) {
+        notice = nil
+        if aliasPhrase == nil, let ex = FilterCompletion.extractCommitted(field.stringValue, now: now()) {
             committed += ex.commands
             field.stringValue = ex.text
             moveCaretToEnd()
@@ -64,10 +93,20 @@ final class FilterInput {
     /// 一覧を出し直し、出さないときは検索する
     func refresh() {
         guard let field, let panel else { return }
+        if aliasPhrase != nil {
+            palette = nil; ghost = nil; suggestions = []
+            updateGhost()
+            panel.onQuery?(currentQuery)
+            return
+        }
         let text = field.stringValue
         if dismissedText != text { dismissedText = nil }
-        palette = dismissedText == nil ? FilterCompletion.palette(for: text, committed: committed, context: context?(), now: now()) : nil
+        let mem = memory()
+        let src = context?()
+        palette = dismissedText == nil
+            ? FilterCompletion.palette(for: text, committed: committed, context: src, memory: mem, now: now()) : nil
         ghost = palette.flatMap(FilterCompletion.ghost)
+        suggestions = palette == nil ? FilterSuggest.suggest(text, committed: committed, memory: mem, source: src) : []
         updateGhost()
         if let p = palette {
             panel.setResults(paletteSections(p), query: currentQuery, extra: [paletteHeader(p)], palette: true)
@@ -76,12 +115,24 @@ final class FilterInput {
         }
     }
 
+    /// 件数を数える口の答えが後から届いたとき（Spotlight の問い合わせが終わったとき）に呼ぶ。一覧が出ていれば出し直す
+    func sourceDidUpdate() {
+        if palette != nil { refresh() }
+    }
+
     // MARK: キー
 
-    /// 一覧・ゴースト・チップ用のキー。扱ったら true（SearchPanelController の doCommandBy の先頭で呼ぶ）
+    /// 一覧・ゴースト・チップ・言葉からの候補用のキー。扱ったら true（SearchPanelController の doCommandBy の先頭で呼ぶ）
     func handle(_ sel: Selector) -> Bool {
         guard let field, let panel else { return false }
         let atEnd = (field.currentEditor()?.selectedRange.location ?? 0) >= (field.stringValue as NSString).length
+        if aliasPhrase != nil {
+            switch sel {
+            case #selector(NSResponder.cancelOperation(_:)): cancelAlias(); return true
+            case #selector(NSResponder.insertTab(_:)): return true
+            default: return false   // ↑↓ は一覧、Enter は SearchPanelController.openSelected → pickAlias
+            }
+        }
         if let p = palette {
             switch sel {
             case #selector(NSResponder.insertNewline(_:)):
@@ -104,19 +155,53 @@ final class FilterInput {
                 break
             }
         }
-        if sel == #selector(NSResponder.deleteBackward(_:)), field.stringValue.isEmpty, !committed.isEmpty {
+        switch sel {
+        case #selector(NSResponder.insertTab(_:)):
+            // 言葉からの候補を決める。無ければ何もしない（フォーカスを入力欄から動かさない）
+            if let s = suggestions.first { acceptSuggestion(s) }
+            return true
+        case #selector(NSResponder.moveRight(_:)):
+            if atEnd, palette == nil, let s = suggestions.first { acceptSuggestion(s); return true }
+            return false
+        case #selector(NSResponder.deleteBackward(_:)):
+            guard field.stringValue.isEmpty, !committed.isEmpty else { return false }
             committed.removeLast()
             refresh()
             panel.focusField()
             return true
+        case #selector(NSResponder.deleteToBeginningOfLine(_:)):
+            guard field.stringValue.isEmpty, !committed.isEmpty else { return false }
+            committed.removeAll()
+            refresh()
+            panel.focusField()
+            return true
+        default:
+            return false
         }
-        return false
     }
 
     private func accept(_ item: FilterCompletion.Item, _ p: FilterCompletion.Palette) {
         guard let field else { return }
+        switch p.mode {
+        case .save:
+            guard !item.insert.isEmpty else { return }
+            let sf = SavedFilter(name: item.insert, commands: item.commits)
+            let over = onSave?(sf) ?? false
+            field.stringValue = FilterCompletion.accept(item, palette: p, text: field.stringValue).text
+            notice = "#\(sf.name) を" + (over ? "置き換えました" : "保存しました") + "（\(sf.text)）"
+            refresh()
+            panel?.focusField()
+            return
+        case .alias:
+            guard !item.insert.isEmpty else { return }
+            beginAlias(item.insert, restText: FilterCompletion.accept(item, palette: p, text: field.stringValue).text)
+            return
+        default:
+            break
+        }
         let r = FilterCompletion.accept(item, palette: p, text: field.stringValue)
         if let c = r.commit { committed.append(c) }
+        committed += r.commits
         field.stringValue = r.text
         refresh()
         // 決めた後も入力欄で続けて打てるように（行を押して決めたときも）
@@ -130,11 +215,86 @@ final class FilterInput {
         if items.indices.contains(i) { accept(items[i], p) }
     }
 
-    /// 次に付けそうなコマンドを押したとき
-    func acceptNext(_ insert: String) {
-        committed.append(insert)
+    /// 次に付けそうなコマンドを押したとき（よく使う組み合わせの続きならまとめて）
+    func acceptNext(_ insert: String, commits: [String] = []) {
+        committed += commits.isEmpty ? [insert] : commits
         refresh()
         panel?.focusField()
+    }
+
+    /// 言葉からの候補を決める: チップにして、入力からその言葉を外す
+    func acceptSuggestion(_ s: FilterSuggest.Suggestion) {
+        guard let field else { return }
+        committed += s.commands
+        field.stringValue = FilterSuggest.accept(s, text: field.stringValue)
+        refresh()
+        panel?.focusField()
+    }
+
+    /// チップの × を押したとき: そのコマンドのチップを全部外す
+    func removeChip(_ c: QueryFilters.Command) {
+        committed.removeAll { QueryFilters.parse($0).order.contains(c) }
+        refresh()
+        panel?.focusField()
+    }
+
+    /// ⌘S: 今のチップに名前を付けて保存する（入力欄を「#保存 」にする。打っていた言葉は後ろに残す）
+    func beginSave() {
+        guard let field, aliasPhrase == nil else { return }
+        field.stringValue = "#保存 "
+        notice = nil
+        refresh()
+        moveCaretToEnd()
+    }
+
+    // MARK: 辞書（#alias）
+
+    /// 言い方を決めて、行き先を選ぶ状態にする。入力欄は空にして、打てば名前で絞れる（最初は言い方そのもので探す）
+    func beginAlias(_ phrase: String, restText: String? = nil) {
+        guard let field else { return }
+        aliasBackup = (restText ?? field.stringValue, committed)
+        aliasPhrase = phrase
+        committed = []
+        field.stringValue = ""
+        palette = nil
+        panel?.setPlaceholder("「\(phrase)」→ どれに？")
+        refresh()
+        panel?.focusField()
+    }
+
+    /// 行き先を選んだとき（SearchPanelController.openSelected から）。辞書に足して元の入力欄に戻る
+    func pickAlias(_ c: Candidate) {
+        guard let phrase = aliasPhrase else { return }
+        let e = DictionaryLookup.entry(phrase: phrase, c)
+        let replaced = onAddDictionary?(e) ?? false
+        endAlias()
+        notice = DictionaryLookup.message(e, replaced: replaced)
+        refresh()
+    }
+
+    func cancelAlias() {
+        endAlias()
+        refresh()
+    }
+
+    private func endAlias() {
+        let b = aliasBackup
+        aliasPhrase = nil
+        aliasBackup = nil
+        committed = b?.committed ?? []
+        field?.stringValue = b?.text ?? ""
+        panel?.setPlaceholder(nil)
+        panel?.focusField()
+    }
+
+    /// ⌥Enter: 今の言葉（コマンドを抜いた物）→ 選んだ候補 を辞書に足す。言葉が無ければ何もしない
+    @discardableResult
+    func addToDictionary(_ c: Candidate) -> String? {
+        let phrase = QueryFilters.parse(currentQuery).text.trimmingCharacters(in: .whitespaces)
+        guard !phrase.isEmpty, aliasPhrase == nil else { return nil }
+        let e = DictionaryLookup.entry(phrase: phrase, c)
+        let replaced = onAddDictionary?(e) ?? false
+        return DictionaryLookup.message(e, replaced: replaced)
     }
 
     private func moveCaretToEnd() {
@@ -144,9 +304,10 @@ final class FilterInput {
 
     // MARK: 見た目
 
-    /// 件数のある値を先に、0 件は下に回す（行数は検索の候補と同じ 9 まで）
+    /// 件数のある値を先に、0 件は下に回す（行数は検索の候補と同じ 9 まで。コマンドの一覧は全部）
     func displayed(_ p: FilterCompletion.Palette) -> [FilterCompletion.Item] {
-        Array((p.items.filter { $0.count != 0 } + p.items.filter { $0.count == 0 }).prefix(SearchPanelController.maxRows))
+        let n = p.mode == .commands ? 20 : SearchPanelController.maxRows
+        return Array((p.items.filter { $0.count != 0 } + p.items.filter { $0.count == 0 }).prefix(n))
     }
 
     private func paletteSections(_ p: FilterCompletion.Palette) -> [ResultSection] {
@@ -154,29 +315,48 @@ final class FilterInput {
             var title = it.title
             if !it.alias.isEmpty { title += "    " + it.alias }
             if let c = it.count { title += "  ·  \(c) 件" }
-            return RowItem(title: title, sub: it.detail, iconImage: symbol(it.symbol, size: 18, weight: .regular), hint: "↩ 選ぶ　Tab")
+            let hint = p.mode == .save || p.mode == .alias ? "↩ 決める" : "↩ 選ぶ　Tab"
+            return RowItem(title: title, sub: it.detail, iconImage: symbol(it.symbol, size: 18, weight: .regular),
+                           hint: it.badge.isEmpty ? hint : it.badge + "　" + hint)
         }
         return [ResultSection(title: "候補", symbol: "list.bullet", items: rows)]
     }
 
     private func paletteHeader(_ p: FilterCompletion.Palette) -> (NSView, CGFloat) {
-        let title: String
+        let title: String, sym: String
         switch p.mode {
-        case .commands: title = "絞り込みのコマンド"
-        case .values(let c): title = "\(c.name) の値" + (context?() == nil ? "" : "（件数はほかの条件の中で）")
+        case .commands: title = "絞り込みのコマンド"; sym = "line.3.horizontal.decrease"
+        case .values(let c): title = "\(c.name) の値" + (context?() == nil ? "" : "（件数はほかの条件の中で）"); sym = "line.3.horizontal.decrease"
+        case .save: title = "今の条件に名前を付けて保存"; sym = "bookmark"
+        case .alias: title = "辞書に足す言い方"; sym = "book"
         }
-        return (LabelLine(title, symbol: "line.3.horizontal.decrease", detail: "↑↓ で選んで ↩ / Tab　Esc で閉じる"), SearchPanelController.headerHeight)
+        return (LabelLine(title, symbol: sym, detail: "↑↓ で選んで ↩ / Tab　Esc で閉じる"), SearchPanelController.headerHeight)
     }
 
-    /// 入力欄の下に出す行（チップ・知らせ・次に付けそうなコマンド・「条件に合う物はありません」）。一覧を出していないときに使う
+    /// 入力欄の下に出す行（一言・行き先を選ぶ案内・チップ・知らせ・次に付けそうなコマンド・言葉からの候補・「条件に合う物はありません」）。
+    /// 一覧を出していないときに使う
     func topLines(sections: [ResultSection], query: String, preparing: Bool) -> [(NSView, CGFloat)] {
-        let f = QueryFilters.parse(query, now: now())
-        guard f.hasSyntax else { return [] }
         var out: [(NSView, CGFloat)] = []
-        let next = (field?.stringValue.trimmingCharacters(in: .whitespaces).isEmpty ?? false)
-            ? FilterCompletion.next(f, context: context?(), now: now()) : []
-        if !f.chips.isEmpty || !f.notes.isEmpty || !next.isEmpty {
-            out.append((ChipBar(chips: f.chips, notes: f.notes, next: next) { [weak self] in self?.acceptNext($0) }, ChipBar.height))
+        if let n = notice {
+            out.append((LabelLine(n, symbol: "checkmark.circle", detail: nil), SearchPanelController.headerHeight + 4))
+        }
+        if let a = aliasPhrase {
+            out.append((LabelLine("「\(a)」→ どれに？", symbol: "book", detail: "打つと名前で絞れます　↑↓ で選んで ↩ で辞書に足す　Esc でやめる"),
+                        SearchPanelController.headerHeight + 4))
+            return out
+        }
+        let f = QueryFilters.parse(query, now: now())
+        if f.hasSyntax {
+            let next = (field?.stringValue.trimmingCharacters(in: .whitespaces).isEmpty ?? false)
+                ? FilterCompletion.next(f, context: context?(), memory: memory(), now: now()) : []
+            if !f.chips.isEmpty || !f.notes.isEmpty || !next.isEmpty {
+                out.append((ChipBar(chips: f.chips, notes: f.notes, next: next,
+                                    onNext: { [weak self] it in self?.acceptNext(it.insert, commits: it.commits) },
+                                    onRemove: { [weak self] c in self?.removeChip(c) }), ChipBar.height))
+            }
+        }
+        if !suggestions.isEmpty {
+            out.append((SuggestBar(suggestions) { [weak self] s in self?.acceptSuggestion(s) }, ChipBar.height))
         }
         if f.isActive && sections.allSatisfy({ $0.items.isEmpty }) {
             let msg = preparing && f.allowsFiles ? "ファイル準備中…" : "条件に合う物はありません"
@@ -198,27 +378,26 @@ final class FilterInput {
     }
 }
 
-/// 入力欄の下の 1 行: 効いている絞り込みのチップ（アイコン付き）、知らせ（「#size は使えません」）、次に付けそうなコマンド
+/// 押せる札（クリックで handler）
+class TapPill: NSView {
+    var onTap: (() -> Void)?
+    override func mouseDown(with event: NSEvent) { onTap?() }
+}
+
+/// 入力欄の下の 1 行: 効いている絞り込みのチップ（アイコン付き・× で消せる）、知らせ（「#size は使えません」）、次に付けそうなコマンド
 final class ChipBar: NSView {
     static let height: CGFloat = 32
-    private let onNext: (String) -> Void
-    private var nextInserts: [String] = []
 
-    init(chips: [QueryFilters.Chip], notes: [String], next: [FilterCompletion.Item], onNext: @escaping (String) -> Void) {
-        self.onNext = onNext
+    init(chips: [QueryFilters.Chip], notes: [String], next: [FilterCompletion.Item],
+         onNext: @escaping (FilterCompletion.Item) -> Void, onRemove: @escaping (QueryFilters.Command) -> Void) {
         super.init(frame: .zero)
-        let stack = NSStackView()
-        stack.orientation = .horizontal
-        stack.spacing = 6
-        stack.alignment = .centerY
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
-            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
-        for c in chips { stack.addArrangedSubview(Self.pill(c.label, symbol: c.symbol, filled: true)) }
+        let stack = Self.row(in: self)
+        for c in chips {
+            let p = Self.pill(c.label, symbol: c.symbol, filled: true, closable: true)
+            p.onTap = { onRemove(c.command) }
+            p.toolTip = "押すとこの条件を外す"
+            stack.addArrangedSubview(p)
+        }
         for n in notes {
             let l = NSTextField(labelWithString: n)
             l.font = .systemFont(ofSize: 11)
@@ -229,16 +408,10 @@ final class ChipBar: NSView {
             stack.addArrangedSubview(l)
         }
         if !next.isEmpty {
-            let l = NSTextField(labelWithString: "続けて")
-            l.font = .systemFont(ofSize: 11)
-            l.textColor = PanelStyle.faint
-            stack.addArrangedSubview(l)
-            for (i, it) in next.enumerated() {
-                nextInserts.append(it.insert)
+            stack.addArrangedSubview(Self.caption("続けて"))
+            for it in next {
                 let b = Self.pill(it.title + (it.count.map { " \($0)" } ?? ""), symbol: it.symbol, filled: false)
-                let click = NSClickGestureRecognizer(target: self, action: #selector(tapNext(_:)))
-                b.addGestureRecognizer(click)
-                b.identifier = NSUserInterfaceItemIdentifier("\(i)")
+                b.onTap = { onNext(it) }
                 stack.addArrangedSubview(b)
             }
         }
@@ -246,34 +419,85 @@ final class ChipBar: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    @objc private func tapNext(_ g: NSClickGestureRecognizer) {
-        guard let i = g.view?.identifier.flatMap({ Int($0.rawValue) }), nextInserts.indices.contains(i) else { return }
-        onNext(nextInserts[i])
+    static func row(in v: NSView) -> NSStackView {
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.spacing = 6
+        stack.alignment = .centerY
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        v.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 18),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: v.trailingAnchor, constant: -16),
+            stack.centerYAnchor.constraint(equalTo: v.centerYAnchor),
+        ])
+        return stack
     }
 
-    /// 札 1 つ（アイコン＋文字）。filled: 効いている絞り込み、false: 押すと足せる候補（枠だけ）
-    static func pill(_ text: String, symbol name: String, filled: Bool) -> NSView {
+    static func caption(_ s: String, symbol name: String? = nil) -> NSView {
+        let l = NSTextField(labelWithString: s)
+        l.font = .systemFont(ofSize: 11)
+        l.textColor = PanelStyle.faint
+        guard let name else { return l }
+        let icon = NSImageView(image: symbol(name, size: 10, weight: .medium) ?? NSImage())
+        icon.contentTintColor = PanelStyle.faint
+        let st = NSStackView(views: [icon, l])
+        st.spacing = 4
+        return st
+    }
+
+    /// 札 1 つ（アイコン＋文字）。filled: 効いている絞り込み（closable なら右に ×）、false: 押すと足せる候補（枠だけ）
+    static func pill(_ text: String, symbol name: String, filled: Bool, closable: Bool = false, faint: Bool = false) -> TapPill {
         let v = PillView(filled: filled)
         let icon = NSImageView(image: symbol(name, size: 10, weight: .semibold) ?? NSImage())
         icon.contentTintColor = filled ? NSColor(srgbRed: 0.0, green: 0.36, blue: 0.85, alpha: 1) : PanelStyle.subText
         let l = NSTextField(labelWithString: text)
         l.font = .systemFont(ofSize: 11, weight: .medium)
-        l.textColor = filled ? PanelStyle.text : PanelStyle.subText
-        for x in [icon, l] as [NSView] { x.translatesAutoresizingMaskIntoConstraints = false; v.addSubview(x) }
+        l.textColor = filled ? PanelStyle.text : (faint ? PanelStyle.faint : PanelStyle.subText)
+        var views: [NSView] = [icon, l]
+        let x = NSImageView(image: symbol("xmark", size: 8, weight: .bold) ?? NSImage())
+        x.contentTintColor = PanelStyle.faint
+        if closable { views.append(x) }
+        for e in views { e.translatesAutoresizingMaskIntoConstraints = false; v.addSubview(e) }
         NSLayoutConstraint.activate([
             v.heightAnchor.constraint(equalToConstant: 22),
             icon.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 8),
             icon.centerYAnchor.constraint(equalTo: v.centerYAnchor),
             l.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 4),
             l.centerYAnchor.constraint(equalTo: v.centerYAnchor),
-            l.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -9),
         ])
+        if closable {
+            NSLayoutConstraint.activate([
+                x.leadingAnchor.constraint(equalTo: l.trailingAnchor, constant: 5),
+                x.centerYAnchor.constraint(equalTo: v.centerYAnchor),
+                x.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -8),
+            ])
+        } else {
+            l.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -9).isActive = true
+        }
         return v
     }
 }
 
+/// 入力欄の下の 1 行: 「#」を打たずに出した絞り込みの候補（薄く。Tab で先頭を決める、押しても決まる）
+final class SuggestBar: NSView {
+    init(_ items: [FilterSuggest.Suggestion], onPick: @escaping (FilterSuggest.Suggestion) -> Void) {
+        super.init(frame: .zero)
+        let stack = ChipBar.row(in: self)
+        stack.addArrangedSubview(ChipBar.caption("Tab で絞る", symbol: "line.3.horizontal.decrease"))
+        for (i, s) in items.enumerated() {
+            let p = ChipBar.pill(s.title + "  " + s.label, symbol: s.symbol, filled: false, faint: i > 0)
+            p.onTap = { onPick(s) }
+            p.toolTip = "「\(s.word)」から。押すか Tab で絞り込みにする"
+            stack.addArrangedSubview(p)
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+}
+
 /// 札の面（角丸。効いている絞り込みは薄い青の面、候補は枠だけ）
-final class PillView: NSView {
+final class PillView: TapPill {
     let filled: Bool
     init(filled: Bool) { self.filled = filled; super.init(frame: .zero); translatesAutoresizingMaskIntoConstraints = false }
     required init?(coder: NSCoder) { fatalError() }
@@ -342,6 +566,50 @@ enum FilterSnapshots {
         all.setResults([ResultSection(title: "アプリ", symbol: "app.badge", items: appRows)], query: all.filterInput.currentQuery)
         all.select(min(18, max(0, appRows.count - 1)))
         Snapshot.capture(all, dir + "/option-all.png")
+
+        // 「#」の直後: よく使う組み合わせ・保存した名前・コマンド（記録は見本）
+        var mem = FilterMemory()
+        mem.combos = FilterMemory.build(from: (0..<4).map { i in
+            var e = SearchLogEntry(ts: Int(now.timeIntervalSince1970) - i * 86400, query: "#ext pdf #path Downloads", edits: [], candidates: [],
+                                   dismissed: false, notFound: false, ms: 1)
+            e.chosenRank = 1
+            return e
+        } + (0..<2).map { i in
+            var e = SearchLogEntry(ts: Int(now.timeIntervalSince1970) - i * 86400, query: "#kind ss #date 7d", edits: [], candidates: [],
+                                   dismissed: false, notFound: false, ms: 1)
+            e.chosenRank = 1
+            return e
+        }, now: now).combos
+        SavedFilters.set([SavedFilter(name: "仕事のPDF", commands: ["#ext pdf", "#path ~/Documents/サンプル"])])
+        let combos = SearchPanelController()
+        combos.filterInput.context = { ctx }
+        combos.filterInput.now = { now }
+        combos.filterInput.memory = { mem }
+        combos.setQueryText("#")
+        combos.filterInput.refresh()
+        Snapshot.capture(combos, dir + "/option-combos.png")
+        SavedFilters.set([])
+
+        // 「#」を打たない言葉からの候補（「先週の pdf」→ #ext pdf・#date lastweek を薄く）。チップ 1 つ付き
+        let sug = panel("先週の pdf 見積", committed: ["#path ~/Documents/サンプル"])
+        let srows = files.filter { $0.name.hasPrefix("見積書") }.prefix(3).map {
+            RowItem(title: $0.name, sub: RowItem.shortParent($0.path), iconImage: NSWorkspace.shared.icon(for: .pdf), hint: RowItem.fileHint)
+        }
+        sug.setResults([ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: Array(srows))], query: sug.filterInput.currentQuery)
+        Snapshot.capture(sug, dir + "/option-suggest.png")
+
+        // #alias の行き先を選ぶ状態（「黒い画面」→ どれに？）。アプリは OS 付属
+        let al = panel("#alias 黒い画面")
+        al.filterInput.beginAlias("黒い画面", restText: "")
+        let pick = ["/System/Applications/Utilities/Terminal.app", "/System/Applications/Utilities/Console.app",
+                    "/System/Applications/Utilities/Activity Monitor.app"].filter { FileManager.default.fileExists(atPath: $0) }.map {
+            RowItem(title: FileManager.default.displayName(atPath: $0).replacingOccurrences(of: ".app", with: ""), sub: $0, iconPath: $0, hint: "↩ 辞書に足す")
+        }
+        al.setResults([ResultSection(title: "アプリ", symbol: "app.badge", items: pick),
+                       ResultSection(title: "ファイル・フォルダ", symbol: "folder",
+                                     items: [RowItem(title: "黒い画面のメモ_サンプル.md", sub: "~/Documents/サンプル", iconImage: NSWorkspace.shared.icon(for: .plainText), hint: "↩ 辞書に足す")])],
+                      query: al.filterInput.currentQuery)
+        Snapshot.capture(al, dir + "/option-alias.png")
     }
 }
 
@@ -434,6 +702,114 @@ enum FocusTest {
         for _ in 0..<300 { key(c, #selector(NSResponder.moveDown(_:))) }
         expect(c.selectedRow == 330 && c.builtRowCount > 330, "↓ 330 回で行を足す（作った行 \(c.builtRowCount)）")
         expect(focused(c), "一覧を動かしても入力欄が first responder")
+
+        // 7) 「#」を打たない言葉からの候補: Tab でチップにして言葉を外す
+        c = make()
+        type(c, "先週の請求書")
+        expect(c.filterInput.suggestions.first?.title == "#date lastweek", "「先週の請求書」で #date lastweek の候補 \(c.filterInput.suggestions.map(\.title))")
+        expect(c.filterInput.committed.isEmpty, "候補を出すだけでチップにはしない")
+        key(c, #selector(NSResponder.insertTab(_:)))
+        expect(c.filterInput.committed == ["#date lastweek"] && c.queryText == "請求書" && focused(c), "Tab で決める → \(c.filterInput.committed)「\(c.queryText)」")
+        c = make()
+        type(c, "画像")
+        key(c, #selector(NSResponder.moveRight(_:)))
+        expect(c.filterInput.committed == ["#kind image"] && c.queryText.isEmpty, "→ でも決める \(c.filterInput.committed)")
+        c = make()
+        type(c, "見積書")
+        key(c, #selector(NSResponder.insertTab(_:)))
+        expect(c.filterInput.committed.isEmpty && c.queryText == "見積書" && focused(c), "候補が無いときの Tab は何もしない（入力欄のまま）")
+
+        // 8) よく使う組み合わせを Enter でまとめてチップに
+        c = make()
+        var mem = FilterMemory()
+        mem.combos = FilterMemory.build(from: (0..<3).map { _ in
+            var e = SearchLogEntry(ts: Int(Date().timeIntervalSince1970), query: "#ext pdf #path Downloads", edits: [], candidates: [],
+                                   dismissed: false, notFound: false, ms: 1)
+            e.chosenRank = 1
+            return e
+        }).combos
+        c.filterInput.memory = { mem }
+        type(c, "#")
+        key(c, #selector(NSResponder.insertNewline(_:)))
+        expect(c.filterInput.committed == ["#ext pdf", "#path Downloads"] && focused(c), "「#」→ Enter で組み合わせ \(c.filterInput.committed)")
+        key(c, #selector(NSResponder.deleteToBeginningOfLine(_:)))
+        expect(c.filterInput.committed.isEmpty, "⌘⌫ でチップを全部消す")
+        c.filterInput.acceptNext("#ext pdf"); c.filterInput.acceptNext("#date 7d")
+        c.filterInput.removeChip(.ext)
+        expect(c.filterInput.committed == ["#date 7d"] && focused(c), "チップの × でその条件だけ消す \(c.filterInput.committed)")
+
+        // 9) ⌘S（#保存）で名前を付けて保存 → #名前 で呼び出す
+        c = make()
+        var saved: SavedFilter?
+        c.filterInput.onSave = { saved = $0; return false }
+        c.filterInput.acceptNext("#ext md")
+        c.filterInput.beginSave()
+        expect(c.queryText == "#保存 " && c.filterInput.palette?.mode == .save, "⌘S で「#保存 」")
+        type(c, "週報")
+        key(c, #selector(NSResponder.insertNewline(_:)))
+        expect(saved == SavedFilter(name: "週報", commands: ["#ext md"]) && c.queryText.isEmpty, "Enter で保存 \(String(describing: saved))")
+        expect(c.filterInput.notice?.contains("保存しました") == true && c.filterInput.committed == ["#ext md"], "保存した後もチップはそのまま「\(c.filterInput.notice ?? "")」")
+        SavedFilters.set([saved!])
+        c = make()
+        type(c, "#週報 ")
+        expect(c.filterInput.committed == ["#ext md"] && c.queryText.isEmpty, "#週報 で呼び出す \(c.filterInput.committed)")
+        SavedFilters.set([])
+
+        // 10) #alias: 言い方 → 行き先を選ぶ状態 → Enter で辞書に足して元に戻る
+        let target = Candidate.file(FileResult(file: FileEntry(path: NSHomeDirectory() + "/Desktop/見本.png"), score: 1))
+        c = make()
+        var added: [DictEntry] = []
+        var replaceNext = false
+        c.filterInput.onAddDictionary = { added.append($0); return replaceNext }
+        c.filterInput.acceptNext("#kind ss")
+        type(c, "メモ #alias 黒い画面")
+        expect(c.filterInput.palette?.mode == .alias, "「#alias 黒い画面」で辞書に足す一覧")
+        key(c, #selector(NSResponder.insertNewline(_:)))
+        expect(c.filterInput.isPickingAlias && c.queryText.isEmpty && c.filterInput.committed.isEmpty, "Enter で行き先を選ぶ状態")
+        expect(c.filterInput.currentQuery == "黒い画面" && focused(c), "最初は言い方そのもので探す「\(c.filterInput.currentQuery)」")
+        type(c, "見本")
+        expect(c.filterInput.currentQuery == "見本", "打つと名前で絞る")
+        c.setResults([ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: [RowItem(target)])], query: c.filterInput.currentQuery)
+        key(c, #selector(NSResponder.insertNewline(_:)))
+        expect(added.last?.phrase == "黒い画面" && added.last?.target == .file && added.last?.key.hasSuffix("/Desktop/見本.png") == true, "Enter で辞書に足す \(added.map(\.phrase))")
+        expect(!c.filterInput.isPickingAlias && c.filterInput.committed == ["#kind ss"] && c.queryText == "メモ ", "元の入力欄に戻る \(c.filterInput.committed)「\(c.queryText)」")
+        expect(c.filterInput.notice == "黒い画面 → 見本.png を足しました" && focused(c), "「足しました」と出す「\(c.filterInput.notice ?? "")」")
+        // 取りやめ
+        c = make()
+        type(c, "#alias ねこ")
+        key(c, #selector(NSResponder.insertNewline(_:)))
+        let n0 = added.count
+        key(c, #selector(NSResponder.cancelOperation(_:)))
+        expect(!c.filterInput.isPickingAlias, "Esc で取りやめ")
+        expect(added.count == n0 && c.queryText.isEmpty && focused(c), "取りやめたら辞書は変えない")
+        // 上書き
+        c = make()
+        c.filterInput.onAddDictionary = { added.append($0); return replaceNext }
+        replaceNext = true
+        type(c, "#alias 黒い画面")
+        key(c, #selector(NSResponder.insertNewline(_:)))
+        c.setResults([ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: [RowItem(target)])], query: c.filterInput.currentQuery)
+        key(c, #selector(NSResponder.insertNewline(_:)))
+        expect(c.filterInput.notice?.hasSuffix("置き換えました") == true, "同じ言い方は置き換えたと出す「\(c.filterInput.notice ?? "")」")
+        replaceNext = false
+
+        // 11) ⌥Enter: 今の言葉 → 選んだ物を辞書に足す
+        c = make()
+        c.filterInput.onAddDictionary = { added.append($0); return false }
+        var opened = false
+        c.onOpen = { _, _, _ in opened = true }
+        type(c, "ねこの写真")
+        c.setResults([ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: [RowItem(target)])], query: c.filterInput.currentQuery)
+        key(c, #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        expect(added.last?.phrase == "ねこの写真" && opened, "⌥Enter で辞書に足して開く \(added.last?.phrase ?? "")")
+
+        // 12) 辞書に当たった物は候補の先頭の「辞書」の節
+        c = make()
+        c.dictionaryCandidates = { q in q.contains("黒い画面") ? [target] : [] }
+        type(c, "黒い画面")
+        let other = Candidate.file(FileResult(file: FileEntry(path: NSHomeDirectory() + "/Desktop/別.png"), score: 1))
+        c.setResults([ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: [RowItem(other), RowItem(target)])], query: c.filterInput.currentQuery)
+        expect(c.resultCount == 2 && c.firstResultPath == target.path, "辞書の物を先頭に、下の節からは外す（\(c.resultCount) 件）")
 
         print("確かめ \(checks - fails)/\(checks)")
         return fails == 0

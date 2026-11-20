@@ -244,6 +244,8 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     static var maxRows = 9
 
     var onQuery: ((String) -> Void)?
+    /// 辞書（PhraseDictionary）に当たったアプリ・ファイル。候補の先頭の「辞書」の節に出す（AppDelegate が DictionaryLookup で渡す）
+    var dictionaryCandidates: ((String) -> [Candidate])?
     /// (入力, 候補, ⌘ を押していたか)。⌘Enter は Finder に表示
     var onOpen: ((String, Candidate, Bool) -> Void)?
     var onHide: (() -> Void)?
@@ -301,12 +303,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         field.font = .systemFont(ofSize: 24, weight: .regular)
         field.textColor = PanelStyle.text
         // 入力欄が空のときの案内文: 「Raiden 検索」は薄いグレー、「filter: #」は # の使い方の手がかりとしてさらに薄く小さく
-        let ph = NSMutableAttributedString(string: "Raiden 検索", attributes: [
-            .foregroundColor: PanelStyle.faint, .font: NSFont.systemFont(ofSize: 24)])
-        ph.append(NSAttributedString(string: "   filter: #", attributes: [
-            .foregroundColor: NSColor(white: 0.70, alpha: 1), .font: NSFont.systemFont(ofSize: 15),
-            .baselineOffset: 2]))
-        field.placeholderAttributedString = ph
+        field.placeholderAttributedString = Self.defaultPlaceholder
         field.delegate = self
         field.cell?.usesSingleLineMode = true
         statusIcon.contentTintColor = PanelStyle.faint
@@ -319,6 +316,28 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             st.spacing = 0
             st.alignment = .leading
         }
+        setupList(sep: sep, glyph: glyph)
+    }
+
+    /// 入力欄が空のときの案内文: 「Raiden 検索」は薄いグレー、「filter: #」は # の使い方の手がかりとしてさらに薄く小さく
+    static var defaultPlaceholder: NSAttributedString {
+        let ph = NSMutableAttributedString(string: "Raiden 検索", attributes: [
+            .foregroundColor: PanelStyle.faint, .font: NSFont.systemFont(ofSize: 24)])
+        ph.append(NSAttributedString(string: "   filter: #", attributes: [
+            .foregroundColor: NSColor(white: 0.70, alpha: 1), .font: NSFont.systemFont(ofSize: 15),
+            .baselineOffset: 2]))
+        return ph
+    }
+
+    /// 案内文を差し替える（#alias の行き先を選んでいる間は「黒い画面 → どれに？」）。nil でいつもの案内
+    func setPlaceholder(_ text: String?) {
+        guard let text else { field.placeholderAttributedString = Self.defaultPlaceholder; return }
+        field.placeholderAttributedString = NSAttributedString(string: text, attributes: [
+            .foregroundColor: PanelStyle.faint, .font: NSFont.systemFont(ofSize: 24)])
+    }
+
+    private func setupList(sep: HairlineView, glyph: NSImageView) {
+        let veil = veilView!
         // 候補の場所はスクロールできる（絞り込みで全部出すとき）。中身は上から並べる
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
@@ -381,13 +400,18 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         // ⌘Enter は入力欄の doCommandBy に来ないことがあるので、ここで拾う（日本語入力の変換中は触らない）
+        // ⌥Enter（辞書に足して開く）と ⌘S（今の条件に名前を付けて保存）も同じ
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] ev in
-            guard let self, self.panel.isKeyWindow,
-                  ev.keyCode == 36 || ev.keyCode == 76,
-                  ev.modifierFlags.contains(.command) else { return ev }
+            guard let self, self.panel.isKeyWindow else { return ev }
             if let tv = self.panel.firstResponder as? NSTextView, tv.hasMarkedText() { return ev }
-            self.openSelected(reveal: true)
-            return nil
+            let mods = ev.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if ev.keyCode == 36 || ev.keyCode == 76 {
+                if mods.contains(.command) { self.openSelected(reveal: true); return nil }
+                if mods.contains(.option) { self.openSelected(reveal: false, addToDictionary: true); return nil }
+                return ev
+            }
+            if ev.keyCode == 1 && mods == .command { self.filterInput.beginSave(); return nil }   // ⌘S
+            return ev
         }
         filterInput.attach(self, field: field, content: content)
     }
@@ -470,7 +494,24 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     func setResults(_ sections: [ResultSection], query: String, notFound: Bool = false,
                     extra: [(NSView, CGFloat)] = [], palette: Bool = false) {
         guard query == filterInput.currentQuery, palette || filterInput.palette == nil else { return }
-        let secs = sections.filter { !$0.items.isEmpty }
+        var secs = sections.filter { !$0.items.isEmpty }
+        var notFound = notFound
+        if !palette && filterInput.isPickingAlias {
+            // 辞書の行き先を選ぶ間はアプリを先に
+            secs.sort { a, b in
+                let aa = a.items.first.map { if case .app = $0.candidate { return true } else { return false } } ?? false
+                let bb = b.items.first.map { if case .app = $0.candidate { return true } else { return false } } ?? false
+                return aa && !bb
+            }
+            notFound = false
+        } else if !palette, let dict = dictionaryCandidates?(query), !dict.isEmpty {
+            // 辞書に当たった物を先頭に（下の節からは外す）
+            let paths = Set(dict.map(\.path))
+            secs = secs.map { var x = $0; x.items.removeAll { $0.candidate.map { paths.contains($0.path) } ?? false }; return x }
+                .filter { !$0.items.isEmpty }
+            secs.insert(ResultSection(title: "辞書", symbol: "book", items: dict.map(RowItem.init)), at: 0)
+            notFound = false
+        }
         // 絞り込みのコマンドが効いているときは全部出すので、節の見出しに件数を出す
         let filtered = !palette && QueryFilters.parse(query, now: filterInput.now()).isActive
         let showHeaders = secs.count > 1 || notFound || filtered
@@ -585,6 +626,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
 
     /// 候補の数（確かめ用）
     var resultCount: Int { results.count }
+    var firstResultPath: String? { results.first?.candidate?.path }
     var builtRowCount: Int { rows.count }
     var scrollOffset: CGFloat { scroll.contentView.bounds.minY }
 
@@ -627,8 +669,11 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         for (i, r) in rows.enumerated() where r.selected != (i == selected) { r.selected = i == selected }
     }
 
-    private func openSelected(reveal: Bool) {
+    /// addToDictionary: ⌥Enter。今の言葉 → 選んだ物を辞書に足してから開く。#alias の行き先を選んでいる間は開かずに辞書に足す
+    private func openSelected(reveal: Bool, addToDictionary: Bool = false) {
         guard results.indices.contains(selected), let c = results[selected].candidate else { return }
+        if filterInput.isPickingAlias { filterInput.pickAlias(c); return }
+        if addToDictionary { filterInput.addToDictionary(c) }
         let q = QueryFilters.parse(filterInput.currentQuery).text   // 覚えるのはコマンドを抜いた言葉
         hide()
         onOpen?(q, c, reveal)
@@ -651,7 +696,11 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             return true
         case #selector(NSResponder.insertNewline(_:)):
             // 日本語入力の変換中の Enter は確定に使う（ここには来ない）
-            openSelected(reveal: NSApp.currentEvent?.modifierFlags.contains(.command) ?? false)
+            let mods = NSApp.currentEvent?.modifierFlags ?? []
+            openSelected(reveal: mods.contains(.command), addToDictionary: mods.contains(.option))
+            return true
+        case #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)):
+            openSelected(reveal: false, addToDictionary: true)   // ⌥Enter
             return true
         case #selector(NSResponder.cancelOperation(_:)):
             hide()

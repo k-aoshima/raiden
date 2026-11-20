@@ -310,8 +310,8 @@ macOS 26 以降は Liquid Glass（`NSGlassEffectView`、白寄りの tint）、�
   - 除外する名前の初期値を増やしたときは、前の settings.json に増えた分だけを足す（`knownExcludeDefaults` に足した初期値を覚え、ユーザーが消した物は戻さない）。
   - フォルダの説明文の「中身」は同じ数の種類を名前順に並べる（辞書の順がプロセスごとに変わって、十数個のフォルダを毎回作り直していた）。
 - **一般**: 入力欄を開くキー（押して登録。システムのショートカットと重なれば知らせ、ほかのアプリが持っていて登録できなければ前のキーに戻す）、候補の最大件数、アプリとファイルの節の並び（自動／アプリ先／ファイル先）、透明度、ログイン時に起動、モデルを解放するまでの時間。
-- **学習**: 選んだ結果を覚える オン・オフ、覚えた例の一覧（言い方 → 物・回数・最後に使った日）と 1 件ずつの削除・全部消す、`app-notes.json` の編集（保存するとアプリの説明文を作り直す）。
-- **記録**: 検索の記録を残す オン・オフ、残す日数（初期 90 日）、記録を全部消す、ログのフォルダを開く、最近の検索、見つからなかった言い方（「正解を教える…」で選んだ物を例として覚える）。
+- **学習**（SettingsLearning.swift）: 選んだ結果を覚える オン・オフ、辞書の表（言い方 → アプリ / ファイル・フォルダ / 「#」の条件。足す・直す・消す）、保存した絞り込み（`#名前` → コマンド。足す・消す）、よく使う「#」の組み合わせ（検索の記録から。名前を付けて保存へ）、選んで開いた記録（言い方 → 物・回数・最後に使った日）と 1 件ずつの削除・全部消す。
+- **記録**: 検索の記録を残す オン・オフ、残す日数（初期 90 日）、記録を全部消す、ログのフォルダを開く、最近の検索、見つからなかった言い方（「辞書に足す…」で行き先を選ぶと辞書に足す）。
 
 ### 記録（app/Sources/RaidenCore/SearchLog.swift, RaidenLog.swift）
 
@@ -320,7 +320,7 @@ macOS 26 以降は Liquid Glass（`NSGlassEffectView`、白寄りの tint）、�
 - 検索の記録: raiden.sqlite の `search_log` 表。入力欄を開いてから閉じるまでを 1 行に、日時・入力の最終形・途中の打ち直し（`[{"q", "t": 開いてからの ms}]`）・出した候補（画面の並び順に種類・bundle id かパス・名前・点数・節）・選んだ物とその順位（教えた物は 0）・選ばずに閉じたか・「見つかりません」（全体・アプリの節・ファイルの節）・最後の検索にかかった時間。残す日数より古い行は起動時と 1 日 1 回消す。`raiden-eval --log-eval --store <コピー>` で、選んだ記録を今の並べ方で回し直して当時の順位と比べられる。
 - 動作の記録: `~/Library/Logs/Raiden/raiden.log`（起動・一覧の作り直し・ベクトル化の件数と時間・FSEvents の履歴が途切れて見直した場所・範囲や設定の変更・エラー）。1MB で `raiden.1.log`〜`raiden.5.log` に回し、それより古いものと 30 日より古いものは消す。
 
-### 絞り込みのコマンド（app/Sources/RaidenCore/QueryFilters.swift, FilterCompletion.swift, app/Sources/Raiden/FilterUI.swift）
+### 絞り込みのコマンド（app/Sources/RaidenCore/QueryFilters.swift, FilterCompletion.swift, FilterMemory.swift, PhraseDictionary.swift, app/Sources/Raiden/FilterUI.swift, DictionaryLookup.swift, SettingsLearning.swift）
 
 入力欄に `#kind ss #date 7d 請求書` のように書くと、当てはまらない物を候補から外す（QueryIntent の「昨日の」「PDFの」は言い方からの推測で点数を上下するだけだが、こちらは確実な絞り込み）。名前は Spotlight（kind / date / modified / created）と find / fd（#type #ext #path #name）にそろえた。
 
@@ -329,21 +329,72 @@ macOS 26 以降は Liquid Glass（`NSGlassEffectView`、白寄りの tint）、�
 | `#kind` | `#k` `#種類` | pdf, image, screenshot / ss, movie / video, music / audio, document / doc, spreadsheet / xls, presentation / ppt, md, text, code, archive / zip, 3d, folder, app（種類の名前でなければ拡張子） | 種類 |
 | `#type` | `#t`（別名 `#app` = `#type app`、`#folder` = `#type d`、`#file` = `#type f`。`#t #app` も `#type app`） | f（ファイル）, d（フォルダ）, app（アプリ） | 対象 |
 | `#ext` | `#e` `#拡張子` | pdf, docx, pdf,docx | 拡張子 |
-| `#date` | `#日付` | today, yesterday, 7d, 2w, 3m, 1y, 2026, 2026-11, 2026-11-14, 11-14, 11-14..11-16, 今日・昨日・今週・先週・今月・先月・今年・去年 | 使った日・変更日・追加日・作成日のどれかが入る |
+| `#date` | `#日付` | today, yesterday, 7d, 2w, 3m, 1y, 2026, 2026-11, 2026-11-14, 11-14, 11-14..11-16, 今日・昨日・今週・先週・今月・先月・今年・去年（thisweek, lastweek, thismonth, lastmonth, thisyear, lastyear も） | 使った日・変更日・追加日・作成日のどれかが入る |
 | `#modified` | `#m` `#変更日` | 同上 | 変更日だけ |
 | `#created` | `#c` `#作成日` | 同上 | 作成日だけ |
 | `#path` | `#p` `#in` `#場所` | Desktop, ~/Documents/仕事, "Obsidian Vault" | その下だけ（`~/` `/` で始まればその下、名前なら親フォルダの名前の一部、`a/b` ならパスの一部） |
 | `#name` | `#n` `#名前` | 請求 | 名前にその文字を含む物だけ（文字の一致） |
+| `#with` | `#w` `#一緒` | ~/Documents/見積書.pdf（ファイル 1 つ） | そのファイルと同じころに使った物 |
+| `#near` | `#nr` `#近く` | ~/Project/raiden/README.md（ファイルかフォルダ 1 つ） | そのファイルと同じプロジェクトの物 |
+| `#保存` | `#save` | 名前 | 今のチップに名前を付けて保存（絞り込みには使わない） |
+| `#alias` | `#dict` `#辞書` | 言い方 | 辞書に足す（絞り込みには使わない。下の「辞書」） |
+| `#<保存した名前>` | | | 保存した中身のコマンドに広げる（`#仕事のPDF` → `#ext pdf #path ~/Documents/仕事`） |
 
-- 違うコマンドどうしは「かつ」、同じコマンドを 2 回・カンマ区切りは「または」。`#date` などを 2 回書いたら後の方で上書き（範囲は `11-14..11-16`）。
-- アプリ（`#type app`）は `#kind`（アプリ以外）・`#ext`・`#date`・`#path` と一緒に使えない（入力欄の下に知らせる）。`#type d` と `#path`・`#date` は使える。
+- 違うコマンドどうしは「かつ」、同じコマンドを 2 回・カンマ区切りは「または」。`#date` などを 2 回書いたら後の方で上書き（範囲は `11-14..11-16`）。`#with` `#near` も値は 1 つで後の方。
+- アプリ（`#type app`）は `#kind`（アプリ以外）・`#ext`・`#date`・`#path`・`#with`・`#near` と一緒に使えない（入力欄の下に知らせる）。`#type d` と `#path`・`#date` は使える。
 - コマンドを抜いた残りがふつうの曖昧検索。残りが空なら新しい順（使った日・変更日の新しい方）。「見つからない」の判定は残った物の中で行い、0 件なら「条件に合う物はありません」（近い日付の代わりは出さない）。
-- コマンドと読むのは入力の先頭か空白の直後の「#」＋文字だけ。全角の「＃」も同じ（日本語入力のまま打てる）。「C#」「#1」は普通の文字。前の版の「-kind」の形は受け付けない。知らないコマンドや読めない値は絞り込まずに「#size は使えません」と出す。打っている途中（「#」「#da」「#date」「#date 2026-」）は絞りも知らせもしない。
-- 入力欄: 「#」でコマンドの一覧、「#date 」で値の候補（件数つき。ほかの条件の中で数え、0 件は下に回す）。↑↓ で選んで Enter / Tab、Esc で一覧だけ閉じる。打ちかけの値はゴーストテキストで補い → / Tab で決める。値まで決まったコマンドはチップにして入力欄の下に並べ、入力欄が空のときの Backspace で最後のチップを消す。チップの横に次に付けそうなコマンド（`#kind ss` の後の `#date 今日`）を小さく出す。
+- コマンドと読むのは入力の先頭か空白の直後の「#」＋文字だけ。全角の「＃」も同じ（日本語入力のまま打てる）。「C#」「#1」は普通の文字。知らないコマンドや読めない値は絞り込まずに「#size は使えません」と出す。打っている途中（「#」「#da」「#date」「#date 2026-」「#仕事の」）は絞りも知らせもしない。
+
+#### 検索の土台の担当が読む型（`QueryFilters.parse` の結果）
+
+- `withPath: String?` / `nearPath: String?`: `#with` / `#near` の値。`~` `/` で始まれば `~` を広げた絶対パス（NFC）、そうでなければ書かれたとおり（名前）。`hasRelation` はどちらかがあるとき true。`isActive` に入り、`allowsApps` は false になる。
+- `matches(_:)`（手元の一覧で当てはまるか）は `withPath` / `nearPath` を見ない。実行（Spotlight への問い合わせ）は土台の側で行う。
+- チップは `Chip(command: .with, label: "一緒に使った: 見積書.pdf")`、`Chip(command: .near, label: "同じプロジェクト: 見積書.pdf")`。
+- `saving` / `aliasing`: `#保存` / `#alias` の後ろの文字（入力欄が扱う。`pending` は "save" / "alias"）。
+- 保存した名前（`#仕事のPDF`）は `parse` の中で中身に広がる（`SavedFilters` の置き場を引く）。Engine には広げた後と同じ結果が渡る。
+
+#### 入力欄の動き
+
+- 「#」: 先頭に保存した名前（`#仕事のPDF`、最大 4）とよく使う組み合わせ（`#ext pdf #path Downloads`、最大 3）、続けてコマンドの一覧（チップがあれば最後に `#保存`、いつも `#alias`）。組み合わせ・保存した名前を Enter で決めると、中身をまとめてチップにする（今のチップを含む組み合わせは残りだけ）。
+- 「#date 」で値の候補（件数つき。ほかの条件の中で数え、0 件は下に回す）。↑↓ で選んで Enter / Tab、Esc で一覧だけ閉じる。打ちかけの値はゴーストテキストで補い → / Tab で決める。
+- 値の候補の並び: よく使う値（検索の記録から）→ 件数のある値 → 0 件。`#ext` は手元に多い拡張子の順、`#path` / `#in` はよく使う場所（`#path` に書いた場所と選んだファイルの親フォルダ。☆と「よく使う」）→ 中身の多いフォルダ → 最近使ったフォルダ、`#with` / `#near` は最近選んだファイルと最近使った物（名前の一部で絞る。件数は出さない）。
+- 値まで決まったコマンドはチップにして入力欄の下に並べる。チップの × で 1 つ、入力欄が空のときの Backspace で最後の 1 つ、⌘Backspace で全部を消す。チップの横に次に付けそうなコマンド（よく使う組み合わせの続き、`#kind ss` の後の `#date 今日`）を小さく出す。
+- 「#」を打たない言葉からの候補: 「pdf」→ `#ext pdf`、「先週」→ `#date lastweek`、「画像」→ `#kind image`、「ダウンロード」→ `#path Downloads`、保存した名前・辞書の条件・よく使う場所の名前（`FilterSuggest`）。入力欄の下に「Tab で絞る」と薄く出し（最大 3。後ろの言葉から）、Tab / →（入力の最後で）で先頭を決めるか、押して決める。決めるとチップにして、入力からその言葉（と直後の「の」「で」「に」「から」）を外す。決めない限り絞らない。英数字の言葉は前後が英数字でないときだけ、同じコマンドがチップにあれば出さない。
+- 保存: ⌘S（入力欄が「#保存 」になる）か `#保存 名前` → Enter で今のチップを保存する。同じ名前は上書き（入力欄に「置き換えました」）。名前はコマンドの名前・別名と同じもの、空白・`/ - . ,` を含むもの、文字で始まらないものは使えない。保存先は settings.json の `savedFilters`（`[{"name": "仕事のPDF", "commands": ["#ext pdf", "#path 仕事"]}]`）。設定の「学習」でも足す・消すができる。
 - コマンドが 1 つでも効いているときは候補の上限（設定の最大件数）で切らず、当てはまる物を全部出す。パネルは画面の高さの 65% まで伸び、それ以上はスクロール。行は 200 件ずつ作り、↑↓ で選択行まで自動でスクロール。節の見出しに件数（「アプリ 133件」）。
-- 件数は絞り込みと同じ `QueryFilters.matches` で数える。手元 989 件で 1 回 0.1〜1.8ms（`raiden-eval --test-filters`）。
-- 解析の結果（どのコマンドを何と読んだか）は `Judged.filters` に入る（検索の記録用）。よく使う値を上に出す口は `FilterCompletion.usage`（SearchLog が入ったら差し込む）。
-- 確かめ: `raiden-eval --test-filters`（解析・一覧・値の候補・ゴースト・件数、133 項目。入力欄のフォーカスと打鍵は `Raiden --test-focus`）。見本は `docs/ui/option-*.png`。
+
+#### 件数を出す口（`FilterSource`）
+
+入力欄は件数を `FilterSource` からだけ聞く。今は手元の一覧（`FilterContext`、`Engine.filterContext`）が答える。一覧が無くなったら、Spotlight 側の担当がこれに合わせた物を作って `FilterInput.context` に渡す。
+
+- `appCount`、`counts(_ cmd:, values:, within:, now:) -> [String: Int]?`（値ごとの件数。nil なら件数なしで候補だけ出す）、`total(_:) -> Int?`、`topExtensions(within:limit:)`、`topFolders(within:limit:)`、`recentFolders(limit:)`、`recentFiles(limit:)`（`#with` `#near` の候補）。使わない物は書かなくてよい（既定は nil / []）。
+- 答えが後から届くときは、届いたら `FilterInput.sourceDidUpdate()` を呼ぶと一覧を出し直す。
+- 口が無い・数えられないときは、`#ext` は覚えた値と決まった一覧、`#path` はよく使う場所か `~/Desktop` `~/Documents` `~/Downloads` で出す。
+
+#### 覚えた使い方（`FilterMemory`）
+
+`FilterMemory.build(from: store.searchLog(limit: 3000))` で search_log から作る（AppDelegate が起動時と記録を書くたびに裏で作り直す。Store には手を足していない）。1 回ごとに選んで開いたら 1、選ばずに閉じたら 0.4 を、30 日で半分になるように足す。
+
+- `combos`: 使った「#」の組み合わせ（コマンドの順と別名をそろえる。`#e pdf #in Downloads` も `#ext pdf #path Downloads`）。点数 0.8 以上だけ。設定の「学習」にも出し、名前を付けて保存できる。
+- `values`（よく使う値）、`folders`（よく使う場所）、`files`（最近選んだファイル）、`missed`（選ばずに閉じた・見つからなかった言い方。`#alias` の候補）。
+
+#### 辞書（`PhraseDictionary`、`DictEntry`）
+
+言い方 → アプリ / ファイル・フォルダ / 「#」の条件。settings.json の `dictionary` に入る（`[{"phrase": "黒い画面", "target": "app", "key": "/System/Applications/Utilities/Terminal.app", "name": "ターミナル"}]`。target は app / file / filter、key は .app のパス（bundle id でも引ける）・ファイルの絶対パス・コマンドの文字）。AppDelegate が設定を読んだ・変えたときに `PhraseDictionary.set` で置き場に入れる。
+
+- 一致: `PhraseDictionary.matches(query)` が、入力（コマンドを抜き、大文字小文字・全角半角・空白をそろえる）にその言い方が含まれる行を、長い言い方から返す。
+- アプリ・ファイルは候補の先頭の「辞書」の節に出し、下の節からは外す（`SearchPanelController.dictionaryCandidates` に AppDelegate が `DictionaryLookup.candidates` を渡す。無くなったアプリ・ファイルは出さない）。条件は「#」を打たない言葉からの候補に「辞書」として出す（決めたときだけ絞る）。
+- 足し方（同じ言い方があれば聞かずに置き換え、「置き換えました」と出す。`PhraseDictionary.adding`）:
+  - `#alias 言い方` → Enter: 入力欄が「「言い方」→ どれに？」の選ぶ状態になる。最初は言い方そのもので探した候補（アプリが先、続けてファイル・フォルダ）を出し、打てば名前で絞れる。↑↓ で選んで Enter で辞書に足し、入力欄に「黒い画面 → ターミナル を足しました」と出して元の入力とチップに戻る。Esc で取りやめ。`#alias ` の直後は、最近選ばずに閉じた・見つからなかった言い方を候補に出す。
+  - 候補を選ぶときに ⌥Enter: 今の言葉（コマンドを抜いた物）→ 選んだ物を辞書に足してから開く。
+  - 設定の「学習」の辞書の表（足す・直す・消す。行き先は「選ぶ…」でアプリ・ファイルを選ぶか、条件を書く）と、「記録」の見つからなかった言い方の「辞書に足す…」。
+- 検索の土台の担当へ: 辞書の保存と読み出しは settings.json の `dictionary`（`RaidenSettings.dictionary`）にした。Store に移すなら `PhraseDictionary.set` に入れ直す所（AppDelegate.loadSettings / updateSettings）と `onAddDictionary` を差し替える。
+
+#### 確かめ
+
+- `raiden-eval --test-filters`: 解析・一覧・値の候補・ゴースト・件数（133 項目）に、候補の並び（口の差し替え）・よく使う組み合わせ（search_log を一時の Store に書いて読み直すまで）・保存した名前・言葉からの候補・`#with` `#near`・辞書の一致・`#alias` の 128 項目（`raiden-eval/FilterLearningEval.swift`）を足して 261 項目。モデルは読まない。
+- `Raiden --test-focus`: 入力欄のフォーカスと打鍵（46 項目。言葉からの候補を Tab / → で決める、組み合わせを Enter、⌘⌫・チップの ×、⌘S で保存して `#名前` で呼ぶ、`#alias` の切り替え・足す・取りやめ・置き換え、⌥Enter、辞書の節）。
+- 見本は `docs/ui/option-*.png`（`option-combos.png`「#」の直後、`option-suggest.png` 言葉からの候補とチップ、`option-alias.png` 辞書の行き先を選ぶ状態）。
 
 ### メモリの設定
 

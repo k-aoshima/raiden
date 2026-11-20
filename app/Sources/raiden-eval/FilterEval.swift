@@ -104,7 +104,8 @@ func runFilterTests() {
     func pal(_ t: String, committed: [String] = [], ctx: FilterContext? = nil) -> FilterCompletion.Palette? {
         FilterCompletion.palette(for: t, committed: committed, context: ctx, now: testNow)
     }
-    expect(pal("#")?.mode == .commands && pal("#")?.items.count == FilterCompletion.commandItems.count, "「-」で全部の一覧")
+    expect(pal("#")?.mode == .commands && pal("#")?.items.filter { $0.commits.isEmpty && $0.title != "#alias" }.count == FilterCompletion.commandItems.count
+           && pal("#")?.items.last?.title == "#alias", "「#」で全部の一覧（最後に #alias）")
     expect(pal("請求書 #")?.mode == .commands, "空白の直後の「#」")
     expect(pal("＃")?.mode == .commands && pal("＃da")?.items.map(\.title) == ["#date"], "全角の「＃」でも一覧")
     expect(pal("C#") == nil && pal("#1") == nil, "「C#」「#1」は一覧を出さない")
@@ -199,6 +200,9 @@ func runFilterTests() {
     let nx2 = FilterCompletion.next(p("#date 7d"), context: ctx, now: testNow)
     expect(nx2.first?.insert.hasPrefix("#kind") == true, "#date の後は #kind \(nx2.map(\.insert))")
 
+    let (lc, lf) = runFilterLearningTests(ctx: ctx)
+    checks += lc; failures += lf
+    print("（うち 覚える・保存・言葉からの候補・#with #near・辞書・#alias の確かめ \(lc - lf)/\(lc)）")
     print("確かめ \(checks - failures)/\(checks)")
 
     // 件数を数える速さ（実際の一覧）
