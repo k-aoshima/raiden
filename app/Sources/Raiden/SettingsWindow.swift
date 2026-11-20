@@ -223,13 +223,13 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
         let st = host.indexStatus
         let nf = NumberFormatter(); nf.numberStyle = .decimal
         if let (d, t) = st.embedding {
-            label.stringValue = "ベクトルを作成中 \(nf.string(from: d as NSNumber) ?? "\(d)")/\(nf.string(from: t as NSNumber) ?? "\(t)")"
+            label.stringValue = "1/2 名前と場所で意味を登録中 \(nf.string(from: d as NSNumber) ?? "\(d)")/\(nf.string(from: t as NSNumber) ?? "\(t)")（終わると次は中身を読みます）"
             statusIcon?.image = symbol("arrow.triangle.2.circlepath", size: 14, weight: .medium)
             statusIcon?.contentTintColor = SettingsStyle.accent
             statusBar?.isHidden = false
             statusBar?.maxValue = Double(max(t, 1)); statusBar?.doubleValue = Double(d)
         } else if let (d, t) = st.refining, !st.scanning {
-            label.stringValue = "\(nf.string(from: st.count as NSNumber) ?? "\(st.count)") 件・中身を読んで更新中 \(nf.string(from: d as NSNumber) ?? "\(d)")/\(nf.string(from: t as NSNumber) ?? "\(t)")"
+            label.stringValue = "2/2 PDF・文書の中身を読んで登録し直し中 \(nf.string(from: d as NSNumber) ?? "\(d)")/\(nf.string(from: t as NSNumber) ?? "\(t)")（検索はもう使えます）"
             statusIcon?.image = symbol("doc.text.magnifyingglass", size: 14, weight: .medium)
             statusIcon?.contentTintColor = SettingsStyle.subText
             statusBar?.isHidden = false
@@ -517,7 +517,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
         guard let host else { return nil }
         if let (p, n) = largeOff.first {
             let e = ScopeCounter.estimate(n)
-            return "「\(p)」は \(Self.num(n)) 件\(n >= 200_000 ? "以上" : "")あるので、オフのまま追加しました。オンにすると、メモリが約 \(Self.num(e.memoryMB))MB 増え、初回のベクトル作成に約 \(Self.num(e.minutes)) 分かかります（その間も検索は使えます）。"
+            return "「\(p)」は \(Self.num(n)) 件\(n >= 200_000 ? "以上" : "")あるので、オフのまま追加しました。オンにすると、メモリが約 \(Self.num(e.memoryMB))MB、データベースが約 \(Self.num(e.dbMB))MB 増え、最初のベクトル作成に約 \(Self.num(e.minutes)) 分かかります（作成中も名前では探せます）。"
         }
         var total = 0
         for f in s.folders where f.enabled {
@@ -526,7 +526,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
         }
         guard total > ScopeCounter.warnAbove else { return nil }
         let e = ScopeCounter.estimate(total)
-        return "検索するのは合わせて約 \(Self.num(total)) 件です。5 万件を超えると、メモリが約 \(Self.num(e.memoryMB))MB になり、新しく入った物のベクトル作成に最大で約 \(Self.num(e.minutes)) 分かかります。狭いフォルダに分けるか、除外を足すのがおすすめです。"
+        return "検索するのは合わせて約 \(Self.num(total)) 件です。5 万件を超えると、メモリが約 \(Self.num(e.memoryMB))MB、データベースが約 \(Self.num(e.dbMB))MB になり、最初のベクトル作成に約 \(Self.num(e.minutes)) 分かかります（作成中も名前では探せます）。狭いフォルダに分けるか、除外を足すのがおすすめです。"
     }
 
     private func addFolders() {

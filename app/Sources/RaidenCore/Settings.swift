@@ -197,10 +197,10 @@ public enum ScopeCounter {
         return Result(count: n, capped: false)
     }
 
-    /// 広すぎる場所の目安。メモリは 1 件約 8.5KB、初回のベクトル化は 1 件約 17ms（raiden-eval --scope-run で ~/Project 167,538 件:
-    /// footprint 1.37GB、短い説明 11.8ms/件 ＋ 中身を読む 14% の物は作り直しに 34ms/件）
+    /// 広すぎる場所の目安。ANE 版のアプリに ~/Project 168,530 件を入れた実測（2026-11-20）から:
+    /// footprint 1,311MB（1 件約 8.0KB）、DB 102MB（1 件約 0.6KB）、初回のベクトル化 749 秒（短い説明と中身を読む作り直しを合わせて 1 件約 4.5ms）
     public static let warnAbove = 50_000
-    public static func estimate(_ n: Int) -> (memoryMB: Int, minutes: Int) {
-        (Int(Double(n) * 8.5 / 1024.0), Int((Double(n) * 0.017 / 60).rounded(.up)))
+    public static func estimate(_ n: Int) -> (memoryMB: Int, dbMB: Int, minutes: Int) {
+        (Int(Double(n) * 8.0 / 1024.0), Int(Double(n) * 0.6 / 1024.0), Int((Double(n) * 0.0045 / 60).rounded(.up)))
     }
 }
