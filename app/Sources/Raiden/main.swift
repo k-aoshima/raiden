@@ -237,6 +237,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !idx.hasPending {
             pumping = false
             rlog(String(format: "ベクトル化を終えた %.1fs（最後の一覧で 短い説明 %d 件・中身あり %d 件）", Date().timeIntervalSince(pumpStart.0), idx.shortTotal, idx.fullTotal))
+            if let n = store?.compactIfBloated(), n > 0 { rlog("データベースの空き \(n) ページを詰めた") }
             return
         }
         let gap: TimeInterval = idx.shortDone >= idx.shortTotal ? 0.05 : 0

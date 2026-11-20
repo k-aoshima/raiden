@@ -48,6 +48,25 @@ public final class Store {
         migratedFiles = migrateFileVectorsToBinary()
         // 前の起動の VACUUM や書き込みが -wal に残っていると本体が大きいままなので、起動のたびに書き戻す（変換済みの DB も）
         try? exec("PRAGMA wal_checkpoint(TRUNCATE)")
+        compactIfBloated()
+    }
+
+    /// 空いたページが中身より多く 4MB を超えていたら VACUUM で詰めて、-wal も本体へ書き戻す。
+    /// ベクトルの作り直し（モデルを替えた時など）で数十 MB の空きが残り、auto_vacuum が無いのでファイルが大きいままになるため。
+    /// 中身は 1,000 件で 1MB ほどなので、VACUUM は数十 ms。詰めたらそのページ数を返す（詰めなければ 0）
+    @discardableResult
+    public func compactIfBloated() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        func int(_ sql: String) -> Int {
+            guard let st = prepare(sql) else { return 0 }
+            defer { sqlite3_finalize(st) }
+            return sqlite3_step(st) == SQLITE_ROW ? Int(sqlite3_column_int64(st, 0)) : 0
+        }
+        let pages = int("PRAGMA page_count"), free = int("PRAGMA freelist_count"), size = int("PRAGMA page_size")
+        guard free * size > 4 << 20, free > pages - free else { return 0 }
+        try? exec("VACUUM")
+        try? exec("PRAGMA wal_checkpoint(TRUNCATE)")
+        return free
     }
 
     /// 起動時に float32 から 2 値へ変換したファイル・フォルダの点の数（0 なら変換済み・新しい DB）
