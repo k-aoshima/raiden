@@ -215,7 +215,15 @@ public final class SpotlightSearch: @unchecked Sendable {
         if !r.exts.isEmpty { cs.append(or(r.exts.sorted().map(extClause))) }
         if r.types == ["d"] { cs.append("kMDItemContentType == \"public.folder\"") }
         if r.types == ["f"] { cs.append("kMDItemContentType != \"public.folder\"") }
-        for (c, rg) in r.dates { cs.append(or(dateAttrs(c).map { rangeClause($0, rg) })) }
+        for (c, rg) in r.dates {
+            let attrs = dateAttrs(c)
+            cs.append(or(attrs.map { rangeClause($0, rg) }))
+            // #date は一番新しい日で見る（QueryFilters.dateHit）: どの日付も範囲の後ろに無い物だけ。
+            // 無い属性の比較は「!」でひっくり返しても偽のままなので、「!= *」（属性が無い）を「または」で足す
+            if attrs.count > 1, rg.upperBound < Int.max {
+                cs.append(attrs.map { "(\($0) <= \(iso(rg.upperBound)) || \($0) != *)" }.joined(separator: " && "))
+            }
+        }
         if let t = withTime { cs.append(rangeClause("kMDItemLastUsedDate", (t - withWindow)...(t + withWindow))) }
         if r.download { cs.append("kMDItemWhereFroms == \"*\"") }
         if cs.isEmpty { return "kMDItemContentTypeTree == \"public.item\"" }

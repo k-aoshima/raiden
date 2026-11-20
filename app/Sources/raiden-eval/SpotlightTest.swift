@@ -79,9 +79,12 @@ func runSpotlightTests() {
     has("#date today", ["kMDItemLastUsedDate >= \(isoUTC(today))", "kMDItemContentModificationDate >= \(isoUTC(today))",
                         "kMDItemDateAdded >= \(isoUTC(today))", "kMDItemContentCreationDate >= \(isoUTC(today))"])
     has("#date 7d", ["kMDItemLastUsedDate >= \(isoUTC(day("2026-11-12 00:00")))"])
+    let yEnd = isoUTC(today - 1)
+    has("#date yesterday", ["(kMDItemContentModificationDate <= \(yEnd) || kMDItemContentModificationDate != *)",
+                            "(kMDItemLastUsedDate <= \(yEnd) || kMDItemLastUsedDate != *)"])   // 件数も一番新しい日で数える
     has("#modified 2026-11", ["kMDItemContentModificationDate >= \(isoUTC(day("2026-11-01 00:00")))"], not: ["kMDItemLastUsedDate", "DateAdded"])
     has("#created 2025", ["kMDItemContentCreationDate >= \(isoUTC(day("2025-01-01 00:00")))", "<= \(isoUTC(day("2026-01-01 00:00") - 1))"],
-        not: ["ContentModificationDate"])
+        not: ["ContentModificationDate", "!= *"])
     has("#date 11-14..11-16", [">= \(isoUTC(day("2026-11-14 00:00")))", "<= \(isoUTC(day("2026-11-17 00:00") - 1))"])
     // 場所
     ok(req("#path ~/Desktop").scopes == [NSHomeDirectory() + "/Desktop"], "#path ~/Desktop は範囲に")
