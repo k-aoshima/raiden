@@ -1,11 +1,11 @@
 # Raiden
 
-「PDFを見るやつ」「黒い画面でコマンド打つやつ」のような曖昧な言い方で、Mac に入っているアプリを探して開くランチャー（最小版）。
+「PDFを見るやつ」「黒い画面でコマンド打つやつ」のような言い方で、Mac に入っているアプリと、Mac 全体のファイル・フォルダを探して開くランチャー（最小版）。
 
 - メニューバー常駐（Dock には出ない）。**⌥Space** で画面中央に入力欄が出る（取れなければ ⌃⌥⌘Space）。
 - 打つのが止まって 0.1 秒たったら、アプリとファイル・フォルダの候補を合わせて最大 9 件、アイコン付きで出す。↑↓ で選んで Enter で開く（フォルダは Finder で開く）。⌘Enter で Finder に表示。Esc で閉じる。
-- 文章を作るモデル（LLM）は使わない。使うのは文の埋め込みモデル **BAAI/bge-m3** だけで、Core ML に変換してアプリの中で動かす（Python も常駐ヘルパーも無し）。
-- 選んで開いた「入力した文 → アプリ」を覚え、次から k近傍法で効かせる。使うほど当たる。
+- モデル（LLM・埋め込み）は使わない。アプリは名前・辞書・選んだ記録の文字の一致で、ファイル・フォルダは Spotlight（MDQuery）に問い合わせて探す。自前のファイルの一覧も持たない（2026-11-20 から。下の「埋め込みと自前の一覧をやめた」）。
+- 選んで開いた「入力した文 → アプリ / ファイル」を覚え、次から入力の文字が近ければ上に出す。
 
 ## ビルドと起動
 
@@ -16,270 +16,86 @@ scripts/build.sh            # build/Raiden.app と build/raiden-eval を作る
 scripts/build.sh --install  # ~/Applications/Raiden.app に入れて起動
 ```
 
-モデル一式は `RAIDEN_MODEL_DIR`（既定 `/Volumes/SSD/raiden-models-ane`）から同梱する。本体は `RAIDEN_BODY`（既定 `ane_pal6`。ANE で動かす版、下の「ANE で動かす」）。前の CPU 版に戻すときは `RAIDEN_MODEL_DIR=/Volumes/SSD/raiden-models RAIDEN_BODY=int4`。
-
-### モデルを作り直すとき（開発用、Python）
-
-```
-cd tools/convert
-HF_HOME=/Volumes/SSD/hf uv run python convert.py --out /Volumes/SSD/raiden-models     # 本体 fp16/int8/pal4/int4 と埋め込み表（--batches 1,8,16,32,64）
-HF_HOME=/Volumes/SSD/hf uv run python export_tokenizer.py --out /Volumes/SSD/raiden-models  # vocab.bin
-HF_HOME=/Volumes/SSD/hf uv run python convert_ane.py --out /Volumes/SSD/raiden-models-ane --quant pal6   # ANE 版の本体と meta.json（埋め込み表・vocab.bin は上の物をリンクする）
-uv run python ane_plan.py /Volumes/SSD/raiden-models-ane/body_ane_pal6.mlpackage                       # どの演算が ANE に載るか（既定の関数だけ。全部の関数は raiden-eval --plan）
-```
+モデルは同梱しない（アプリは 1.8MB。前はモデル込みで 476MB）。
 
 ## しくみ
 
-### 埋め込み（app/Sources/RaidenCore/BGEEmbedder.swift）
+### アプリの並べ方（app/Sources/RaidenCore/Engine.swift, Ranker.swift）
 
-メモリを抑えるため bge-m3 を 2 つに分けている。
+点数 ＝ 名前 ＋ 辞書 ＋ 選んだ記録 ＋ いつも開く・最近使った（どれも文字の一致。`Mix` に重み）
 
-| 部分 | 置き方 |
-|---|---|
-| 単語の埋め込み表（25 万語 × 1024） | Core ML に入れず int8＋行ごとの尺度で `embed_int8.bin`（256MB）。**mmap して使う行だけ読む**ので、メモリ（footprint）にほぼ乗らない |
-| 本体（位置埋め込み〜24 層〜CLS、正規化まで） | Core ML（`body.mlmodelc`）。ANE 版（既定）は重みを 6bit のパレット化にして 223MB、形を固定した 8 つの関数（件数 1/8 × 長さ 16/32/64/128 トークン）を 1 つのモデルにまとめ、ANE で動かす（下の「ANE で動かす」）。前の CPU 版は int4（32 個ずつのブロック量子化）168MB で、入力の形は件数 1/8/16/32/64 × 長さ 16/32/64/128 の組（EnumeratedShapes）。件数 1 は入力 1 文、8 はファイルの説明文をまとめて作る用（下の「ベクトル化の速さ」） |
-| トークナイザ（XLM-RoBERTa の SentencePiece Unigram） | `Tokenizer.swift` に自前で実装。語彙は `vocab.bin` を mmap して二分探索 |
-
-トークナイザは swift-transformers 1.4.0（`Tokenizers`、XLMRobertaTokenizer → Unigram に対応）を使うつもりだったが、SwiftPM が使えずその依存（swift-jinja / swift-huggingface / swift-crypto / yyjson）を取り込めないため、必要な分だけ書いた。HF の tokenizer と 343 文（全アプリの説明文と答え合わせの文）で完全一致を確かめてある（`raiden-eval --dump-texts` → `export_tokenizer.py --check` → `raiden-eval --check-tokens`）。
-
-### 並べ方（app/Sources/RaidenCore/Engine.swift）
-
-点数 ＝ 説明文との近さ ＋ k近傍法 ＋ 名前の文字一致
-
-- **説明文**: 日本語名＋英語名＋手書きの説明（`AppDict.swift`）＋分類（LSApplicationCategoryType）の日本語＋開けるファイルの種類（CFBundleDocumentTypes）の日本語。日本語名は Spotlight の `kMDItemDisplayName` を **NFC に揃えて**使う。
-- **k近傍法**: 入力のベクトルに近い example の点を k=5 件 → chose の線をたどって app の点に「近さ⁶ × 1/順位」を配る（重み 1.25）。近さを 6 乗するので、同じ言い方を選び直した近い例（0.9 以上）はほぼそのまま効き、0.6 前後の遠い例は 0.05 ほどに弱まる（下の「自作アプリの答え合わせ」）。
-- **いつも開くアプリの加点**: 入力に種類の言葉（PDF・ワード・画像…）があれば、手元のその種類をいちばん多く開くアプリに +0.15（`Engine.openBonus`）。
-- **文字一致**: 名前の先頭が一致で +0.6、途中に含まれれば +0.35（ひらがな・カタカナ、全角・半角は同一視）。「saf」「ターミ」「あくてぃ」が 1 位に出る。
-- 手書きの説明には、答え合わせの言い方をそのまま書き写さないこと（答え合わせが甘くなる）。
+- **名前**: 日本語名・英語名・.app の名前の先頭か単語の先頭 +0.6、途中 +0.35、英数字の入力は読みのローマ字に 1 文字違いまで +0.3（ひらがな・カタカナ、全角・半角は同一視）。アプリは 133 個ほどなので全部を見る（索引は使わない）。
+- **辞書**: 手書きの説明（`AppDict.swift`。標準アプリと他社アプリ）＋分類の日本語＋開けるファイルの種類＋自作アプリの材料（`AppExtra`。app-notes.json・README など）を「辞書の言葉」にし、入力の 2 文字の組（ひらがなだけの組は捨てる）がそこに入っている割合 × 0.5（`Describe.dictText`、`Lexical.grams`）。
+- **選んだ記録**: 選んで開いた「入力 → アプリ」の入力と、今の入力の 2 文字の組の重なり（Dice）が 0.5 以上なら × 0.5（回数で割り振る）。
+- **いつも開く**: 入力に種類の言葉（PDF・ワード・画像…）があれば、手元のその種類をいちばん多く開くアプリに +0.15（`OpenWith.swift`。~/Documents・Downloads・Desktop のファイルを Spotlight で並べ、`NSWorkspace.urlForApplication(toOpen:)` に聞く）。**最近使った**: kMDItemLastUsedDate が新しいほど最大 +0.05（30 日で 1/e）。
+- 「見つからない」: 1 位が名前・辞書・記録のどれにも当たっていないとき（`Ranker.Parts.hit`）。
+- 利用者の辞書（言い方 → アプリ / ファイル / 「#」の条件）は settings.json の `dictionary`（`PhraseDictionary`。下の「絞り込みのコマンド」）。入力欄の「辞書」の節に出る。
 
 ### 自作アプリの説明文（app/Sources/RaidenCore/AppExtra.swift）
 
-標準アプリは手書きの辞書（`AppDict.swift`）があるが、自作アプリは名前と分類くらいしか手がかりが無い。そこで次の材料から短い文を集めて説明文の後ろに足す（合計 360 字まで、前の材料ほど優先）。
+標準アプリは手書きの辞書（`AppDict.swift`）があるが、自作アプリは名前と分類くらいしか手がかりが無い。そこで次の材料から短い文を集めて辞書の言葉に足す（合計 360 字まで、前の材料ほど優先）。
 
 1. `~/Library/Application Support/Raiden/app-notes.json`（`{"bundle id か名前": "説明"}`）。自分で書く説明。標準アプリにも効く。リポジトリには入れない。
 2. Info.plist の `NSHumanReadableCopyright` / `CFBundleGetInfoString`（普通の著作権表示・版番号・名前そのものは除く）
-3. `~/Project/<アプリ名 か bundle id の末尾>` の README.md → CLAUDE.md → .claude/CLAUDE.md → docs/SPEC.md のうち最初に見つかった 1 つの、最初の見出しと最初の段落（300 字まで、長ければ文の切れ目で 150 字ほどに）
+3. `~/Project/<アプリ名 か bundle id の末尾>` の README.md → CLAUDE.md → .claude/CLAUDE.md → docs/SPEC.md のうち最初に見つかった 1 つの、最初の見出しと最初の段落
 4. `NS*UsageDescription`（決まり文句は除く）
 
-2〜4 は `com.apple.*` には使わない。2 と 4 は `ja.lproj/InfoPlist.strings` に日本語があればそちらを使う。
-README が無いアプリ（Andon など）は、1 の app-notes.json に一言書くと当たるようになる。`RAIDEN_APP_NOTES` / `RAIDEN_PROJECT_DIR` で場所を変えられる（答え合わせで note あり・なしを比べる用）。
-`raiden-eval --show-desc` で、材料が付いたアプリの説明文を並べられる。
+`raiden-eval --show-desc` で、アプリごとの辞書の言葉を並べられる。
 
-### いつも開くアプリ（app/Sources/RaidenCore/OpenWith.swift）
+### ファイルとフォルダ（app/Sources/RaidenCore/SpotlightSearch.swift）
 
-手元のファイル（ファイル検索と同じ場所）を 1 件ずつ `NSWorkspace.urlForApplication(toOpen:)` に聞き、「このファイルを開くアプリ」を集める（Finder の「このアプリケーションで開く」の個別設定も反映される。800 件ほどで 0.1 秒かからない）。
+Mac 全体を Spotlight（MDQuery、同期で問い合わせて別の列で待つ）に聞く。自前の一覧・ベクトル・FSEvents の見張りは持たない（この Mac は約 323 万ファイルあり、1 件約 8KB の自前の一覧では持てない）。
 
-- 説明文に「いつも開くファイル: PDF（手元に 49 個）」のように多い順に 3 種類まで足す。
-- 入力に種類の言葉があれば、その種類をいちばん多く開くアプリに +0.15。
-- グラフに app → file の `opens` を張る（アプリ一覧を取り直すたびに全部張り直す）。
-- 入力欄からファイルを開いたときは、開くアプリを先に決めて開き、その組を file → app の `opened_with`（重みは回数）に残す（`Engine.recordOpened`）。
+- 範囲: ホームの中の各フォルダ（隠しと除外を除く。~/Library は既定で除外）、/Users/Shared、外付けのボリューム。ホーム直下のファイルは範囲にできないので、検索のたびに 1 段だけ見て足す。
+- 結果は除外（設定の「除外」のフォルダと名前）、隠しフォルダ・パッケージ（.app・.photoslibrary など）の中を Raiden の側でもう一度ふるう。
+- 1 回に受け取るのは 3,000 件まで（`fetchLimit`）。属性は問い合わせの sortingAttrs で一緒に受け取る（1 件ずつ MDItemCopyAttributes すると 2,000 件で 0.45 秒）。
+- 打つたびに前の問い合わせを止める（`Engine.cancelFiles` → `MDQueryStop`。10ms 後に止めて 1ms 以内に戻る）。
+
+「#」と言い方 → Spotlight の条件（`SpotlightSearch.request` / `queryString`）:
+
+| 入力 | 条件 |
+|---|---|
+| 名前の言葉 | `kMDItemDisplayName` / `kMDItemFSName` の部分一致（`"*言葉*"cd`）。空白・ひらがなの所・英数字との境目で区切り（「大阪で泊まった宿の領収書」→ 大阪・領収書）、言葉どうしは「または」で引いて当たった割合で並べる |
+| `#name` | 同じ部分一致。値どうしは「または」 |
+| `#kind` | `kMDItemContentTypeTree`（pdf → com.adobe.pdf、image → public.image など）か `kMDItemFSName` の末尾（拡張子）。スクショは画像で名前に「スクリーンショット」「screenshot」 |
+| `#ext` | `kMDItemFSName == "*.pdf"c` |
+| `#type` | `kMDItemContentType == "public.folder"` か、その否定 |
+| `#date` | `kMDItemLastUsedDate`・`kMDItemContentModificationDate`・`kMDItemDateAdded`・`kMDItemContentCreationDate` のどれかが範囲に入る。`#modified` は変更日、`#created` は作成日だけ |
+| `#path` | `~/` `/` で始まればそこを範囲（searchScopes）に。名前なら、名前にそれを含むフォルダを Spotlight で引いて範囲にする |
+| `#with X` | X の `kMDItemLastUsedDate` の前後 30 分（`withWindow`）に使った物。Raiden から開いた記録の co_used の線（30 分以内に続けて開いた物どうし、重みは回数。`Store.recordOpenedTogether`）の重みで +0.3 まで加点し、線の先は Spotlight の結果に無くても入れる。X 自身は外す |
+| `#near X` | X から親をさかのぼり、.git・package.json・Package.swift・*.xcodeproj・*.xcworkspace・Cargo.toml・pyproject.toml・Unity の Assets と ProjectSettings の両方、のどれかがある最初のフォルダ（`projectRoot`）を範囲にする。見つからなければ X の親。~ か / で止まる |
+| 「#」の無い言い方 | `QueryIntent` の時間・種類の言葉を `#date`・`#kind` と同じ条件に、「〜フォルダ」は `#type d`、「ダウンロードした」は `kMDItemWhereFroms`、「A と同じ日の B」は `#with A`、「A の中の B」は `#path A` |
+
+X は `~/` `/` で始まればそのパス、そうでなければ名前が一致する物（同じ名前 → 名前に含む物、その中は使った日の新しい順）。違うコマンドどうしは「かつ」（`#near X #ext swift` など）。
+
+並べ方: 名前の一致の強さ（先頭・単語の先頭 0.6、途中 0.35、言葉ごとの平均）＋使った日・変えた日の新しさ（最大 0.2、30 日で 1/e）＋「選んだ」記録（入力 → ファイル。入力の 2 文字の組の重なりが 0.5 以上なら 0.5 × 重なり、0.35 以上なら Spotlight の結果に無くても入れる）。「見つからない」は結果が 0 件のとき。
+
+「#」の担当向けの口:
+
+- `SpotlightSearch.recent(limit:)` 最近使ったファイル・フォルダ（kMDItemLastUsedDate の新しい順。7 日 → 30 日 → 1 年と広げる）。20 件で 12ms。
+- `SpotlightSearch.count(_ filters:)` 条件に合う物の数（Spotlight の数のまま。除外のふるい直しはしない目安）。
+- `SpotlightFilterSource`（`FilterSource` の実装。AppDelegate が `FilterInput.context` に渡す）: 値の候補の件数は、覚えていなければ nil（件数なし）を返して裏で数え（4 本並べて）、届いたら `FilterInput.sourceDidUpdate()` で出し直す。覚えた件数は 60 秒。#with・#near が付いているときは数えない。`recentFiles` / `recentFolders` は入力欄を開いたときに取り直す最近使った物（40 件）。#kind の値 8 つを #date 7d の中で数えて 2.0 秒、2 回目からは覚えた件数。検索とは別の SpotlightSearch で数える（打つたびの取り消しに巻き込まれない）。
+- `SpotlightSearch.projectRoot(of:)`、`SpotlightSearch.entry(path:)`（1 件の属性）、`resolve(_:)`（#with / #near の X をパスに）。
 
 ### 保存（app/Sources/RaidenCore/Store.swift）
 
-`~/Library/Application Support/Raiden/raiden.sqlite`（OS 標準の SQLite3）。ベクトルとグラフを一緒に使えるよう、点と線の 2 表。
+`~/Library/Application Support/Raiden/raiden.sqlite`（OS 標準の SQLite3）。点と線の 2 表。
 
-- `nodes(id, kind, key, name, description, vector, desc_hash, updated_at)` — kind は app / example / file / folder。desc_hash は「モデル名＋説明文」のハッシュで、変わった時だけベクトルを作り直す。
-  - file / folder は vector に 2 値のベクトル（128 バイト）だけを置き、description は空（説明文は要るときに FileCatalog から作り直す）。下の「ファイルのベクトルは 2 値」。app / example は float32（4KB）と説明文のまま。
-- `edges(from_id, to_id, kind, weight, last_used)` — example→app の `chose`（weight は選んだ回数）、folder→中の物の `contains`、同じ日に使った物どうしの `co_used`（weight は回数）、変更日・追加日が 30 分以内の物どうしの `co_time`、app→file の `opens`（手元のファイルを開くアプリ）、file→app の `opened_with`（Raiden から開いたときに実際に開いたアプリ）。
+- `nodes(id, kind, key, name, description, vector, desc_hash, updated_at)` — kind は app / example / file / folder。file / folder は「選んだ」「開いた」記録の相手としてだけ置く。vector・desc_hash は前の版の名残で、今は空。
+- `edges(from_id, to_id, kind, weight, last_used)` — example → app / file の `chose`（weight は選んだ回数）、file → app の `opened_with`、Raiden から 30 分以内に続けて開いた物どうしの `co_used`（両向き、weight は回数）、開いた時刻の `opened`（自分への線）。
+- 前の版の DB は、起動時に一度だけ片付ける（`Store.dropFileIndex`、meta の `files = spotlight1`）: 記録の相手でないファイル・フォルダの点と contains / co_used / co_time / opens の線を消し、どの点もベクトルを空にし、一覧の保存の印（file_scope・fs_event_id・fs_uuid）を消して VACUUM。本物のコピー（29.2MB）は 0.1MB、~/Project 16.8 万件を入れた DB（60.4MB）は 0.04MB になった。
 
-近さはメモリに載せたベクトルとの総当たりの内積（ファイル・フォルダは 2 値のベクトルとの非対称の内積）。アプリ一覧は起動時に取り、あとはアプリの場所（`AppCatalog.dirs`）を FSEvents で見張って、変化があれば取り直す（ベクトルは説明文が変わったアプリだけ作り直す）。
+### 埋め込みと自前の一覧をやめた（2026-11-20）
 
-### ファイルとフォルダ（app/Sources/RaidenCore/FileCatalog.swift, QueryIntent.swift, Ranker.swift）
+消した物: bge-m3（BGEEmbedder・Embedder・NLEmbedder・CachedEmbedder・Tokenizer・ANE の読み込みと `compiled/` のキャッシュ）、アプリと例のベクトルと k近傍法、ファイルのベクトル（2 値・中心・並べ直し）、自前のファイルの一覧（FileIndex・FileCatalog の一覧づくり・一覧の保存と起動時の読み込み・ファイルの FSEvents・名前の索引 NameIndex）、contains / co_used（使った日）/ co_time の線、設定の「検索範囲」（探すフォルダと件数・広すぎる場所の目安）と「モデルを解放」、tools/convert（変換の Python）、raiden-eval のベクトル用の計測（--bench-embed・--plan・--bench-binary・fitbin・--nl・--scope-run・--startup-bench・--offline-test・--bench-apply・--bench-rank・--watch-test）。
 
-Engine の `searchFiles` で探す。
-
-- 入力欄では「アプリ」と「ファイル・フォルダ」の節に分けて出す。点数の付け方が違う（アプリは k近傍法の重み 1.25・近さの 6 乗といつも開くアプリの加点、ファイルは時間・種類・フォルダの加点）ので、点数では混ぜない。ふだんはアプリの節が先で、時間・種類・つながりの言葉があればファイルの節が先。先の節は最大 4 件、残りを後の節に回す。
-- 一覧は FSEvents（1 ファイルずつの通知）で変化をすぐ拾う（`FileWatch.swift` の `FSWatcher` と `FileIndex`）。追加・変更・名前変更はその物と親フォルダを作り直し、説明文が変わった物だけベクトル化する。消えた物は中の物ごと外し、点と線（消えた物に向いた例の chose の線も）を消す。短い間の大量の変化は、静かになって 0.6 秒（最大 2 秒）ためて 1 回にまとめる。
-- 変化は差分で当てる（`Engine.patchFiles`）。全部を入れ直すと ~/Project を入れた 16.8 万件で 1 回 28 秒かかり、作業中は数十秒ごとに走ってベクトル化が止まっていた。
-  - 添字をずらさないため、消えた物は印（`Corpus.alive`）を付けて検索・絞り込み・「見つからない」の判定から外すだけにし、足した物は後ろに足す。同じパスの物は場所を変えずに差し替える。
-  - 説明文を作り直すのは、変わった物と中の物が増減・変化した親フォルダだけ。contains の線と、フォルダの「下のファイル数と種類」もその分だけ直す。消えた物に向いた例の線も外し、足した物に向いた例は Store から読んでつなぐ。
-  - **co_used / co_time の線は差分では作り直さない。** 足した物には付かず、重みの割り算も前のまま。起動時（保存した一覧から全部入れるとき）と 1 日 1 回の全体の見直しで作り直す。
-  - 足した・変わった・消えた物が 5000 件（`FileIndex.incrementalLimit`）を超えたら全部入れ直す。消した印が 2000 件以上かつ点の 10% を超えたときも全部入れ直して詰める（全体の見直しでも詰まる）。
-  - ベクトル化の残りは、差分で出た分だけ列の先頭に足す（列全体は並べ直さない）。64 件以下ならその場で作る。
-  - 測り方: `raiden-eval --bench-apply --roots ~/Project --file-store <scratch の新しいファイル> [--bench-root <scratch のフォルダ>] [--full-only]`。範囲に bench-root を足し、そこにだけファイルを作って測り、最後に差分で直した状態と全部入れ直した状態を点ごと・検索ごとに比べる。
-  - 2026-11-20（16.8 万件）: 1 件の apply は 追加 0.026 秒・変更 0.044 秒・名前変更 0.021 秒・削除 0.000 秒（前は毎回の入れ直しで約 28 秒）。100 件まとめて追加 0.16 秒、1000 件 1.4 秒。全部の入れ直し（installFiles）は 25.6 秒あったのを 5.3 秒にした（下の「起動」）。
-- 一覧の保存と起動（`Store.saveFileEntries` / `loadFileEntries`、`FileIndex.loadSaved`）: 起動のたびに `FileCatalog.collect` で全部を OS に問い合わせ直すと、~/Project を入れた 16.8 万件で約 200 秒（CPU 16%、ほぼ I/O 待ち）かかっていた。
-  - 一覧の中身は nodes の `entry` 列（BLOB）に置く。パス（key）・名前・親の名前・種類（families）・フォルダか（kind）は入れず、ダウンロードの印 1 バイト＋size・mtime・created・added・lastUsed・usedDays の zigzag varint＋種類名（UTF-8）だけ。平均 30.9 バイト/件、16.8 万件で 4.9MB（DB は 1 件 0.6KB ほどなので 5% ほど増える）。中身が同じ行は書き換えない。
-  - 起動時は、範囲・除外の印（meta の `file_scope`）と FSEvents のボリュームの UUID（`fs_uuid`）が保存したときと同じなら、保存した一覧を読んで全部入れ、保存したイベント ID（`fs_event_id`、apply し終えるたびに書く）から FSEvents を受け取って、止まっていた間の変化を差分で当てる。
-  - 全体を見直すのは、保存した一覧が無い・範囲や除外が変わった・ボリュームが替わった・履歴が途切れた（root の MustScanSubDirs、EventIdsWrapped）とき、1 日 1 回、設定の「今すぐ作り直す」だけ。OS への問い合わせは別の列で行い、その間も今の一覧で検索でき、FSEvents の変化とベクトル化も止まらない（`beginScan` → collect → `finishScan`。見直しの間に来た変化は結果の上に当て直す）。見直しが終わるまで `file_scope` は空にしておき、途中でアプリが終わっても次の起動で見直し直す。
-  - 入れ直しを速くした所（当たりは変えていない）: co_time の線は窓の中の物を毎回集め直さず、窓をずらすたびに数を足し引きする（16.8 万件で 14.2 秒 → 0.9 秒、`raiden-eval --check-cotime` で前の作りと 2504 本すべて同じ）。名前の正規化・ローマ字・2 文字の組、説明文、stamp、FileKeys は複数のコアで作る（`Array.parallelMap`）。パス → 添字と親は 1 回だけ作り、中の物の一覧・contains の線・fileIndex で使い回す。ベクトル化の順番（`prioritized`）は鍵を 1 回ずつ作ってから並べる。
-  - 2026-11-20（16.8 万件、`raiden-eval --startup-bench --entries <一覧の JSON> --roots ~/Project --file-store <scratch の新しいファイル>`）: 起動から一覧が使えるまで 前 約 225 秒（問い合わせ約 200 秒＋入れ直し 25.6 秒）→ 後 5.3 秒（一覧を読む 0.28 秒＋入れ直し。内訳は `Corpus.setItems`（名前の索引込み）2.1 秒、co_time 0.8 秒、DB の線の書き直し 0.6 秒、childrenMap 0.5 秒、FileKeys 0.25 秒、そのほか各 0.1 秒以下）。保存した一覧から入れた状態は、一覧を全部入れた状態と点ごとに 167,543 件すべて同じ。保存した中身を戻すと元と違う物は 0 件。
-  - 止まっている間の変化の確かめ: `raiden-eval --offline-test --store <scratch の新しいファイル>`。scratch のフォルダだけを範囲にして見直し、アプリを止めた体で足す・消す・名前を変える・書き換える・フォルダごと入れる・フォルダごと消すを行い、新しい Engine で保存した一覧から起動して、FSEvents の続きから受け取った結果を確かめる（2026-11-20: 全部 OK、受け取るまで 2.3 秒）。
-- 取りこぼしの保険: 1 日 1 回は裏で全体を見直す。FSEvents の履歴が途切れた印（MustScanSubDirs など）が来たら、その場所の中だけ見直す（範囲の root より上なら裏で全体を見直す）。一覧はすぐ入れ替わり、ベクトル化は裏で進む（下の「ベクトル化の速さ」）。まだベクトルの無い物も、名前の文字一致（ローマ字・1 文字違いも）と絞り込みのコマンドでは候補に出る。一覧を作っている間（起動直後・広い範囲を足した直後）は、まだ一覧に無い物を Spotlight の名前検索（`SpotlightNames`、最大 5 件）で補い、名前が一致した候補の後ろに入れる。
-- 確かめ: `raiden-eval --watch-test --store <raiden.sqlite のコピー>`。`~/Documents/raiden-test-<pid>` で作る・書き換える・名前を変える・消す・100 個まとめて作る、を行い、検索に出るまでの時間を測って、最後にフォルダごと消す。2026-11-19: 作る 1.8 秒、書き換え 1.2 秒、名前変更 0.9 秒、削除 0.8 秒。100 個は 5.9 秒で全部入り、CPU 4.3 秒（74%）、footprint 42 → 45MB、その間の検索は最大 56ms。
-
-### ベクトル化の速さ（2026-11-20、`raiden-eval --bench-embed`）
-
-ファイルの説明文は 8 件ずつまとめて 1 回の予測に通す（`BGEEmbedder.embedBatch`。短い文から順に並べてまとめるので、組の中のパディングが少ない）。件数の次元はモデルの入力の形（EnumeratedShapes）から読むので、前の版のモデルでも 1 件ずつに戻るだけで壊れない。
-
-| 手元 256 件・CPU | 1 件あたり | 1 万件の見込み | 山の footprint / resident | 裏で作っている間の検索 1 文 |
-|---|---|---|---|---|
-| 1 件ずつ（前） | 28.9ms | 4.8 分 | 30MB / 674MB | - |
-| **8 件ずつ（採用）** | **12.1ms** | **2.0 分** | 63MB / 688MB | 中央 77ms・最大 229ms |
-| 16 件ずつ | 11.7ms | 2.0 分 | 74MB / 705MB | 中央 121ms・最大 435ms |
-| 32 件ずつ | 12.8ms | 2.1 分 | 122MB / 750MB | 中央 232ms・最大 835ms |
-| 64 件ずつ | 13.5ms | 2.2 分 | 192MB / 839MB | 3.4 秒 |
-
-- まとめた結果は 1 件ずつと cos の差 0.00001 未満。入力 1 文の埋め込みは 17ms のまま。
-- 上の表は前の CPU 版。この形（EnumeratedShapes）のモデルは `.cpuAndNeuralEngine` でも ANE に 1 つも載らない（MLComputePlan で 1287 演算すべて CPU）。形を固定し直した ANE 版は下の「ANE で動かす」。GPU（`.cpuAndGPU`）は resident が 10GB を超え、`.all` は footprint 9.8GB・1 件 1.2 秒で、どちらも採らない。
-- 件数の次元なしの前のモデルに MLArrayBatchProvider で渡しても 12.5ms/件（同じくらい速い）だが、モデルに次元を持たせた方が 1 回の予測で済むので、こちらにした。
-- 検索の待ち: ベクトル化は入力 1 文の埋め込みが待っていれば次の組を後にする。アプリでは入力欄を開いている間はベクトル化を止める。
-- 最大トークン長: 64 にすると 989 件が 13.0 秒（128 は 17.6 秒）になるが、ファイルの 1 位が 138 → 132 に落ちるので 128 のまま。
-
-二段構え: まだベクトルの無い物は名前・場所・種類の短い説明でまず作り（9.5ms/件）、中身の頭を入れた説明文での作り直しは後で（中身を読む種類の PDF・txt・md・csv・html・docx だけ）。desc_hash の後ろの `:s` が短い説明だけの印。
-順番は、最近使った・変えた物（30 日以内、新しい順）→ 検索の記録で選んだ物の親フォルダの中（回数の多い順）→ 残り。
-
-| 989 件（`--files --now 2026-11-19`、空の SQLite から） | ベクトル化 | 例0 1位/3位以内/5位以内 | 例121 個 |
-|---|---|---|---|
-| 前（1 件ずつ） | 29.5 秒 | 138 / 156 / 164 | 142 / 167 / 173 |
-| 短い説明だけ（1 段目が終わった所） | 11.7 秒 | 117 / 148 / 155 | 128 / 157 / 164 |
-| 中身ありまで（2 段目まで） | 17.6 秒 | 138 / 156 / 164 | 142 / 167 / 173 |
-
-広い範囲: `~/Project` は前の除外で 191,600 件、新しい除外で 167,537 件（一覧づくり 170 秒）。残りの多くは docx-studio/out（11 万件の PNG・PDF）と Unity の Library など。
-
-~/Project を丸ごと入れた実測（`raiden-eval --scope-run --roots ~/Project --file-store <コピー>`、2026-11-20、2 値・並べ直し 10 件の版）:
-
-| | 時間 | footprint / resident |
+| | 前（bge-m3・自前の一覧） | 後 |
 |---|---|---|
-| 一覧（167,538 件。Spotlight の属性を 1 件ずつ読む） | 7.1 分 | 737MB / 800MB |
-| 短い説明で全部（167,488 件、11.8ms/件） | 32.9 分 | 726MB / 787MB |
-| 中身ありで作り直し（24,209 件、34.2ms/件。PDF を読む分が重い） | 13.8 分 | 1,371MB / 1,642MB |
-| 合計 | 54 分（前の作り＝中身ありを 1 件ずつ 29ms なら約 81 分の見込み） | 山 1,389MB / 1,658MB |
-
-DB は 89MB（1 件 532 バイト。float32 のままなら約 830MB）。検索 1 回は 140〜850ms（全部のあと。「請求書のPDF」847ms・「先週のスクショ」170ms）で、名前の文字一致を全件で見る所が重かった。今は名前を索引で引くので、16.8 万件で 22〜32ms（下の「名前の文字一致は索引で引く」）。
-
-### 名前の文字一致は索引で引く（app/Sources/RaidenCore/NameIndex.swift）
-
-前は検索のたびに全件の名前を 1 件ずつ見ていた（先頭・単語の先頭・途中の一致と、読みのローマ字の 1 文字違い）。~/Project 16.8 万件では、ここだけで並べ方 1 回 100〜190ms かかり、1 回の検索で並べ方を 2 回（例あり・例なし）通すので 220〜400ms になっていた。今は `Corpus.setItems` のときに索引を作り、当たりうる点だけを見る。結果は全件を見たときと同じ。
-
-- 名前（正規化した文字列）の UTF-8 を 1 本に並べ、3 バイトの組 → 点の転置索引を作る。入力の 3 バイトの組を全部含む点だけを、バイトで照らし合わせる。UTF-8 はバイトで一致すれば文字の境目でも一致するので、日本語 1 文字（3 バイト）もこの索引で引ける。3 バイトに満たない入力（英数字 2 文字）は、並べたバイトを頭から見る（16.8 万件で 2ms）。英数字 1 文字は前と同じく名前の一致を見ない。
-- 読みのローマ字は 2 バイトの組 → 点の転置索引。1 文字違いまで許す一致は q-gram の下限で足切りする（長さ m の入力が k 文字の直しで一致するなら、m-1 個の組のうち m-1-2k 個以上は読みに入っている）。残った点だけ距離を測る。距離（`Lexical.approxSubstringDistance`）はビット並列（Myers）にした。値は前の表の作りと同じ。
-- 1 文字が 1 つのコードポイントでない名前（結合文字・絵文字の組など）は、文字の比べ方とバイトの比べ方がずれうるので、索引を使わず前の比べ方で見る。索引を作った後に差分で名前を変えた点・消した点（`markNameChanged`。`updateItem` / `kill` から呼ぶ）と、後ろに足した点（`appendItem`）も前の比べ方で見る。全部入れ直すと（`setItems`）索引も作り直す。途中で作り直すときは `Corpus.rebuildNameIndex()`。
-- 16.8 万件（2026-11-20、`raiden-eval --bench-rank --roots ~/Project --entries <scratch のファイル>`。一覧を 1 回書き出して読み直す。ベクトルは乱数で、モデルは読まない）:
-
-| 入力 | 並べ方 1 回（前 → 今） | 検索 1 回＝並べ方 2 回＋見つからないの手がかり（前 → 今） |
-|---|---|---|
-| r（英数字 1 文字） | 7.3 → 7.5ms | 22 → 22ms |
-| 設（日本語 1 文字） | 129 → 7.4ms | 266 → 22ms |
-| re / pd（英数字 2 文字） | 112〜114 → 9.1〜9.3ms | 228〜235 → 26ms |
-| readme / unity / invoice / package | 193〜198 → 7.5〜7.6ms | 390〜404 → 23ms |
-| 設計書 / 画像 | 133〜141 → 7.4〜11.4ms | 271〜289 → 22〜31ms |
-| 請求書のPDF / 先週のスクショ | 126〜129 → 11.4〜12.3ms | 261〜266 → 30〜32ms |
-| raedme / untiy / seikyuusyo / mitumori（打ち間違い・ローマ字） | 185〜192 → 7.5〜7.8ms | 379〜391 → 23ms |
-| あのとき作った音声入力のやつ / Swift のランチャーの説明 | 108〜119 → 7.5ms | 223〜244 → 22ms |
-
-  今の並べ方 1 回の内訳は、2 値のベクトルの近さ 7.3ms・時間と種類 0〜5ms・名前の一致 0.1〜1.9ms。索引は 18.5MB（名前のバイト 1.9MB・名前の組 168 万本・読み 1.7MB・読みの組 160 万本）で、作るのは 0.1 秒。索引あり・なしで 18 個の入力の上位 20 件と全件の名前の点数が同じこと、名前の一部・打ち間違いを乱数で作った 400 個の入力（差分で名前の差し替え 300・足す 200・消す 200 をした後も 300 個）で全件の名前の点数が同じこと、距離が乱数 20 万組で前の作りと同じことを `--bench-rank --fuzz` で確かめた。
-
-### ファイルのベクトルは 2 値（app/Sources/RaidenCore/BinaryVec.swift）
-
-DB とメモリが件数とともに大きくならないよう、ファイル・フォルダのベクトルは 2 値（1024 次元の符号 = 128 バイト）だけを持つ。float32（4KB）と説明文は保存しない。
-
-- 近さは「非対称の内積」: 入力は float32 のまま、文書は ±1。1 バイト（8 次元）ごとに 256 通りの和を先に作り（128 × 256 の表）、文書 1 件は表を 128 回引くだけ。
-- 2 値にする前に中心（`center.bin`、bge-m3 の次元ごとの平均。`tools/convert/make_center.py`）を引く。次元ごとの平均が 0 から大きくずれていて（平均の絶対値 0.017、値の絶対値 0.024）、引かないとほとんどの文書で同じビットが立つ。上位 10 件が float32 と重なる割合が 0.51 → 0.61 になった。center.bin を変えたら 2 値のベクトルは全部作り直し。
-- 点数の目盛りは cos に合わせる: `a × (q・s)/32 + (q・center) + b`。CPU int4 版は a = 0.64・b = 0.015（上位 50 件で最小二乗、残差 0.016）、ANE 版は a = 1.006・b = −0.024（下の「ANE 版の目盛りと「見つからない」のしきい値」）。どちらを使うかはモデルの meta.json の `units` で決まる（`BinVec.units`）。Ranker の重みはそのまま使える。
-- 並べ直し: 2 値だけだと例0 の 1 位が 138 → 122 に落ちる。そこで上位 10 件（`Engine.rerankN`）だけ、その場で説明文を作り直して bge-m3 でベクトル化し、2 値の近さとの差を点数に足して並べ直す（ディスクに細かいベクトルを置かない）。作ったベクトルはメモリに 2,048 件まで覚える（8MB）。つながりの言い方は target との近さを並べ直す。「見つからない」の判定の素の近さも、並べ直した物はその場の近さに差し替える。
-- 前の版の DB は、起動時に一度だけ float32 → 2 値に変換し（作り直さない）、説明文を消して VACUUM する（`Store.migrateFileVectorsToBinary`、meta の `file_vectors = bin1`）。
-
-並べ方の比べ（989 件、`--files --now 2026-11-19`、1位/3位以内/5位以内）:
-
-| 並べ方 | 例0 | 例41 | 例121 | folder（例0） | 1 回 |
-|---|---|---|---|---|---|
-| float32（前） | 138 / 156 / 164 | - | 142 / 167 / 173 | 16 / 23 / 25 | 23ms |
-| 2 値・ハミング距離（中心なし） | 123 / 149 / 156 | 123 / 153 / 161 | 133 / 162 / 168 | 14 / 22 / 23 | |
-| 2 値・非対称の内積（中心なし） | 123 / 150 / 158 | 123 / 151 / 161 | 131 / 158 / 166 | 10 / 20 / 22 | |
-| 2 値・非対称の内積（中心あり） | 122 / 149 / 160 | 125 / 150 / 163 | 130 / 159 / 169 | 11 / 23 / 25 | |
-| ＋上位 5 件を並べ直す | 132 / 154 / 160 | 127 / 157 / 163 | 140 / 166 / 169 | | |
-| ＋上位 10 件（つながりは除く） | 134 / 155 / 161 | 129 / 158 / 166 | 140 / 167 / 171 | | |
-| **＋上位 10 件（つながりも、採用）** | **136 / 155 / 163** | **131 / 158 / 168** | **142 / 167 / 173** | **14 / 22 / 25** | 初回 +60ms |
-| ＋上位 30 件 | 136 / 155 / 163 | | 142 / 167 / 173 | | |
-
-採用の形での答え合わせ（2026-11-20、前の数字と同じ所は「同じ」）: アプリ 25 問 例あり 20 / 23（同じ）・名前の一部 5 / 5・自作 13 問 例なし 9 / 10・例あり 6 / 10・他社 18 問 例なし 13 / 16・例あり 11 / 15、ファイル 例0 136 / 155 / 163（前 138 / 156 / 164）・例41 131 / 158 / 168・例121 142 / 167 / 173（同じ）、「見つからない」は答え無し 16/20（前 15）・作った答え無し 18/20（同じ）・誤って弾いた 例0 7/188・例121 5/188（同じ）、`--test-filters` 133/133、`Raiden --test-focus` 22/22、`--settings-test` すべて OK、`--watch-test` 作る 1.5 秒・100 個 1.4 秒。
-例0 で落ちた 2 問はどちらもフォルダ（「カード会社の月ごとの明細PDFが入ってるとこ」「猫耳の女の子のLive2Dモデル一式」）。「子がそろって上位」の加点が、2 値の近さで選んだ上位 20 件の子で数えるため。並べ直しを 30 件にしても変わらない。
-
-打ちかけの短い入力（英数字 3 文字まで・1 文字）は並べ直さない（名前の一致で決まり、上位が 1 文字ごとに入れ替わって毎回作り直しになる）。並べ直しが要る入力の初回は +60〜80ms（PDF の中身を読み、10 件をまとめてベクトル化）、同じ物は覚えているので 2 回目からは前と同じ。並べ直しのベクトル化は入力 1 文と同じく、裏のまとめてのベクトル化より先に通す（`embedUrgent`）。
-
-DB の大きさ（989 件、線 1,473 本、VACUUM 後）: 前 4.92MB（1 件約 5.0KB。うち float32 4KB と説明文 120 字）→ 0.52MB（1 件約 530 バイト。2 値 128 バイト・パス・名前・desc_hash・索引・線）。本物の raiden.sqlite のコピー（29.2MB、使っていないページ込み）は移し替えて 1.3MB（アプリ 133 個・例の float32 はそのまま）。
-
-| 件数 | DB 前（float32＋説明文） | DB 2 値 | 2 値のベクトルのメモリ | 近さの計算（非対称の内積） | 並べ替え全体（`--files` の「ファイル数が増えた場合」から） |
-|---|---|---|---|---|---|
-| 1,200 | 6MB | 0.6MB | 0.15MB | 0.1ms | 1ms |
-| 27 万 | 1.3GB | 140MB | 33MB | 12ms | 約 290ms（見込み） |
-| 114 万 | 5.7GB | 600MB | 139MB | 54ms | 約 1.2 秒（見込み） |
-
-アプリ全体のメモリは 1 件約 8.5KB（~/Project 167,538 件で footprint 1.37GB）なので、27 万件で約 2.2GB、114 万件で約 9.3GB の見込み。2 値のベクトルは 128 バイトで、残りは一覧（パス・名前・日付）・名前の読み・線・種類の分。
-
-近さの計算は `raiden-eval --bench-binary`（乱数で 128 バイト × 件数）、並べ替え全体は 98,900 件で中央 105ms（2 値で複製）からの比例。名前の文字一致は索引で引くので（上の「名前の文字一致は索引で引く」）、件数が増えて重くなるのはベクトルの近さ（16.8 万件で 7.3ms）と、並べ方を 2 回通す分。
-
-
-### ANE で動かす（2026-11-20、tools/convert/convert_ane.py）
-
-本体を Apple Neural Engine で動かす版を既定にした。入力 1 文が 17ms → 2ms、ファイルの説明文は 8 件ずつで 1 件 12ms → 1.6ms、989 件のベクトル化は 3 秒ほど。
-
-作り方（`convert_ane.py`。Apple の「Deploying Transformers on the Apple Neural Engine」/ ml-ane-transformers の書き方）:
-
-- nn.Linear を 1x1 の Conv2d に、テンソルを (B, C, 1, S) に、注意は頭ごとに einsum と softmax（split_softmax）。LayerNorm はチャンネル方向に自前で書き、残差の値が fp16 で 2 乗すると溢れる（中ほどの層で 1000 近く）ので 1/64 に縮めてから分散を取る。PyTorch（fp32）で書き直した模型と元の模型の cos は 1.0000。
-- **形を固定する**のが効いた。件数 B と長さ S の組ごとに関数を作り、`ct.utils.save_multifunction` で 1 つの .mlpackage にまとめる（重みは関数の間で共有されるので、大きさは 1 関数分）。可変の形（EnumeratedShapes）のままだと、形を計算する演算（shape・gather・concat）と int32 のマスクの型変換が CPU にしか載らず、全体が CPU になる。
-- マスクは fp16 で受ける（int32 だと型変換が CPU に残り、頭の数演算が CPU に引きずられる）。
-- 関数名は `b{B}_s{S}`。meta.json の `functions` と `"units": "ane"` を見て、BGEEmbedder が関数ごとに MLModel を読む（`MLModelConfiguration.functionName`）。
-
-MLComputePlan（`raiden-eval --plan <body.mlmodelc>`）で数えた ANE に載った演算は、どの関数も 2327 中 2326〜2327（残るのは入力の転置 1 つ）。前の CPU 版は 1287 中 0。
-同じ固定の形なら、Conv2d に書き直さない元の模型（nn.Linear のまま）でも 99.5% 載り、速さも同じだった（件数 1・長さ 32 で 4.40ms / 4.38ms、件数 8 で 1.39 / 1.43ms/件）。この Mac（M6、macOS 27）では、効いたのは形の固定で、Conv2d 化ではない。
-
-| 本体（手元 256 件） | ファイル | ANE に載った演算 | 入力 1 文 | 1 件ずつ | 8 件ずつ | footprint / resident | CPU fp16 との cos 差（平均 / 最大） | PyTorch との cos 差（平均 / 最大） |
-|---|---|---|---|---|---|---|---|---|
-| CPU int4（前） | 168MB | 0% | 17.7ms | 28.4ms | 12.0ms | 45 / 668MB | 0.052 / 0.067 | 0.039 / 0.053 |
-| ANE fp16（件数 1/8/16） | 587MB | 100% | 4.3ms | 6.5ms | 2.6ms（16 件 2.4ms） | 285 / 298MB | 0.00007 / 0.0004 | 0.00001 / 0.00002 |
-| ANE int8（線形・チャンネルごと） | 296MB | 100% | 2.5ms | 3.1ms | 1.6ms | 83 / 332MB | 0.0008 / 0.0017 | 0.0006 / 0.0011 |
-| ANE pal8（8bit パレット） | 295MB | 100% | 2.6ms | 3.2ms | 1.7ms | 95 / 346MB | 0.0005 / 0.0018 | 0.0003 / 0.0005 |
-| **ANE pal6（採用）** | **223MB** | **100%** | **2.3ms** | **2.9ms** | **1.6ms** | **83 / 334MB** | **0.007 / 0.012** | **0.005 / 0.007** |
-
-- footprint はアクティビティモニタの「メモリ」。CPU 版は重みを mmap するので footprint は小さく resident が大きい。ANE 版は resident が半分になるが、モデルを読んだ直後の footprint は 18MB → 65MB ほどに増える。fp16 だけ footprint が大きい（285MB）。
-- CPU fp16 との差は手元 256 件の説明文で、PyTorch（sentence-transformers と同じ fp32 の模型）との差は 8 文（件数 8・長さ 64 の関数）で測った。
-- 前に採らなかった 4bit パレット化の代わりに 6bit・8bit を試した。int4（ブロックごと）の ANE 版は作っていない（Mac では GPU 向けの形式）。
-
-答え合わせ（2026-11-20、アプリ 133 個・ファイル 989 件、`--files --section final --now 2026-11-19`、空の SQLite から）:
-
-| 本体 | アプリ 例なし・辞書なし | 辞書あり | 例あり | 名前の一部 | 自作 例なし / 例あり | ファイル 例0（1位/3位/5位） | 例全部 | 989 件のベクトル化 |
-|---|---|---|---|---|---|---|---|---|
-| CPU int4（前） | 11 / 19 | 15 / 23 | 20 / 23 | 5 / 5 | 9 / 6 | 138 / 156 / 164 | 142 / 167 / 173 | 40.4s（裏で別の重い処理あり。単独では 17.6s） |
-| ANE fp16 | 11 / 20 | 17 / 23 | 19 / 23 | 5 / 5 | 8 / 5 | 134 / 157 / 164 | 141 / 168 / 172 | 3.4s |
-| ANE int8 | 11 / 20 | 16 / 22 | 19 / 23 | 5 / 5 | 8 / 5 | 134 / 158 / 164 | 142 / 168 / 172 | 4.1s |
-| ANE pal8 | 11 / 20 | 17 / 23 | 19 / 23 | 5 / 5 | 8 / 5 | 133 / 156 / 165 | 142 / 168 / 172 | 2.8s |
-| **ANE pal6（採用）** | 11 / 18 | 16 / 22 | **20 / 23** | 5 / 5 | 7 / 4 | **136 / 155 / 163** | **142 / 167 / 171** | **2.7s** |
-
-- 元の模型に近い fp16・int8・pal8 の方が、ファイルの 1 位は 4〜5 問少ない。前の int4 は元の模型から cos で 0.05 ずれていて、そのずれが答え合わせではたまたま有利に出ている（int4 は答え合わせの数字で選んだ）。pal6 は 1 位・3 位以内で前と 1〜2 問の差、アプリの例ありは同じ 20 なので、これを採った。
-- 保存済みのベクトルは作り直す。BGEEmbedder の名前（desc_hash に入る）に `:ane-<model.mil のハッシュ>` を付けたので、ANE 版に替えると説明文のベクトルを 1 回作り直す。
-
-読み込み（BGEEmbedder）:
-
-- ANE 向けのコンパイルは、そのモデルを初めて読んだときだけ 1 関数 17 秒〜3 分かかる（件数 8・長さ 128 が最長。8 関数で 5 分ほど、ANECompilerService が CPU を使う）。OS がキャッシュするので、2 回目からは 1 関数 0.3〜0.5 秒。
-- キャッシュは .mlmodelc の場所とファイルごと（同じ中身を別の場所にコピー・移動しても、同じ場所に置き直しても、コンパイルからやり直し）。アプリの中のモデルは入れ替えのたびに新しいファイルになるので、`~/Library/Application Support/Raiden/compiled/ane-<ハッシュ>-<大きさ>.mlmodelc` に 1 度だけハードリンクして、そこから読む（`BGEEmbedder.stableCopy`。中身が同じなら入れ替えてもキャッシュが効く）。
-- 待たせないよう、ANE の関数は裏で 1 つずつ読む（件数 1・長さ 128 → 件数 1 の残り → 件数 8 の順）。読み終わる前の入力 1 文は、長さ 128 の関数に詰めて通す（ANE で読めていれば ANE、まだなら CPU で 1 つだけ読む。CPU では 1 回 24ms）。まとめての組は、件数 8 の関数が全部 ANE に載るまで 1 件ずつに回す。CPU で読む関数を 1 つに絞るのは、CPU で読むと関数ごとに resident が約 500MB 増え、`~/Library/Caches/<アプリ>` にも約 500MB のキャッシュができるため（初回の読み込み中は resident が 1.2GB ほどになる）。ANE で読めなければ CPU で続ける。読み終えたら raiden.log に「ANE の読み込み 8/8 関数 …s」。
-- 初回の読み込み中（`raiden-eval --no-wait-ane`）でも、答え合わせの数字は読み終えた後と同じだった（アプリ例あり 20 / 23）。
-- キャッシュは OS（aned）が持ち、大きさは見えない。5 つのモデルを続けてコンパイルした後、先にコンパイルしたモデルがもう一度コンパイルされたことが 1 回あった。アプリのモデルが 1 つなら起きにくいはずだが、確かめてはいない。
-- 可変の形（EnumeratedShapes で 8 つの形を 1 つのモデルに）にして位置埋め込みを入力に足す形も試した。MLComputePlan では 100% ANE に載るが、読み込みが毎回 7〜8 分かかり（キャッシュが効かない）、採らなかった。
-- 件数 16 の関数は 8 件ずつと 1 件あたりの差が小さく（2.6 → 2.4ms）、コンパイルが長い（長さ 128 で 6 分）ので入れていない。
-- 消費電力は測っていない（powermetrics は sudo が必要）。
-
-#### ANE 版の目盛りと「見つからない」のしきい値（2026-11-20）
-
-2 値の目盛りと「見つからない」のしきい値は CPU int4 版で決めた数字だった。ANE 版（pal6）に替えると、答えのある問題を誤って弾く数が例0 で 7/188 → 18/188 に増えた。そこで ANE 版だけ数字を分けた（meta.json の `"units": "ane"` で切り替える。`BinVec.scaleANE`・`NoMatchRule.Thresholds.ane*`）。
-
-- 近さが全体に低く出る: 同じ入力・同じ説明文で、細かい近さ（float32）の一番が CPU 版より中央値 0.014・平均 0.016 低い（入力 349 個）。近さの低い所ほど下がり（0.40〜0.45 で 0.026、0.65 以上で 0.015）、一番近い例との近さは 0.011 低い。2 値を通さないアプリの maxV も 0.015 低いので、2 値ではなくモデルの違い。
-- 目盛り: `raiden-eval --files --section fitbin` で、全部の説明文を細かいベクトルにし、入力ごとに 2 値の近さの上位 50 件で cos − q・center ≈ a × (q・s)/32 + b を最小二乗で解いた（989 件・入力 349 個・17,450 点）。ANE 版は a = 1.006・b = −0.024（残差 0.0266 → 0.0183）。前の値のままだと 2 値の近さが細かい近さより平均 0.008、上位 10 件では 0.023 高く出ていて、並べ直した 10 件（細かい近さ）とそれ以外（2 値の近さ）の点数がずれていた。同じやり方で CPU 版は a = 0.965・b = −0.024 になったが、前の値（別の手元のデータで合わせた）から替えると 1 位が 1 問減ったので、CPU 版は前の値のまま。
-- しきい値: 近さのしきい値はどれも 0.01 下げた（ファイル maxV 0.46 → 0.45・0.55 → 0.54、例 0.68 → 0.67、アプリ maxV 0.47 → 0.46、例 0.55 → 0.54）。1 位と 2 位の差（0.03）は近さの引き算なので動かさない。0.015 下げると作った答え無しを 1 問弾けなくなり、誤って弾く数は変わらなかった。
-
-答え合わせ（`--files --section nomatch,final --now 2026-11-19`、空の SQLite から。ANE は同じビルドでも 1 位が ±1 問ぶれる）:
-
-| | 例0（1位/3位/5位） | 例全部 | 誤って弾いた 例0 / 例全部 | 答え無しを弾いた 例0 / 例全部 | 作った答え無し | アプリ 25 問 誤って弾いた | アプリに答え無し |
-|---|---|---|---|---|---|---|---|
-| CPU int4 | 136 / 155 / 163 | 142 / 167 / 173 | 7 / 5 | 16 / 16 | 18 | 0 | 4 / 20 |
-| ANE・前の数字 | 133 / 152 / 162 | 141 / 164 / 170 | 18 / 13 | 18 / 17 | 18 | 0 | 5 / 20 |
-| ANE・目盛りだけ合わせ直し | 132 / 151 / 160 | 142 / 165 / 170 | 16 / 11 | 17 / 16 | 18 | 0 | 5 / 20 |
-| **ANE・目盛りとしきい値（採用）** | **132 / 151 / 160** | **141〜142 / 164〜165 / 169〜170** | **11 / 8** | **16 / 16** | **18** | **0** | **4 / 20** |
-
-誤って弾く数は CPU 版の 7 までは戻らない。残る 11 問のうち 5 問（「kotuhi seisan」「トラックボールのボタン割り当てを書き出したやつ」「Firebase の管理者の鍵」「フォトショのデータ」「resume of my skills」）は CPU 版でも弾いていた。ANE 版だけで弾くのは「おとといまとめた調べもののメモ」「zen no shitagaki」「keychorn」のように、細かい近さの一番そのものが CPU 版より 0.04〜0.06 低い入力で、maxV 0.50〜0.52 には答え無しの入力（「車検証」「ピアノの楽譜」「年金定期便」）が並ぶので、しきい値ではこれ以上分けられない。maxV と差に z（maxV が分布から何σ離れているか）< 4.5 を足すと 例0 で 9 問まで減るが、答え無しの数が目盛りの違いだけで 15〜16 に揺れ、作った答え無しも 1 問減るので採らなかった。
-1 位の CPU 版との差（−3〜−4）も目盛りでは縮まらない（目盛りを替えても ±1 問）。例0 では file が 25 → 21 問、relation が 18 → 15 問と減り、folder は 14 → 18 問と増えている。これもモデルの近さの違い。
+| アプリの大きさ | 476MB | 1.8MB |
+| 起動から検索できるまで | モデル 2.4〜2.7 秒（ANE の初回は数分）＋一覧 5.3 秒（~/Project 16.8 万件、保存した一覧から） | 0.21 秒（DB 6ms・いつも開く 68ms・アプリ一覧 120ms） |
+| メモリ（footprint） | モデルとアプリだけで 67MB、~/Project 16.8 万件で 1,311MB | 12MB（アプリの答え合わせの後 11MB、Spotlight を 40 回引いた後 26MB） |
+| ファイルの検索 1 回 | 22〜32ms（~/Project 16.8 万件、手元の一覧） | Mac 全域で中央 190ms（148〜292ms。Spotlight の同期の問い合わせが 1 回 150〜170ms かかる。範囲が狭い `#near` は 3ms） |
+| アプリの検索 1 回 | 2ms | 0.3ms |
 
 ### 入力欄の見た目（app/Sources/Raiden/SearchPanel.swift）
 
@@ -302,14 +118,11 @@ macOS 26 以降は Liquid Glass（`NSGlassEffectView`、白寄りの tint）、�
 ### 設定（app/Sources/Raiden/SettingsWindow.swift、app/Sources/RaidenCore/Settings.swift）
 
 メニューバーの「設定…」（⌘,）で開く。左の一覧で 4 つに分ける。見本は `build/Raiden --snapshot docs/ui` の `settings-*.png`（ダミーと初期値だけが写る）。
-保存は `~/Library/Application Support/Raiden/settings.json`（`RaidenSettings`。フォルダは `~/` の形、項目ごとに読めなければ初期値、無ければ全部初期値）。
+保存は `~/Library/Application Support/Raiden/settings.json`（`RaidenSettings`。フォルダは `~/` の形、項目ごとに読めなければ初期値、無ければ全部初期値。前の版の `folders`・`unloadMinutes` は読み捨てる）。
 
-- **検索範囲**: 探すフォルダ（追加・削除・オンオフ、各行に中の件数）、除外するフォルダ、除外する名前（`*` `?` のパターンも可）、件数とベクトル化の状態（「ベクトルを作成中 120/300」はまだベクトルの無い物の数、その後の「中身を読んで更新中」は中身の頭を入れた作り直し）、「今すぐ作り直す」（全体を見直し、変わった物だけベクトル化）。
-  - 変えたら 0.8 秒待ってまとめて当てる（`FileIndex.setScope`）。FSEvents の見張りを張り直し、外れた物はすぐ一覧から外し、増えた場所だけ拾ってベクトル化する（裏の列で。終わるまで検索は前の一覧のまま）。外した物の点と線（向いていた chose の線も）は SQLite から消える。除外を変えたときは全体を見直す（変わっていない物は作り直さない）。
-  - 足したフォルダは件数を数えてからオンにする。そのフォルダか合計が 5 万件を超えるときはオフのまま足し、メモリ（1 件約 8.5KB。前は 15KB）と初回のベクトル作成（1 件約 17ms）の目安を窓に出す（下の「~/Project を丸ごと入れた実測」）。
-  - 除外する名前の初期値を増やしたときは、前の settings.json に増えた分だけを足す（`knownExcludeDefaults` に足した初期値を覚え、ユーザーが消した物は戻さない）。
-  - フォルダの説明文の「中身」は同じ数の種類を名前順に並べる（辞書の順がプロセスごとに変わって、十数個のフォルダを毎回作り直していた）。
-- **一般**: 入力欄を開くキー（押して登録。システムのショートカットと重なれば知らせ、ほかのアプリが持っていて登録できなければ前のキーに戻す）、候補の最大件数、アプリとファイルの節の並び（自動／アプリ先／ファイル先）、透明度、ログイン時に起動、モデルを解放するまでの時間。
+- **除外**: Spotlight の結果から外すフォルダ（初期値 ~/Library）と名前（`*` `?` のパターンも可。初期値は node_modules・.venv・build・*.log など）。隠しファイル・.app・パッケージの中はいつも外す。
+  - 除外の初期値を増やしたときは、前の settings.json に増えた分だけを足す（`knownExcludeDefaults`・`knownExcludeFolderDefaults` に足した初期値を覚え、ユーザーが消した物は戻さない）。
+- **一般**: 入力欄を開くキー（押して登録。システムのショートカットと重なれば知らせ、ほかのアプリが持っていて登録できなければ前のキーに戻す）、候補の最大件数、アプリとファイルの節の並び（自動／アプリ先／ファイル先）、透明度、ログイン時に起動。
 - **学習**（SettingsLearning.swift）: 選んだ結果を覚える オン・オフ、辞書の表（言い方 → アプリ / ファイル・フォルダ / 「#」の条件。足す・直す・消す）、保存した絞り込み（`#名前` → コマンド。足す・消す）、よく使う「#」の組み合わせ（検索の記録から。名前を付けて保存へ）、選んで開いた記録（言い方 → 物・回数・最後に使った日）と 1 件ずつの削除・全部消す。
 - **記録**: 検索の記録を残す オン・オフ、残す日数（初期 90 日）、記録を全部消す、ログのフォルダを開く、最近の検索、見つからなかった言い方（「辞書に足す…」で行き先を選ぶと辞書に足す）。
 
@@ -318,7 +131,7 @@ macOS 26 以降は Liquid Glass（`NSGlassEffectView`、白寄りの tint）、�
 どちらも手元だけに残し、外へは送らない。
 
 - 検索の記録: raiden.sqlite の `search_log` 表。入力欄を開いてから閉じるまでを 1 行に、日時・入力の最終形・途中の打ち直し（`[{"q", "t": 開いてからの ms}]`）・出した候補（画面の並び順に種類・bundle id かパス・名前・点数・節）・選んだ物とその順位（教えた物は 0）・選ばずに閉じたか・「見つかりません」（全体・アプリの節・ファイルの節）・最後の検索にかかった時間。残す日数より古い行は起動時と 1 日 1 回消す。`raiden-eval --log-eval --store <コピー>` で、選んだ記録を今の並べ方で回し直して当時の順位と比べられる。
-- 動作の記録: `~/Library/Logs/Raiden/raiden.log`（起動・一覧の作り直し・ベクトル化の件数と時間・FSEvents の履歴が途切れて見直した場所・範囲や設定の変更・エラー）。1MB で `raiden.1.log`〜`raiden.5.log` に回し、それより古いものと 30 日より古いものは消す。
+- 動作の記録: `~/Library/Logs/Raiden/raiden.log`（起動・アプリ一覧の作り直し・除外や設定の変更・エラー）。1MB で `raiden.1.log`〜`raiden.5.log` に回し、それより古いものと 30 日より古いものは消す。
 
 ### 絞り込みのコマンド（app/Sources/RaidenCore/QueryFilters.swift, FilterCompletion.swift, FilterMemory.swift, PhraseDictionary.swift, app/Sources/Raiden/FilterUI.swift, DictionaryLookup.swift, SettingsLearning.swift）
 
@@ -365,7 +178,7 @@ macOS 26 以降は Liquid Glass（`NSGlassEffectView`、白寄りの tint）、�
 
 #### 件数を出す口（`FilterSource`）
 
-入力欄は件数を `FilterSource` からだけ聞く。今は手元の一覧（`FilterContext`、`Engine.filterContext`）が答える。一覧が無くなったら、Spotlight 側の担当がこれに合わせた物を作って `FilterInput.context` に渡す。
+入力欄は件数を `FilterSource` からだけ聞く。アプリでは Spotlight で数える `SpotlightFilterSource`（上の「ファイルとフォルダ」）が答える。手元の一覧の `FilterContext` は確かめ（--test-filters）と見本で使う。
 
 - `appCount`、`counts(_ cmd:, values:, within:, now:) -> [String: Int]?`（値ごとの件数。nil なら件数なしで候補だけ出す）、`total(_:) -> Int?`、`topExtensions(within:limit:)`、`topFolders(within:limit:)`、`recentFolders(limit:)`、`recentFiles(limit:)`（`#with` `#near` の候補）。使わない物は書かなくてよい（既定は nil / []）。
 - 答えが後から届くときは、届いたら `FilterInput.sourceDidUpdate()` を呼ぶと一覧を出し直す。
@@ -396,10 +209,6 @@ macOS 26 以降は Liquid Glass（`NSGlassEffectView`、白寄りの tint）、�
 - `Raiden --test-focus`: 入力欄のフォーカスと打鍵（46 項目。言葉からの候補を Tab / → で決める、組み合わせを Enter、⌘⌫・チップの ×、⌘S で保存して `#名前` で呼ぶ、`#alias` の切り替え・足す・取りやめ・置き換え、⌥Enter、辞書の節）。
 - 見本は `docs/ui/option-*.png`（`option-combos.png`「#」の直後、`option-suggest.png` 言葉からの候補とチップ、`option-alias.png` 辞書の行き先を選ぶ状態）。
 
-### メモリの設定
-
-設定の「一般」か、メニューバーの「モデルを解放」で、入力欄を閉じてから 5 分 / 30 分でモデルを手放せる（既定は解放しない）。手放した後はホットキーを押した時点で読み直す。
-
 ### ログイン時に起動（app/Sources/Raiden/LoginItem.swift）
 
 初回起動で「アプリケーション」フォルダ（`scripts/build.sh --install` の `~/Applications/Raiden.app`）から起動していれば、ログイン時に起動するよう登録する。`build/Raiden.app` を試しに開いたときは登録しない。メニューバーの「ログイン時に起動」でオン・オフできる。
@@ -412,134 +221,30 @@ macOS 26 以降は Liquid Glass（`NSGlassEffectView`、白寄りの tint）、�
 ## 答え合わせ
 
 ```
-build/raiden-eval --body body_int8.mlpackage [--units ane|cpu] [--miss] [--reload] [--sweep]
+build/raiden-eval [--miss]                    # アプリ 25 問・名前の一部 5 問・自作 13 問・他社 18 問（埋め込みなし）
+build/raiden-eval --files --file-store <scratch の新しいファイル> [--miss]   # ファイル（Spotlight 版）
+build/raiden-eval --test-filters              # 「#」の解析・候補
+build/raiden-eval --test-spotlight            # 「#」と言い方 → Spotlight の条件、#near の根（~/Project の実物）、除外・種類・記録（80 項目）
+build/raiden-eval --bench-spotlight --file-store <scratch>   # Mac 全域に問い合わせた時間、取り消し
+build/raiden-eval --boot-bench --file-store <scratch>        # 起動から検索できるまでとメモリ
+build/raiden-eval --settings-test --store <コピー>           # 設定・除外・前の版の DB の片付け・記録・ログ
 ```
 
-アプリと同じ `Engine.search` で 25 個の曖昧な言い方を回す。例は `raiden-eval` の中の EX だけを使い、保存済みの例は読まない。
-`--store <path>` で SQLite の道筋（覚える → 読み直す → 効く）も試せる。
-`--settings-test --store <コピー>` で、設定の読み書き・検索範囲の差し替え（足したフォルダの物が検索に出る・外したフォルダの物と線が SQLite から消える・除外）・検索の記録の書き込みと読み出しと古い記録の削除・raiden.log の回し方を確かめる。設定とログは一時フォルダ、範囲は `~/Documents/raiden-test-<pid>` と一時フォルダの中に作って最後に消す（本物の settings.json・ログ・DB には触らない）。
+自作アプリ・他社アプリ・ファイルの問題は私的な名前を含むので `~/Library/Application Support/Raiden/evals/` に置く（apps-own.json・apps-3p.json・files.json・parts/*.json）。`--store` / `--file-store` を渡さないと本物の raiden.sqlite を使うので、確かめは必ず scratch の新しいファイルかコピーで。
 
-2026-11-19 の結果（アプリ 129 個、CPU、1回は 1 文の埋め込み＋並べ替え）:
+埋め込みをやめた前後（2026-11-20、1位 / 3位以内。当てにいく調整はしていない）:
 
-| 本体 | ファイル | 例なし・辞書なし 1位/3位以内 | 辞書あり | 例あり | 1回 | footprint | resident |
-|---|---|---|---|---|---|---|---|
-| fp16 | 593MB | 11 / 18 | 14 / 21 | 18 / 22 | 18ms | 19MB | 631MB |
-| int8 | 298MB | 11 / 18 | 13 / 21 | 18 / 22 | 18ms | 12MB | 610MB |
-| pal4 | 162MB | 10 / 15 | 14 / 19 | 18 / 21 | 11ms | 21MB | 208MB |
-| **int4（採用）** | 168MB | 12 / 19 | 14 / 22 | 20 / 22 | 18ms | 22MB | 640MB |
-
-fp16 は PyTorch（sentence-transformers）と同じ数字で、ベクトルも cos の差 0.0003 以内。footprint はアクティビティモニタの「メモリ」。
-resident の大半は mmap した重み（ファイルから読み直せるページ）で、OS が足りなくなれば捨てる。「モデルを解放」で 48MB まで下がる。
-k近傍法の重みは 0.5〜1.5 でほぼ同じ数字だったので 1.0 にした（例がたまった時に効きやすい側）。後に自作アプリの答え合わせで 1.25・近さの 6 乗に変えた（下）。
-
-### 自作アプリの答え合わせ
-
-```
-build/raiden-eval --body body_int4.mlpackage --units cpu [--apps-own <path>] [--sweep-knn] [--knn-w 1.25 --knn-pow 6 --knn-min 0]
-```
-
-自作アプリの問題（13 問: Yomu・Knobby・Andon・ふくちょう・docx-studio・tsunagi）は私的な名前を含むので `~/Library/Application Support/Raiden/evals/apps-own.json` に置く。
-
-例（EX）は標準アプリの分しか無いので、k近傍法の票（重み 1.0、近さそのまま）が強すぎて自作アプリが押し負けていた（「声で文字入力するやつ」→ ボイスメモ、「Wordの書類を作るやつ」→ Pages）。例なしだと 1位 6/13 なのに、例ありだと 1/13 に落ちる。
-ファイルと同じ「近さ 0.6 未満の例は数えない」では上がらず（遠い例の近さが 0.6〜0.7 にあるため）、効いたのは近い例ほど強くする（票 ＝ 近さの N 乗）ことだった。`--sweep-knn`（2026-11-19、note なし／Andon の note あり、1位/3位以内）:
-
-| 重み | 最低の近さ | 近さの何乗 | 25 問 例あり | 名前の一部 | 自作 例あり（note なし） | 自作 例あり（note あり） |
-|---|---|---|---|---|---|---|
-| 1.0 | 0 | 1（前の既定） | 20 / 22 | 5 / 5 | 1 / 5 | 1 / 6 |
-| 1.0 | 0.6 | 1 | 20 / 21 | 5 / 5 | 1 / 5 | 2 / 7 |
-| 0.5 | 0 | 1 | 20 / 23 | 5 / 5 | 1 / 6 | 1 / 8 |
-| 0.5 | 0 | 4 | 20 / 23 | 5 / 5 | 4 / 7 | 5 / 9 |
-| 0.5 | 0 | 6 | 19 / 23 | 5 / 5 | 6 / 7 | 7 / 9 |
-| 1.0 | 0 | 6 | 20 / 23 | 5 / 5 | 4 / 7 | 5 / 9 |
-| 1.0 | 0 | 8 | 19 / 23 | 5 / 5 | 5 / 7 | 6 / 9 |
-| **1.25** | **0** | **6（採用）** | **20 / 23** | **5 / 5** | **4 / 7** | **5 / 9** |
-| 1.25 | 0 | 8 | 19 / 23 | 5 / 5 | 5 / 7 | 6 / 9 |
-| 1.5 | 0 | 1 | 20 / 22 | 2 / 5 | 1 / 3 | 1 / 3 |
-| 1.5 | 0 | 6 | 20 / 23 | 5 / 5 | 3 / 7 | 4 / 9 |
-| 2.0 | 0 | 8 | 20 / 23 | 5 / 5 | 4 / 7 | 5 / 9 |
-
-25 問の例ありを 20 に保つ中で自作がいちばん上がり、まわり（重み 1.0〜1.5、6 乗前後）でも 25 問が落ちない所を採った。6〜8 乗で重みを下げると自作は 6〜7 まで上がるが、25 問が 19 に落ちる（「3Dモデルを作る」が Blender の例「3DCG」「モデリング」に届かずプレビューになる）。最低の近さは 6 乗の後ではどこに置いてもほぼ変わらないので 0 のまま。重み 1.5 以上で近さそのままだと、例の票が名前の一致（+0.6）を超えて「saf」「ターミ」が外れる。
-
-「見つからない」の判定（`NoMatchRule.apps`）との食い違い: アプリの判定は素の近さ（maxV）・名前の一致・一番近い例の近さだけを見て、k近傍法の票は見ない。上の表のどの組み合わせでも、25 問・名前の一部・自作 13 問を 1 問も弾かず、アプリに答え無しの入力を入れたときも前の既定と同じ 4/20 を弾く。「例との近さ 0.55 以上は残す」は、6 乗の後は票としては弱い（0.55⁶ ≈ 0.03）が、いまの問題では maxV が 0.47 未満で例が 0.55 以上の入力は名前の一致するもの（「blen」）しか無く、結果は変わらない。
-
-採用の既定での数字（2026-11-19、アプリ 128 個）:
-
-| | 例なし・辞書なし | 例なし・辞書あり | 例あり | 名前の一部 | 自作 例なし | 自作 例あり |
-|---|---|---|---|---|---|---|
-| note なし | 11 / 19 | 12 / 23 | 20 / 23 | 5 / 5 | 6 / 7 | 4 / 7 |
-| Andon の note あり | 11 / 19 | 12 / 23 | 20 / 23 | 5 / 5 | 7 / 9 | 5 / 9 |
-
-残る外れ: 「Claudeのセッションを管理するやつ」は Claude（名前の一致 +0.35）が 1 位で Andon は 2 位（「前のClaudeの会話をもう一度開く」は note で 1 位になった）。Knobby（「声で文字入力」→ ボイスメモ、「会議の発言を書き起こす」→ ボイスメモ）と tsunagi（→ 画面共有・Bluetoothファイル交換）は説明文に材料はあるが、標準アプリの説明文に負ける。
-
-### ファイルの答え合わせ
-
-```
-build/raiden-eval --body body_int4.mlpackage --units cpu --files [--section k,g,rel,folder,fold,folddbg,combos,intent,switch,final,misc,nomatch] [--now 2026-11-19] [--file-store <path>]
-```
-
-問題（208 問: file / folder / time / type / relation / partial / english 各 23〜29 問、答え無し 20 問）と、k近傍法用の例（121 個）は私的なファイル名を含むので、リポジトリではなく `~/Library/Application Support/Raiden/evals/`（`files.json`、`file-examples.json`、`parts/*.json`）に置く。
-`--section` で節ごとに別プロセスで並列に回せる（ベクトルは SQLite から読むだけ）。説明文を変えて試すときは `--file-store` で別の SQLite を使う（アプリの raiden.sqlite を書き換えない）。
-答え合わせのたびに中身の変わったファイルが数件作り直されるので、file の数字は回によって 1〜2 問ぶれる。比べるときは同じ回の中の行どうしで比べる。時間の問題は 2026-11-19 基準。
-
-2026-11-19 の結果（989 件、例 0 個、1位/3位以内/5位以内、188 問）:
-
-| 組み合わせ | 全体 | アプリ 25 問 |
+| 問題 | 前（bge-m3） | 後（文字の一致） |
 |---|---|---|
-| V（＋名前一致＋時間・種類） | 122 / 147 / 154 | 14 / 22 |
-| K | 37 / 43 / 52 | 20 / 21 |
-| G（文字の重なりで入口） | 65 / 82 / 91 | 11 / 13 |
-| V+K 和 | 122 / 147 / 154 | **20 / 22** |
-| V+G 和（co_used、N=5、α=0.2、2 回） | 118 / 147 / 156 | 13 / 22 |
-| V+K+G 和 | 118 / 147 / 156 | 20 / 22 |
-| V RRF | 110 / 134 / 141 | 14 / 22 |
-| V+K 和＋つながりの言い方を分けて co_used をたどる | 127 / 149 / 158 | 20 / 22 |
-| **上＋フォルダの扱い（採用、下の表）** | **136 / 156 / 164** | **20 / 22** |
+| アプリ 25 問 例なし・辞書なし | 12 / 18 | 9 / 10 |
+| アプリ 25 問 例なし・辞書あり | 17 / 23 | 11 / 15 |
+| アプリ 25 問 例あり | 21 / 24 | 11 / 15 |
+| 名前の一部 5 問 | 5 / 5 | 5 / 5 |
+| 自作 13 問 例なし / 例あり | 7 / 11・4 / 11 | 11 / 13・11 / 13 |
+| 他社 18 問 例なし / 例あり | 14 / 17・13 / 16 | 7 / 12・7 / 12 |
+| ファイル（答えのある問題。前 188 問・後 190 問） | 132 / 151 | 40 / 47 |
 
-フォルダの扱い（2026-11-19、`--section fold`。folder は 28 問、全体は 1位/3位以内/5位以内）:
+ファイルの種類ごと（1位 / 3位以内）: file 21/24 → 4/8、folder 18/24 → 5/6、time 20/25 → 12/12、type 23/24 → 12/13、relation 15/17 → 0/1、partial 19/21 → 4/4、english 16/16 → 3/3。答え無し 40 問は 34 問を「見つからない」にした。
 
-| 方式 | folder | 全体 例0 | 全体 例121 個 |
-|---|---|---|---|
-| 前のまま（「フォルダ」の言葉があればフォルダに +0.3） | 9 / 18 / 21 | 127 / 149 / 158 | 140 / 162 / 169 |
-| 空のフォルダに加点しない＋時間は中の物の日付でも | 11 / 20 / 23 | 130 / 152 / 161 | 141 / 165 / 171 |
-| ＋加点は後ろがフォルダの言葉のときだけ | 11 / 20 / 23 | 131 / 153 / 162 | 141 / 166 / 172 |
-| ＋子が上位 20 件に 2 件以上 | 13 / 22 / 24 | 132 / 155 / 163 | 142 / 165 / 172 |
-| **＋中の種類が合う割合 × 0.2（採用）** | **16 / 23 / 25** | **136 / 156 / 164** | **142 / 167 / 173** |
-
-試して採らなかったもの: 子の近さ（上位 1〜5 件の平均・最大、親を超えた分）を親に足す（folder は 1〜2 問上がるが relation が 1 問下がるか、上の採用に足しても変わらない）。フォルダの説明文を変える（中の名前を数字を除いてまとめる・「〜を月ごとに貯めている」のような傾向をコードで書く・孫より下の中身を入れる・2 つ上の親まで書く）は、folder が 0〜1 問上下するだけで relation・time が 1〜3 問下がった。入力から「フォルダ」「とこ」を抜いてベクトルを作る、「貯めてる」「分けてる」「まとめた」をフォルダの言葉に足す、も上がらないか下がった。
-
-例を足すと（採用の組み合わせ）: 例 41 個 132 / 159 / 169、例 121 個 142 / 167 / 173（フォルダの扱いの前は 126 / 153 / 162、140 / 162 / 169）。k近傍法は重み 0.3・近さ 0.6 未満の例は数えない（重み 1.0 のままだと、例が一部の点にしか無いとき 1位が 113 → 73 に落ちる）。
-1 回は埋め込み 20ms ＋並べ替え 1ms（つながりの言い方は埋め込みが 3 回）。
-
-### 「見つからない」の判定（app/Sources/RaidenCore/NoMatch.swift）
-
-答えが無い入力でも 1 位には何か出るので、`Engine.searchJudged` / `searchFilesJudged` が結果に `noMatch` の印を付ける。弾いても候補は消さない（画面で「見つからない」と出して、候補は薄く出す用）。`search` / `searchFiles` は今まで通り候補だけを返す。
-
-入力欄（`AppDelegate.sections`）は節ごとに印を見る。印の立った節は候補を薄くし、見出しに「見つかりません」を添える。片方の節だけ立ったら当たった節を先にする。アプリとファイルの両方（ファイルの一覧がまだ無いときはアプリだけ）で立ったときだけ、上に大きく「見つかりません」を出す。「先週のPDF」でアプリが見つからないのは普通なので、片方だけで全体を「見つかりません」にはしない。
-
-- 残す: 1 位の名前が文字で一致（先頭・途中・ローマ字）／つながりの言い方／近い例がある（例との近さ 0.68 以上。アプリは 0.55 以上）
-- 弾く（ファイル）: 説明文との素の近さの一番（maxV）が 0.46 未満、または 0.55 未満で 1 位と 2 位の点数の差（例を抜いて並べ直した差）が 0.03 未満
-- 弾く（アプリ）: maxV が 0.47 未満。アプリは例が必ず効いて点数が高く出るので、差は見ない
-- 上の数字は CPU int4 版のもの。ANE 版は近さが全体に低く出るので、近さのしきい値をどれも 0.01 下げる（0.45・0.54・例 0.67 / アプリ 0.46・例 0.54。上の「ANE 版の目盛りと「見つからない」のしきい値」）。
-- 数字は `NoMatchRule.Thresholds` にまとめてあり、`NoMatchRule.files` / `.apps` がモデルの units で選ぶ。答え合わせでは `raiden-eval --nm-file 0.45,0.54,0.03,0.67 --nm-app 0.46,0.54` で差し替えられる（2 値の目盛りは `--asym-a` / `--asym-b`）。
-- 下の表は CPU int4 版で測ったもの。
-
-答えの無い入力は「どれにもそこそこ近く、どれも抜けていない」形になる。1 位の点数だけだと、時間・種類の加点や名前の一致で上がった点と区別できない。
-差を例込みの点数で見ると、近さ 0.6〜0.68 の弱い例が 1 件の点を押し上げて差が開き、例 121 個で答え無しを 11/20 しか弾けなかった。
-
-`--section nomatch` の結果（答え無し 20 問、判定を決めた後に作った答え無し 20 問 `parts/none2.json`、答えのある 188 問）:
-
-| 判定 | 例0: 答え無し | 作った答え無し | 誤って弾いた（うち 1 位正解） | 例121個: 答え無し | 作った | 誤って弾いた |
-|---|---|---|---|---|---|---|
-| 1 位の点数 < 0.55 | 14 | 15 | 13（6） | 10 | 13 | 8 |
-| 1 位の点数 < 0.60 | 17 | 15 | 32（19） | 10 | 13 | 13 |
-| 1 位の素の近さ < 0.55（名前一致・つながりは残す） | 16 | 18 | 14（7） | 20 | 18 | 33 |
-| maxV < 0.55（同） | 15 | 18 | 11（6） | 15 | 18 | 11 |
-| maxV < 0.55 かつ z < 4（同） | 13 | 13 | 7（4） | 13 | 13 | 7 |
-| maxV < 0.55 かつ 素の近さの 1-2 位差 < 0.03（同） | 15 | 17 | 10（6） | 15 | 17 | 10 |
-| maxV < 0.55 かつ 点数の 1-2 位差 < 0.03（同） | 15 | 18 | 7（3） | 11 | 16 | 4 |
-| **上＋差は例抜き＋例 0.68 以上は残す＋maxV < 0.46 は差によらず（採用）** | **15** | **18** | **7（3）** | **15** | **18** | **5** |
-| 採用の形で maxV < 0.56 | 16 | 18 | 10（5） | 16 | 18 | 7 |
-| 採用の形で 差 < 0.02 | 13 | 14 | 4（1） | 13 | 14 | 3 |
-
-アプリ 25 問と名前の一部 5 問は 1 問も弾かない（アプリにファイルの答え無しの入力を入れると 3/20 を弾く。参考）。
-残る答え無しは「確定申告の書類」「見積書」「家計簿のエクセル」のように、似た書類（請求書・管理表）が実際にあるもの。
+- アプリで落ちたのは、名前にも辞書の言葉にも文字が重ならない言い方（「黒い画面でコマンド打つやつ」→ ターミナル、「顔を見ながら電話」→ FaceTime、「世界地図見るやつ」→ マップ）。記録（例あり）は答え合わせの言い方と文字が重ならないので効かない。自作は README の材料の文字が当たり、前より上がった。
+- ファイルで落ちたのは、説明の言い方で名前に無い言葉を使う問題（「大阪で泊まった宿の領収書」→ ホテルフクラシア大阪ベイ.pdf は「大阪」で引けるが「領収書」の方が多く当たる）と、つながり（relation）。時間・種類は「#」と同じ条件になるので残った。

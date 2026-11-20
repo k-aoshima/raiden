@@ -1,11 +1,11 @@
 import Foundation
 import RaidenCore
 
-/// 設定・検索範囲の差し替え・検索の記録・動作の記録の確かめ（raiden-eval --settings-test --store <コピーした raiden.sqlite>）。
+/// 設定・除外・前の版の DB の片付け・選んだ／開いた記録・検索の記録・動作の記録の確かめ
+/// （raiden-eval --settings-test --store <コピーした raiden.sqlite>）。
 /// ユーザーのファイル・本物の settings.json・ログ・DB には触らない:
 ///   設定は一時フォルダの settings.json、ログは一時フォルダ、DB は --store で渡したコピー。
-///   検索範囲は ~/Documents/raiden-test-<pid>（初期値の範囲の中）と、一時フォルダの raiden-test-<pid>-extra（範囲の外）を作って試し、最後に消す。
-func runSettingsTest(embedder: Embedder) throws {
+func runSettingsTest() throws {
     guard let sp = opt("--store") else { print("--store <コピーした raiden.sqlite> を渡してください"); return }
     guard sp != Store.defaultURL.path else { print("本物の raiden.sqlite は使えません。コピーを渡してください"); return }
     let fm = FileManager.default
@@ -24,29 +24,32 @@ func runSettingsTest(embedder: Embedder) throws {
     print("設定の読み書き（\(tmp.path)/settings.json）")
     let su = tmp.appendingPathComponent("settings.json")
     check("無いときは初期値", RaidenSettings.load(from: su) == RaidenSettings())
-    check("初期値は今の 4 か所", RaidenSettings().scope.roots == FileCatalog.defaultRoots && RaidenSettings().scope == ScanScope.default)
+    check("除外するフォルダの初期値は ~/Library", RaidenSettings().excludeFolders == ["~/Library"]
+          && RaidenSettings().exclude.excludesPath(NSHomeDirectory() + "/Library/Caches/x"))
     var s = RaidenSettings()
-    s.folders.append(.init(path: "~/raiden-test-dummy", enabled: false))
-    s.folders[1].enabled = false
     s.excludeFolders = ["~/Documents/raiden-test-ex"]
     s.excludeNames.append("*.tmp")
     s.hotKey = .init(keyCode: 49, modifiers: 4096 | 2048, label: "⌃⌥Space")
-    s.maxRows = 12; s.sectionOrder = .filesFirst; s.unloadMinutes = 5; s.transparency = 0.3
+    s.maxRows = 12; s.sectionOrder = .filesFirst; s.transparency = 0.3
     s.learn = false; s.logSearches = false; s.logDays = 30
     try s.save(to: su)
     let back = RaidenSettings.load(from: su)
     check("書いて読むと同じ", back == s)
-    check("範囲は有効なフォルダだけ・~ を広げる",
-          back.scope.roots == [NSHomeDirectory() + "/Documents", NSHomeDirectory() + "/Desktop", NSHomeDirectory() + "/Documents/Obsidian Vault"])
+    check("除外のフォルダは ~ を広げる", back.exclude.excludeDirs == [NSHomeDirectory() + "/Documents/raiden-test-ex"])
     let text = (try? String(contentsOf: su, encoding: .utf8)) ?? ""
-    check("保存は ~/ の形", text.contains("\"~/Documents\"") && !text.contains(NSHomeDirectory()))
+    check("保存は ~/ の形", text.contains("\"~/Documents/raiden-test-ex\"") && !text.contains(NSHomeDirectory()))
     try "{ 壊れた json".write(to: su, atomically: true, encoding: .utf8)
     check("壊れていたら初期値", RaidenSettings.load(from: su) == RaidenSettings())
-    try #"{"maxRows": "たくさん", "logDays": 7, "folders": [{"path": "~/Desktop", "enabled": true}], "transparency": 5}"#
+    try #"{"maxRows": "たくさん", "logDays": 7, "folders": [{"path": "~/Desktop", "enabled": true}], "transparency": 5, "unloadMinutes": 5}"#
         .write(to: su, atomically: true, encoding: .utf8)
     let part = RaidenSettings.load(from: su)
-    check("読めない項目だけ初期値（maxRows 9・logDays 7・フォルダ 1 つ・透明度は 0.9 まで）",
-          part.maxRows == 9 && part.logDays == 7 && part.folders.count == 1 && part.transparency == 0.9)
+    check("読めない項目だけ初期値（maxRows 9・logDays 7・透明度は 0.9 まで。前の版の folders・unloadMinutes は読み捨てる）",
+          part.maxRows == 9 && part.logDays == 7 && part.transparency == 0.9)
+    check("前の版の settings.json（除外のフォルダの初期値を知らない）には ~/Library を足す", part.excludeFolders == ["~/Library"])
+    var noLib = part
+    noLib.excludeFolders = []
+    try noLib.save(to: su)
+    check("~/Library を外したら、読み直しても戻らない", RaidenSettings.load(from: su).excludeFolders.isEmpty)
     // 前の版の settings.json（knownExcludeDefaults が無い）: 増えた初期値だけを足し、ユーザーが消した前の初期値（Pods）は戻さない
     try #"{"excludeNames": ["node_modules", ".venv", "venv", "__pycache__", ".git", "DerivedData", "*.tmp"]}"#
         .write(to: su, atomically: true, encoding: .utf8)
@@ -65,91 +68,34 @@ func runSettingsTest(embedder: Embedder) throws {
     check("除外のフォルダ（その中も・名前が前方一致なだけの隣は除かない）",
           sc.excludesPath(NSHomeDirectory() + "/x/skip/a") && !sc.excludesPath(NSHomeDirectory() + "/x/skipper"))
 
-    // MARK: 範囲の差し替え
-    print("検索範囲の差し替え（\(sp) のコピー）")
-    let store = try Store(url: URL(fileURLWithPath: sp))
-    let e = Engine(embedder: CachedEmbedder(embedder), store: store)
-    let docs = NSHomeDirectory() + "/Documents/raiden-test-\(pid)"
-    let extra = tmp.appendingPathComponent("raiden-test-\(pid)-extra").path
-    defer {
-        try? fm.removeItem(atPath: docs)
-        try? fm.removeItem(atPath: extra)
-    }
-    try fm.createDirectory(atPath: docs + "/sub", withIntermediateDirectories: true)
-    try fm.createDirectory(atPath: extra + "/inner", withIntermediateDirectories: true)
-    let dA = docs + "/raiden-test-qx8-ペンギンの飼育メモ.txt"
-    let dB = docs + "/sub/raiden-test-qx8-フラミンゴの観察.txt"
-    let dTmp = docs + "/raiden-test-qx8-一時ファイル.zq9tmp"
-    let xA = extra + "/raiden-test-qx8-カピバラの温泉メモ.txt"
-    let xB = extra + "/inner/raiden-test-qx8-アルパカの毛刈り.txt"
-    for (p, body) in [(dA, "ペンギン 飼育 水槽 qx8"), (dB, "フラミンゴ 観察 qx8"), (dTmp, "一時 qx8"),
-                      (xA, "カピバラ 温泉 qx8"), (xB, "アルパカ 毛刈り qx8")] {
-        try body.write(toFile: p, atomically: true, encoding: .utf8)
-    }
-    let idx = FileIndex(engine: e)
+    // MARK: 前の版の DB の片付けと、選んだ・開いた記録
+    print("データベース（\(sp) のコピー）")
+    let before = (try? fm.attributesOfItem(atPath: sp)[.size] as? Int) ?? 0
     var t = Date()
-    let full = idx.fullScan()
-    print(String(format: "  全体の見直し %d 件（ベクトル化 %d 件）%.1fs", full.changed, full.embedded, Date().timeIntervalSince(t)))
-    func has(_ p: String) -> Bool { e.files.contains { $0.path == p } }
-    func top(_ q: String) -> [String] { e.searchFiles(q, limit: 5).map(\.file.path) }
-    check("初期値の範囲: ~/Documents の中は入る・範囲の外は入らない", has(dA) && has(dB) && !has(xA))
-
-    // 足す
-    var sc2 = RaidenSettings()
-    sc2.folders.append(.init(path: extra))
+    let store = try Store(url: URL(fileURLWithPath: sp))
+    print(String(format: "  開く（前の版なら片付けて VACUUM）%.2fs  消したファイル・フォルダの点 %d  大きさ %.1fMB → %.1fMB", Date().timeIntervalSince(t),
+                 store.migratedFiles, Double(before) / 1_048_576, Double((try? fm.attributesOfItem(atPath: sp)[.size] as? Int) ?? 0) / 1_048_576))
+    check("片付けの印（meta files = spotlight1）", store.meta("files") == "spotlight1" && store.meta("file_scope") == nil && store.meta("fs_event_id") == nil)
+    check("contains / co_time / opens の線は無い", store.edgeCount(kind: "contains") == 0 && store.edgeCount(kind: "co_time") == 0 && store.edgeCount(kind: "opens") == 0)
     t = Date()
-    var st = idx.setScope(sc2.scope)
-    print(String(format: "  フォルダを足す: 増えた %d 件（ベクトル化 %d 件）%.2fs", st.changed, st.embedded, Date().timeIntervalSince(t)))
-    check("足したフォルダの物が一覧に入る（中のフォルダも）", has(xA) && has(xB) && has(extra + "/inner"))
-    check("ベクトル化は増えた物だけ（3 件: 2 ファイル＋1 フォルダ。ほかは作り直さない）", st.embedded == 3)
-    check("足したフォルダの物が検索に出る", top("raiden-test-qx8 カピバラの温泉メモ").contains(xA))
-    check("SQLite に点が入る", store.hasFileNode(xA))
-    // 外したときに chose の線も消えるか見るため、足した物を選んだ例を残す
-    let q = "raiden-test-qx8 温泉の動物のメモ"
-    store.recordFileChoice(query: q, path: xA, isDir: false, name: (xA as NSString).lastPathComponent,
-                           vector: e.embedder.embed(q), model: e.embedder.identifier)
-    check("例（chose の線）が入る", store.fileExamples().contains { $0.0 == q && $0.1 == xA })
-    check("覚えた例の一覧に出る", store.learnedExamples().contains { $0.query == q && $0.key == xA && $0.kind == "file" })
-
-    // 外す
-    t = Date()
-    st = idx.setScope(ScanScope.default)
-    print(String(format: "  フォルダを外す: 外した %d 件（ベクトル化 %d 件）%.2fs", st.removed, st.embedded, Date().timeIntervalSince(t)))
-    check("外したフォルダの物が一覧から消える", !has(xA) && !has(xB))
-    check("外したフォルダの物が検索に出ない", !top("raiden-test-qx8 カピバラの温泉メモ").contains(xA))
-    check("SQLite から点が消える", !store.hasFileNode(xA) && !store.hasFileNode(xB))
-    check("外した物に向いた chose の線も消える", !store.fileExamples().contains { $0.1 == xA })
-    check("線の無くなった例は覚えた例の一覧に出ない", !store.learnedExamples().contains { $0.query == q })
-    check("ほかのフォルダはそのまま", has(dA) && has(dB))
-
-    // 除外するフォルダ
-    var sc3 = RaidenSettings()
-    sc3.excludeFolders = [RaidenSettings.tilde(docs + "/sub")]
-    st = idx.setScope(sc3.scope)
-    check("除外したフォルダの中が消える（SQLite からも）", !has(dB) && !store.hasFileNode(dB) && has(dA))
-    // 除外する名前
-    var sc4 = RaidenSettings()
-    sc4.excludeNames.append("*.zq9tmp")
-    st = idx.setScope(sc4.scope)
-    check("除外する名前（*.zq9tmp）に合う物が消え、除外をやめたフォルダは戻る", !has(dTmp) && has(dB) && has(dA))
-    check("戻った物は検索に出る", top("raiden-test-qx8 フラミンゴの観察").contains(dB))
-    // 外した後に FSEvents の当て方も範囲に従うか（範囲の外の変化は無視）
-    _ = idx.apply(FSWatcher.Change(paths: [xA]))
-    check("範囲の外の変化は一覧に入れない", !has(xA))
-
-    // 覚えた例の削除
-    let q2 = "raiden-test-qx8 ペンギンのメモ"
-    store.recordFileChoice(query: q2, path: dA, isDir: false, name: "p", vector: e.embedder.embed(q2), model: e.embedder.identifier)
-    let had = store.learnedExamples().contains { $0.query == q2 }
-    store.deleteLearned(query: q2, kind: "file", key: dA)
-    check("覚えた例を 1 件消せる", had && !store.learnedExamples().contains { $0.query == q2 } && !store.fileExamples().contains { $0.0 == q2 })
-
-    // 後片付け（テスト用フォルダの点を SQLite のコピーからも消す）
-    try? fm.removeItem(atPath: docs)
-    try? fm.removeItem(atPath: extra)
-    idx.setScope(ScanScope.default)
-    _ = idx.fullScan()
-    check("後片付け: テスト用フォルダを消して一覧からも消える", !has(dA) && !store.hasFileNode(dA) && !fm.fileExists(atPath: docs))
+    let again = try Store(url: URL(fileURLWithPath: sp))
+    check(String(format: "2 回目は片付けない（%.2fs）", Date().timeIntervalSince(t)), again.migratedFiles == 0)
+    let dA = tmp.appendingPathComponent("raiden-test-qx8-ペンギン.txt").path
+    let dB = tmp.appendingPathComponent("raiden-test-qx8-フラミンゴ.txt").path
+    let q = "raiden-test-qx8 ペンギンのメモ"
+    store.recordFileChoice(query: q, path: dA, isDir: false, name: "p")
+    check("選んだ記録（chose の線）が入る", store.fileExamples().contains { $0.0 == q && $0.1 == dA })
+    check("覚えた例の一覧に出る", store.learnedExamples().contains { $0.query == q && $0.key == dA && $0.kind == "file" })
+    let exs = SpotlightSearch.exampleScores("raiden-test-qx8 ペンギンのメモ帳", store.fileExamples())
+    check("入力の文字が近ければ加点（記録の入力と 1 文字違い）", (exs[dA] ?? 0) > 0.3)
+    check("遠い入力には加点しない", SpotlightSearch.exampleScores("カピバラ", store.fileExamples())[dA] == nil)
+    store.recordOpenedTogether(path: dA, isDir: false)
+    store.recordOpenedTogether(path: dB, isDir: false)
+    store.recordOpenedTogether(path: dA, isDir: false)
+    check("30 分以内に Raiden から開いた物どうしに co_used の線（両向き・重みは回数）",
+          store.coUsed(dA)[dB] == 2 && store.coUsed(dB)[dA] == 2)
+    store.deleteLearned(query: q, kind: "file", key: dA)
+    check("覚えた例を 1 件消せる", !store.learnedExamples().contains { $0.query == q } && !store.fileExamples().contains { $0.0 == q })
 
     // MARK: 検索の記録
     print("検索の記録（search_log）")
@@ -196,20 +142,18 @@ func runSettingsTest(embedder: Embedder) throws {
     check("30 日より古い回したファイルは消す", !fm.fileExists(atPath: ld.appendingPathComponent("raiden.3.log").path))
 
     try? fm.removeItem(at: tmp)
-    check("一時フォルダを消した", !fm.fileExists(atPath: tmp.path) && !fm.fileExists(atPath: docs))
+    check("一時フォルダを消した", !fm.fileExists(atPath: tmp.path))
     print(fails == 0 ? "すべて OK" : "失敗 \(fails) 件")
 }
 
 /// 検索の記録で答え合わせ（raiden-eval --log-eval --store <コピーした raiden.sqlite>）。
 /// 選んで開いた記録を今の並べ方で回し直し、当時の順位と今の順位を比べる（重みを変えたときの確かめ用）
-func runLogEval(embedder: Embedder, apps: [AppEntry]) throws {
-    guard let sp = opt("--store") else { print("--store <コピーした raiden.sqlite> を渡してください"); return }
+func runLogEval(apps: [AppEntry]) throws {
+    guard let sp = opt("--store"), sp != Store.defaultURL.path else { print("--store <コピーした raiden.sqlite> を渡してください"); return }
     let store = try Store(url: URL(fileURLWithPath: sp))
-    let e = Engine(embedder: CachedEmbedder(embedder), store: store)
+    let e = Engine(store: store, exclude: RaidenSettings().exclude)
     e.setApps(apps)
     e.loadExamples()
-    let idx = FileIndex(engine: e, scope: RaidenSettings.load().scope)
-    idx.fullScan()
     let rows = store.searchLog(limit: 100_000).filter { ($0.chosenRank ?? 0) > 0 && $0.chosenKey != nil }
     var then1 = 0, then3 = 0, now1 = 0, now3 = 0
     var moved: [String] = []

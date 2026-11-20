@@ -6,14 +6,9 @@
 #   scripts/build.sh            ビルドだけ（build/Raiden.app, build/raiden-eval）
 #   scripts/build.sh --install  ~/Applications/Raiden.app に入れて起動し直す
 #
-# モデル: RAIDEN_MODEL_DIR（既定 /Volumes/SSD/raiden-models-ane）の中から
-#   vocab.bin, embed_int8.bin, embed_scale.bin, meta.json, center.bin（2 値のベクトルの中心）, body_${RAIDEN_BODY:-ane_pal6}.mlpackage を同梱する。
-#   既定は ANE 版（tools/convert/convert_ane.py）。前の CPU 版に戻すときは
-#   RAIDEN_MODEL_DIR=/Volumes/SSD/raiden-models RAIDEN_BODY=int4 scripts/build.sh
+# 埋め込みモデルは使わない（同梱しない）。アプリは名前・辞書・記録の文字の一致、ファイルは Spotlight で探す。
 set -euo pipefail
 cd "$(dirname "$0")/.."
-MODEL_DIR="${RAIDEN_MODEL_DIR:-/Volumes/SSD/raiden-models-ane}"
-BODY="${RAIDEN_BODY:-ane_pal6}"
 OV="-vfsoverlay scripts/clt-overlay.yaml -Xcc -ivfsoverlay -Xcc scripts/clt-overlay.yaml"
 TARGET="-target arm64-apple-macosx15.0"
 
@@ -29,12 +24,9 @@ swiftc -O -swift-version 5 $TARGET $OV -I build/obj -L build/obj -lRaidenCore -l
 
 APP=build/Raiden.app
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/model"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp build/Raiden "$APP/Contents/MacOS/Raiden"
 cp app/Resources/Info.plist "$APP/Contents/Info.plist"
-for f in vocab.bin embed_int8.bin embed_scale.bin meta.json center.bin; do cp "$MODEL_DIR/$f" "$APP/Contents/Resources/model/"; done
-# 本体はコンパイル済み（.mlmodelc）で入れる。コンパイルは raiden-eval --compile（MLModel.compileModel）で行う
-./build/raiden-eval --compile "$MODEL_DIR/body_$BODY.mlpackage" "$APP/Contents/Resources/model/body.mlmodelc"
 # 署名。アドホック（-）だとビルドごとに cdhash が変わり、macOS が別のアプリと見なして、書類・デスクトップ・ダウンロードへの
 # アクセス許可を入れ直すたびに聞き直す。キーチェーンの自己署名の証明書（Andon と同じ「Andon Local Signing」）があればそれで署名する
 SIGN=$(security find-identity -p codesigning 2>/dev/null | awk -F'"' '/Andon Local Signing/{print $2; exit}')

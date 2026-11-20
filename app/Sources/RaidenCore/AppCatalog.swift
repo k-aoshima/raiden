@@ -12,6 +12,7 @@ public struct AppEntry: Sendable, Hashable {
     public let docs: [String]    // CFBundleDocumentTypes から拾った種類名・UTI・拡張子
     public let extra: String     // 標準アプリ以外の説明の材料（AppExtra）。無ければ空
     public var opens: [String: Int] = [:]  // 手元のファイルをこのアプリで開く件数（種類 → 件数。OpenWithIndex）
+    public var lastUsed = 0                // 最後に使った日時（Spotlight の kMDItemLastUsedDate。無ければ 0）
 }
 
 public enum AppCatalog {
@@ -129,11 +130,15 @@ public enum AppCatalog {
             let nameNFC = name.precomposedStringWithCanonicalMapping
             let jpNFC = jp.isEmpty ? base.precomposedStringWithCanonicalMapping : jp
             let extra = ctx.map { AppExtra.text(path: path, info: info, bundleID: bid, names: [jpNFC, nameNFC, base], ctx: $0) } ?? ""
-            out.append(AppEntry(
+            var entry = AppEntry(
                 key: key, bundleID: bid, path: path,
                 name: nameNFC, jp: jpNFC,
                 category: info["LSApplicationCategoryType"] as? String ?? "",
-                docs: Array(docs.sorted().prefix(40)), extra: extra, opens: openCounts[key] ?? [:]))
+                docs: Array(docs.sorted().prefix(40)), extra: extra, opens: openCounts[key] ?? [:])
+            if let it = MDItemCreate(nil, path as CFString), let d = MDItemCopyAttribute(it, kMDItemLastUsedDate) as? Date {
+                entry.lastUsed = Int(d.timeIntervalSince1970)
+            }
+            out.append(entry)
         }
         return out
     }

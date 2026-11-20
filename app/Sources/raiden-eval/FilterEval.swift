@@ -1,8 +1,7 @@
 // 入力欄の絞り込みコマンド（QueryFilters / FilterCompletion）の確かめ。
 //
-//   raiden-eval --test-filters                 解析・一覧・値の候補・ゴーストテキストの単体の確かめ（モデル不要）と、件数を数える速さ
-//   raiden-eval --dump-entries <file>          手元の一覧を JSON に書き出す（filters.json の正解を作る用）
-//   raiden-eval --filters [--now 2026-11-19] [--file-store <path>]
+//   raiden-eval --test-filters                 解析・一覧・値の候補・ゴーストテキストの単体の確かめ
+//   raiden-eval --filters [--now 2026-11-19] --file-store <scratch の新しいファイル>
 //       ~/Library/Application Support/Raiden/evals/filters.json の答え合わせ（Engine.searchFilesJudged を通す）
 //       [{"q": 入力, "mode": "all" | "top" | "none", "allowed": [~/ からのパス], "gold": [~/ からのパス]}]
 //         all:  残りの文が空。当てはまる物（allowed）が全部出て、それ以外が 1 件も出ないこと
@@ -205,57 +204,24 @@ func runFilterTests() {
     print("（うち 覚える・保存・言葉からの候補・#with #near・辞書・#alias の確かめ \(lc - lf)/\(lc)）")
     print("確かめ \(checks - failures)/\(checks)")
 
-    // 件数を数える速さ（実際の一覧）
-    let t0 = Date()
-    let entries = FileCatalog.collect()
-    let real = FilterContext(files: entries, appCount: 120)
-    print("\n== 件数の速さ（手元 \(entries.count) 件、一覧 \(String(format: "%.0f", Date().timeIntervalSince(t0) * 1000))ms）")
-    for (t, committed) in [("#date ", [String]()), ("#kind ", []), ("#ext ", []), ("#path ", []), ("#date ", ["#kind ss"]), ("#path D", ["#kind pdf", "#date 3m"])] {
-        var ms: [Double] = []
-        var n = 0
-        for _ in 0..<20 {
-            let s = Date()
-            n = FilterCompletion.palette(for: t, committed: committed, context: real, now: testNow)?.items.count ?? 0
-            ms.append(Date().timeIntervalSince(s) * 1000)
-        }
-        ms.sort()
-        print("  \((committed + [t]).joined(separator: " "))  候補 \(n) 件  中央 \(String(format: "%.2f", ms[10]))ms  最大 \(String(format: "%.2f", ms.last!))ms")
-    }
-    var ms: [Double] = []
-    for _ in 0..<20 { let s = Date(); _ = FilterCompletion.next(QueryFilters.parse("#kind ss", now: testNow), context: real, now: testNow); ms.append(Date().timeIntervalSince(s) * 1000) }
-    ms.sort()
-    print("  次のコマンド（#kind ss の後）中央 \(String(format: "%.2f", ms[10]))ms")
     exit(failures == 0 ? 0 : 1)
-}
-
-func dumpEntries(_ path: String) throws {
-    let entries = FileCatalog.collect()
-    let home = NSHomeDirectory() + "/"
-    let rows: [[String: Any]] = entries.map { e in
-        ["path": e.path.hasPrefix(home) ? String(e.path.dropFirst(home.count)) : e.path, "name": e.name, "isDir": e.isDir,
-         "families": e.families, "mtime": e.mtime, "created": e.created, "added": e.added, "lastUsed": e.lastUsed]
-    }
-    try JSONSerialization.data(withJSONObject: rows, options: [.sortedKeys]).write(to: URL(fileURLWithPath: path))
-    print("書き出し \(entries.count) 件 → \(path)")
 }
 
 struct FilterQ: Decodable { let q: String; let mode: String; let allowed: [String]?; let gold: [String]? }
 
-func runFilterEval(embedder: Embedder, appEngine: Engine) throws {
+func runFilterEval(appEngine: Engine) throws {
     let evalDir = opt("--evals") ?? RaidenPaths.support.appendingPathComponent("evals").path
     let qs = try JSONDecoder().decode([FilterQ].self, from: Data(contentsOf: URL(fileURLWithPath: evalDir + "/filters.json")))
-    let entries = FileCatalog.collect()
-    let store = try opt("--file-store").map { try Store(url: URL(fileURLWithPath: $0)) } ?? Store()
-    let e = Engine(embedder: embedder, store: store)
-    e.setFiles(entries)
-    let live = Set(entries.map(\.path))
-    print("== 絞り込みの答え合わせ（\(qs.count) 問、基準日 \(opt("--now") ?? "2026-11-19")、手元 \(entries.count) 件）")
+    guard let sp = opt("--file-store"), sp != Store.defaultURL.path else { print("--file-store <scratch の新しいファイル> を渡してください"); return }
+    let e = Engine(store: try Store(url: URL(fileURLWithPath: sp)), exclude: RaidenSettings().exclude)
+    let fm = FileManager.default
+    print("== 絞り込みの答え合わせ（\(qs.count) 問、基準日 \(opt("--now") ?? "2026-11-19")、Spotlight）")
     var pure = 0, full = 0, nAll = 0, h1 = 0, h3 = 0, nTop = 0, okNone = 0, nNone = 0
     var mixed = 0
     var appsLeak = 0
     for q in qs {
-        let allowed = Set((q.allowed ?? []).map(abs).filter(live.contains))
-        let gold = Set((q.gold ?? []).map(abs).filter(live.contains))
+        let allowed = Set((q.allowed ?? []).map(abs).filter { fm.fileExists(atPath: $0) })
+        let gold = Set((q.gold ?? []).map(abs).filter { fm.fileExists(atPath: $0) })
         let lim = q.mode == "all" ? allowed.count + 10 : 20
         let t = Date()
         let j = e.searchFilesJudged(q.q, limit: lim, now: evalNow)

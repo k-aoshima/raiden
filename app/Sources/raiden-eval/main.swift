@@ -1,18 +1,17 @@
-// 答え合わせ。アプリと同じ Engine.search で 25 個の曖昧な言い方を並べ、1位・3位以内の数を出す。
+// 答え合わせ。アプリと同じ Engine.search で 25 個の曖昧な言い方を並べ、1位・3位以内の数を出す（埋め込みモデルは使わない）。
 //
-//   raiden-eval --model-dir <dir> --body body_int8.mlmodelc [--units ane|cpu|gpu|all（無ければ meta.json の units）] [--sweep] [--reload]
-//   raiden-eval --nl     （参考: OS の NLContextualEmbedding）
+//   raiden-eval [--miss]
 //   --no-extra    自作アプリなどの説明の材料（AppExtra）と「いつも開くファイル」を使わない（前の作りと比べる）
-//   --show-desc   説明の材料か他社アプリの辞書が付いたアプリの説明文を並べる
+//   --show-desc   辞書の言葉（Describe.dictText）が付いたアプリを並べる
 //   --apps-own <path>  自作アプリの問題（既定 ~/Library/Application Support/Raiden/evals/apps-own.json）
 //   --apps-3p <path>   他社アプリの問題（既定 ~/Library/Application Support/Raiden/evals/apps-3p.json）
 //   RAIDEN_NO_SPOTLIGHT=1  アプリの一覧を Spotlight で広げない（前の作りと比べる）
-//   --open-bonus <x> / --sweep-open  いつも開くアプリの加点（Engine.openBonus）を変える / 振って比べる
-//   --test-filters / --filters / --dump-entries <file>  入力欄の絞り込みコマンド（FilterEval.swift）
-//   --knn-w <x> / --knn-min <x> / --knn-pow <x> / --sweep-knn  アプリの k近傍法（例の重み・最低の近さ・近さの何乗）
+//   --open-bonus <x>  いつも開くアプリの加点（Engine.openBonus）を変える
+//   --test-filters / --filters  入力欄の絞り込みコマンド（FilterEval.swift）
+//   --test-spotlight / --bench-spotlight / --boot-bench  Spotlight への置き換えと問い合わせの時間、起動（SpotlightTest.swift）
+//   --files  ファイルの答え合わせ（FileEval.swift）
 //
-// 保存済みの例（raiden.sqlite）は読まない。例はこのファイルの EX だけ。
-import CoreML
+// 保存済みの記録（raiden.sqlite）は読まない。「例あり」の記録はこのファイルの EX だけ。
 import Foundation
 import RaidenCore
 
@@ -61,52 +60,35 @@ func median(_ xs: [Double]) -> Double { xs.sorted()[xs.count / 2] }
 
 @discardableResult
 func run(_ e: Engine, _ qs: [(String, [String])], examples: Bool, _ label: String, verbose: Bool = true) -> (Int, Int, Double) {
-    var h1 = 0, h3 = 0
+    var h1 = 0, h3 = 0, rej = 0
     var ts: [Double] = []
     var miss: [String] = []
     for (q, gold) in qs {
         let t = Date()
-        let top = e.search(q, limit: 3, useExamples: examples).map(\.app.jp)
+        let j = e.searchJudged(q, limit: 3, useExamples: examples)
+        let top = j.results.map(\.app.jp)
         ts.append(Date().timeIntervalSince(t) * 1000)
-        if gold.contains(top[0]) { h1 += 1 } else { miss.append("    外れ \(q) -> \(top)") }
+        if j.noMatch { rej += 1 }
+        if let f = top.first, gold.contains(f) { h1 += 1 } else { miss.append("    外れ \(q) -> \(top)\(j.noMatch ? "（見つからない）" : "")") }
         if top.contains(where: gold.contains) { h3 += 1 }
     }
     if verbose {
-        print("\(label): 1位 \(h1)/\(qs.count)  3位以内 \(h3)/\(qs.count)  1回 \(String(format: "%.1f", median(ts)))ms")
+        print("\(label): 1位 \(h1)/\(qs.count)  3位以内 \(h3)/\(qs.count)  見つからない \(rej)  1回 \(String(format: "%.2f", median(ts)))ms")
         if args.contains("--miss") { miss.forEach { print($0) } }
     }
     return (h1, h3, median(ts))
 }
 
-// --compile <in.mlpackage> <out.mlmodelc>（build.sh が使う）
-if let i = args.firstIndex(of: "--compile"), i + 2 < args.count {
-    let tmp = try MLModel.compileModel(at: URL(fileURLWithPath: args[i + 1]))
-    let dst = URL(fileURLWithPath: args[i + 2])
-    try? FileManager.default.removeItem(at: dst)
-    try FileManager.default.moveItem(at: tmp, to: dst)
-    print("compiled \(dst.path)")
-    exit(0)
-}
-
-// --test-filters / --dump-entries: 入力欄の絞り込みコマンドの確かめ（モデル不要。FilterEval.swift）
+// モデルの要らない確かめ
 if args.contains("--test-filters") { runFilterTests() }
-if let p = opt("--dump-entries") { try dumpEntries(p); exit(0) }
-// --bin-mode asym|hamming|twoStage [--bin-n 100]: ファイル・フォルダの 2 値のベクトルの並べ方（BinVec.mode）を変える
-if let m = opt("--bin-mode").flatMap(BinVec.Mode.init(rawValue:)) { BinVec.mode = m }
-if let n = opt("--bin-n").flatMap(Int.init) { BinVec.twoStageN = n }
-// --plan <body.mlmodelc>: どの演算が ANE に載るか（AnePlan.swift）
-if let p = opt("--plan") {
-    let sem = DispatchSemaphore(value: 0)
-    Task { do { try await runAnePlan(p) } catch { print("plan: \(error)") }; sem.signal() }
-    sem.wait()
-    exit(0)
-}
-// --bench-embed: ベクトル化の速さとメモリ（1 件ずつとまとめて。BenchEmbed.swift）
-if args.contains("--bench-embed") { try runBenchEmbed() }
-if args.contains("--bench-binary") { runBenchBinary() }
+if args.contains("--test-spotlight") { runSpotlightTests() }
+if args.contains("--bench-spotlight") { try runSpotlightBench(); exit(0) }
+if args.contains("--boot-bench") { try runBootBench(); exit(0) }
+if args.contains("--files") { try runFileEval(); exit(0) }
+// --settings-test --store <path>: 設定の読み書き・除外・DB の片付け・記録・動作の記録（SettingsTest.swift）
+if args.contains("--settings-test") { try runSettingsTest(); exit(0) }
 
 let fpStart = physFootprintMB()
-// --no-extra: 標準アプリ以外の説明の材料（AppExtra）を使わない（前の作りと比べる用）
 let tCollect = Date()
 let apps = AppCatalog.collect(extras: !args.contains("--no-extra"))
 print("アプリ \(apps.count) 個（一覧づくり \(String(format: "%.2f", Date().timeIntervalSince(tCollect)))s） / 起動時メモリ \(String(format: "%.0f", fpStart))MB")
@@ -114,225 +96,60 @@ if args.contains("--list-apps") {
     for a in apps { print("\(a.jp)\t\(a.bundleID)\t\(a.path)") }
     exit(0)
 }
-
-// --show-desc: 説明の材料が付いたアプリの説明文を並べて終わる
 if args.contains("--show-desc") {
-    for a in apps where !a.extra.isEmpty || !a.opens.isEmpty || (appDict[a.bundleID] != nil && !a.bundleID.hasPrefix("com.apple.")) { print("[\(a.jp)] \(Describe.text(a))\n") }
+    for a in apps { print("[\(a.jp)] \(Describe.dictText(a))\n") }
     exit(0)
 }
 
 // 自作アプリの問題（私的な名前を含むのでリポジトリに入れない）。[{"q": 言い方, "gold": [アプリの日本語名]}]
-//   --apps-own <path>（既定 ~/Library/Application Support/Raiden/evals/apps-own.json）。無ければ飛ばす
 struct OwnQ: Decodable { let q: String; let gold: [String] }
 let ownPath = opt("--apps-own") ?? RaidenPaths.support.appendingPathComponent("evals/apps-own.json").path
 func loadQs(_ path: String) -> [(String, [String])] {
     ((try? JSONDecoder().decode([OwnQ].self, from: Data(contentsOf: URL(fileURLWithPath: path)))) ?? []).map { ($0.q, $0.gold) }
 }
 let OWN = loadQs(ownPath)
-// 他社アプリを曖昧な言い方で探す問題（形は apps-own.json と同じ）
 let THIRD = loadQs(opt("--apps-3p") ?? RaidenPaths.support.appendingPathComponent("evals/apps-3p.json").path)
 
-// トークナイザの答え合わせ: --dump-texts <file> で全文を書き出し、Python で正解を作って --check-tokens <file> <ids.json>
-func allTexts(_ apps: [AppEntry]) -> [String] {
-    apps.map { Describe.text($0, useDict: true) } + apps.map { Describe.text($0, useDict: false) }
-        + Q.map(\.0) + EX.flatMap(\.1) + PARTIAL.map(\.0)
-}
-if let p = opt("--dump-texts") {
-    try allTexts(apps).joined(separator: "\n").write(toFile: p, atomically: true, encoding: .utf8)
-    exit(0)
-}
-if let i = args.firstIndex(of: "--check-tokens"), i + 2 < args.count {
-    let tok = try UnigramTokenizer(url: URL(fileURLWithPath: (opt("--model-dir") ?? "/Volumes/SSD/raiden-models") + "/vocab.bin"))
-    let texts = try String(contentsOfFile: args[i + 1], encoding: .utf8).components(separatedBy: "\n")
-    let ref = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: args[i + 2]))) as! [[Int]]
-    var ok = 0
-    for (t, r) in zip(texts, ref) {
-        let mine = tok.encode(t).map(Int.init)
-        if mine == r { ok += 1 } else if ok < 1000 { print("違う: \(t)\n  swift \(mine)\n  hf    \(r)") }
-    }
-    print("トークン一致 \(ok)/\(ref.count)")
-    exit(0)
-}
-
-// --bench-rank --roots ~/Project --entries <scratch のファイル>: 広い範囲で Ranker.rank の段ごとの時間と、
-// 名前の索引あり・なしの比べ（RankBench.swift）。並べ方の時間だけ見るので、入力のベクトルは文字列から作る乱数（モデルを読まない）
-// --check-cotime --entries <json>: co_time の線が前の作りと同じか（StartupBench.swift。モデルを読まない）
-if args.contains("--check-cotime") { try runCheckCoTime(); exit(0) }
-if args.contains("--bench-rank") {
-    runBenchRank(embedder: HashEmbedder())
-    exit(0)
-}
-
-let embedder: Embedder
-var bge: BGEEmbedder?
-let t0 = Date()
-if args.contains("--nl") {
-    embedder = try NLEmbedder()
-} else {
-    let dir = URL(fileURLWithPath: opt("--model-dir") ?? "/Volumes/SSD/raiden-models")
-    // --units を付けなければモデルの meta.json に従う（ANE 版は ANE、前の版は CPU）
-    let units: MLComputeUnits? = ["cpu": .cpuOnly, "gpu": .cpuAndGPU, "all": .all, "ane": .cpuAndNeuralEngine][opt("--units") ?? ""]
-    let b = try BGEEmbedder(modelDir: dir, body: opt("--body") ?? "body.mlmodelc", computeUnits: units,
-                            maxTokens: opt("--max-tokens").flatMap(Int.init) ?? 128)
-    try b.load()
-    // --no-wait-ane: ANE の読み込みを待たずに始める（読み終わるまでの CPU の代わりを確かめる用）
-    if b.aneProgress.total > 0 && !args.contains("--no-wait-ane") {
-        let tw = Date()
-        let ok = b.waitForANE()
-        print(String(format: "ANE の読み込み %@ %.1fs", ok ? "済み" : "失敗（CPU で続ける）", Date().timeIntervalSince(tw)))
-    }
-    embedder = b
-    bge = b
-}
-// --asym-a / --asym-b: 2 値の目盛りを差し替える（モデルの units で選んだ値の上書き）
-if let x = opt("--asym-a").flatMap(Float.init) { BinVec.asymA = x }
-if let x = opt("--asym-b").flatMap(Float.init) { BinVec.asymB = x }
-// --nm-file low,mid,gap,knn / --nm-app low,knn: 「見つからない」のしきい値を差し替える
-if let xs = opt("--nm-file")?.split(separator: ",").compactMap({ Float($0) }), xs.count == 4 {
-    NoMatchRule.filesOverride = NoMatchRule(lowMaxV: xs[0], midMaxV: xs[1], maxGap: xs[2], keepKnnSim: xs[3])
-}
-if let xs = opt("--nm-app")?.split(separator: ",").compactMap({ Float($0) }), xs.count == 2 {
-    NoMatchRule.appsOverride = NoMatchRule(lowMaxV: xs[0], midMaxV: 0, maxGap: 0, keepKnnSim: xs[1])
-}
-print("2 値の目盛り（\(BinVec.units)）a=\(BinVec.asymA) b=\(BinVec.asymB)  見つからない: ファイル \(NoMatchRule.files) / アプリ \(NoMatchRule.apps)")
-print("モデル \(embedder.identifier)  読み込み \(String(format: "%.2f", Date().timeIntervalSince(t0)))s  読み込み後メモリ \(String(format: "%.0f", physFootprintMB()))MB")
-
-// --watch-test --store <path>: FSEvents で変化が検索にすぐ出るかを確かめる（WatchTest.swift）
-if args.contains("--watch-test") {
-    try runWatchTest(embedder: embedder)
-    exit(0)
-}
-
-// --scope-run --roots ~/Project --file-store <コピー>: 広い範囲を丸ごと入れてみる（BenchEmbed.swift）
-if args.contains("--scope-run") {
-    try runScopeRun(embedder: embedder)
-    exit(0)
-}
-
-// --startup-bench --entries <json> --file-store <new> / --offline-test --store <new>: 保存した一覧からの起動（StartupBench.swift）
-if args.contains("--startup-bench") { try runStartupBench(embedder: embedder); exit(0) }
-if args.contains("--offline-test") { try runOfflineTest(embedder: embedder); exit(0) }
-
-// --bench-apply --roots ~/Project --file-store <scratch の新しいファイル>: FSEvents の変化を当てる手間（ApplyBench.swift）
-if args.contains("--bench-apply") {
-    try runApplyBench(embedder: embedder)
-    exit(0)
-}
-
-// --settings-test --store <path>: 設定の読み書き・検索範囲の差し替え・検索の記録・動作の記録を確かめる（SettingsTest.swift）
-if args.contains("--settings-test") {
-    try runSettingsTest(embedder: embedder)
-    exit(0)
-}
-
 // --log-eval --store <path>: 検索の記録（search_log）で答え合わせ（SettingsTest.swift）
-if args.contains("--log-eval") {
-    try runLogEval(embedder: embedder, apps: apps)
-    exit(0)
-}
+if args.contains("--log-eval") { try runLogEval(apps: apps); exit(0) }
 
-// PyTorch の答えとの突き合わせ（convert.py の reference.json）
-if let b = bge, let d = try? Data(contentsOf: b.modelDir.appendingPathComponent("reference.json")),
-   let ref = try? JSONSerialization.jsonObject(with: d) as? [String: Any], let texts = ref["texts"] as? [String] {
-    let vs = texts.map { b.embed($0) }
-    let ids = texts.map { b.tokenize($0) }
-    let refIds = ref["ids"] as? [[Int]] ?? []
-    let idsOK = zip(ids, refIds).allSatisfy { a, r in a == Array(r.prefix(a.count)) }
-    print(String(format: "PyTorch との比較: cos(0,1) %.4f（PyTorch %.4f） cos(0,2) %.4f（PyTorch %.4f） トークン一致 %@",
-                 Vec.dot(vs[0], vs[1]), ref["cos01"] as? Double ?? 0, Vec.dot(vs[0], vs[2]), ref["cos02"] as? Double ?? 0,
-                 idsOK ? "はい" : "いいえ"))
-}
-
-// --store <path>: アプリと同じ SQLite の道筋（nodes/edges）を試す。2 回目の起動はベクトルを作り直さない
+// --store <path>: アプリと同じ SQLite の道筋（nodes/edges）を試す
 if let sp = opt("--store") {
+    guard sp != Store.defaultURL.path else { print("本物の raiden.sqlite は使えません"); exit(1) }
     for round in 1...2 {
         let t = Date()
         let st = try Store(url: URL(fileURLWithPath: sp))
-        let e = Engine(embedder: embedder, store: st)
+        let e = Engine(store: st)
         e.setApps(apps)
         e.loadExamples()
-        print(String(format: "store %d 回目: アプリ %d 例 %d  %.2fs", round, st.count(kind: "app"), e.examples.count, Date().timeIntervalSince(t)))
+        print(String(format: "store %d 回目: 記録 %d  %.2fs", round, e.examples.count, Date().timeIntervalSince(t)))
         if round == 1, let calc = apps.first(where: { $0.bundleID == "com.apple.calculator" }) {
             print("  学習前「数字を足したい」->", e.search("数字を足したい", limit: 3).map(\.app.jp))
             e.learn(query: "数字を足したい", app: calc)
             e.learn(query: "数字を足したい", app: calc)
         } else {
             print("  学習後「数字を足したい」->", e.search("数字を足したい", limit: 3).map(\.app.jp),
-                  " 似た言い方「数を足す」->", e.search("数を足す", limit: 3).map(\.app.jp))
+                  " 似た言い方「数字を足す」->", e.search("数字を足す", limit: 3).map(\.app.jp))
         }
     }
     exit(0)
 }
 
 let tA = Date()
-let plain = Engine(embedder: embedder, useDict: false)
+let plain = Engine(useDict: false)
 plain.setApps(apps)
-let rich = Engine(embedder: embedder, useDict: true)
+let rich = Engine(useDict: true)
 rich.setApps(apps)
 var firstKey: [String: String] = [:]
 for a in apps where firstKey[a.jp] == nil { firstKey[a.jp] = a.key }
 rich.addExamples(EX.flatMap { name, qs in qs.compactMap { q in firstKey[name].map { (q, $0) } } })
-print("説明文と例のベクトル化 \(String(format: "%.1f", Date().timeIntervalSince(tA)))s")
+print("辞書と記録の準備 \(String(format: "%.1f", Date().timeIntervalSince(tA) * 1000))ms")
 
-// --knn-w / --knn-min / --knn-pow: アプリの k近傍法の重み・数える最低の近さ・近さの何乗を変える（既定は Mix.appDefault）
-if let x = opt("--knn-w").flatMap(Float.init) { rich.appMix.wK = x }
-if let x = opt("--knn-min").flatMap(Float.init) { rich.appMix.knnMinSim = x }
-if let x = opt("--knn-pow").flatMap(Float.init) { rich.appMix.knnSimPow = x }
-
-if args.contains("--filters") {
-    try runFilterEval(embedder: embedder, appEngine: rich)
-    exit(0)
-}
-if args.contains("--files") {
-    try runFileEval(embedder: embedder, appQs: Q, appEngine: rich)
-    exit(0)
-}
-
-if args.contains("--sweep") {
-    for w in [0.5, 0.75, 1.0, 1.5, 2.0] as [Float] {
-        for ms in [0.0, 0.4, 0.5, 0.6] as [Float] {
-            rich.appMix.wK = w; rich.appMix.knnMinSim = ms
-            let (h1, h3, _) = run(rich, Q, examples: true, "", verbose: false)
-            print("w=\(w) min_sim=\(ms): 1位 \(h1) 3位以内 \(h3)")
-        }
-    }
-    exit(0)
-}
+if args.contains("--filters") { try runFilterEval(appEngine: rich); exit(0) }
 
 // いつも開くアプリの加点。--no-extra のときは前の作りに合わせて 0
 let noExtra = args.contains("--no-extra")
 for e in [plain, rich] { e.openBonus = noExtra ? 0 : (opt("--open-bonus").flatMap(Float.init) ?? e.openBonus) }
-if args.contains("--sweep-open") {
-    for b in [0.0, 0.05, 0.1, 0.15, 0.2, 0.3] as [Float] {
-        plain.openBonus = b; rich.openBonus = b
-        let r = [run(rich, Q, examples: false, "", verbose: false), run(rich, Q, examples: true, "", verbose: false),
-                 run(rich, PARTIAL, examples: true, "", verbose: false),
-                 run(rich, OWN, examples: false, "", verbose: false), run(rich, OWN, examples: true, "", verbose: false)]
-        print("加点 \(b): " + zip(["25問例なし", "25問例あり", "名前の一部", "自作例なし", "自作例あり"], r)
-            .map { "\($0) \($1.0)/\($1.1)" }.joined(separator: "  "))
-    }
-    exit(0)
-}
-// --sweep-knn: アプリの k近傍法（例の重み・数える最低の近さ・近さの何乗で票にするか）を振る。
-//   答えのある問題を「見つからない」と弾いた数も出す（NoMatchRule.apps と食い違わないかの確かめ）
-if args.contains("--sweep-knn") {
-    let base = rich.appMix
-    let all = Q + PARTIAL + OWN
-    for w in [0.5, 1.0, 1.25, 1.5, 2.0] as [Float] {
-        for ms in [0.0, 0.6] as [Float] {
-            for p in [1.0, 4.0, 6.0, 8.0] as [Float] {
-                rich.appMix = base
-                rich.appMix.wK = w; rich.appMix.knnMinSim = ms; rich.appMix.knnSimPow = p
-                let a = run(rich, Q, examples: true, "", verbose: false)
-                let b = run(rich, PARTIAL, examples: true, "", verbose: false)
-                let c = run(rich, OWN, examples: true, "", verbose: false)
-                let rej = all.filter { rich.searchJudged($0.0, limit: 3).noMatch }.count
-                print("w=\(w) min=\(ms) pow=\(p): 25問 \(a.0)/\(a.1)  名前 \(b.0)/\(b.1)  自作 \(c.0)/\(c.1)  弾いた \(rej)/\(all.count)")
-            }
-        }
-    }
-    exit(0)
-}
 run(plain, Q, examples: false, "例なし・辞書なし")
 run(rich, Q, examples: false, "例なし・辞書あり")
 run(rich, Q, examples: true, "例あり・辞書あり")
@@ -346,11 +163,3 @@ if !THIRD.isEmpty {
     run(rich, THIRD, examples: true, "他社アプリ・例あり")
 }
 print(String(format: "答え合わせ後メモリ footprint %.0fMB / 実メモリ(resident) %.0fMB", physFootprintMB(), residentMB()))
-
-if args.contains("--reload"), let b = bge {
-    b.unload()
-    print(String(format: "解放後メモリ footprint %.0fMB / resident %.0fMB", physFootprintMB(), residentMB()))
-    let t = Date()
-    _ = rich.search("PDFを見るやつ")
-    print(String(format: "再読み込み＋1回目の検索 %.2fs  メモリ %.0fMB", Date().timeIntervalSince(t), physFootprintMB()))
-}

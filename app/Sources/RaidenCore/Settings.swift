@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-/// 検索の対象範囲（探すフォルダ・除くフォルダ・除く名前）。FileCatalog / FileIndex / OpenWithIndex に渡す。
+/// 除外（除くフォルダ・除く名前）。Spotlight の結果から外す（SpotlightSearch）。roots は「いつも開くアプリ」を数える場所だけに使う。
 /// 隠しファイル（. で始まる名前）・パッケージの中・.app は常に除く（設定では変えない）。
 public struct ScanScope: Equatable, Sendable {
     public var roots: [String]          // 探す場所（絶対パス、NFC）
@@ -23,8 +23,6 @@ public struct ScanScope: Equatable, Sendable {
         a.roots == b.roots && a.excludeDirs == b.excludeDirs && a.excludeNames == b.excludeNames
     }
 
-    /// 今までの決め打ちと同じ（FileCatalog.defaultRoots と node_modules などの除外）
-    public static var `default`: ScanScope { ScanScope(roots: FileCatalog.defaultRoots) }
     /// 除外する名前の初期値。キャッシュ・ビルド物・依存の置き場（中身は数万件になりやすく、探す物ではない）。
     /// . で始まる名前（.git .venv .build .next .cache）は隠しファイルとして常に除くが、設定で見えるよう載せておく
     public static let defaultExcludeNames = ["node_modules", ".venv", "venv", "__pycache__", ".git", "DerivedData", "Pods",
@@ -33,7 +31,7 @@ public struct ScanScope: Equatable, Sendable {
     public static let legacyExcludeNames = ["node_modules", ".venv", "venv", "__pycache__", ".git", "DerivedData", "Pods"]
 
     /// ~ を広げ、シンボリックリンクをたどった実際のパスにする（列挙や FSEvents は実際のパスで返すため。/var → /private/var など）
-    static func norm(_ p: String) -> String {
+    public static func norm(_ p: String) -> String {
         var s = (p as NSString).expandingTildeInPath
         if let r = realpath(s, nil) { s = String(cString: r); free(r) }
         s = s.precomposedStringWithCanonicalMapping
@@ -70,12 +68,6 @@ public enum SectionOrder: String, Codable, CaseIterable, Sendable {
 /// 設定（~/Library/Application Support/Raiden/settings.json）。読めない・無い項目は初期値。
 /// ログイン時に起動はシステムの登録（SMAppService）が正なので、ここには持たない。
 public struct RaidenSettings: Codable, Equatable, Sendable {
-    public struct Folder: Codable, Equatable, Sendable {
-        public var path: String      // 保存は ~/ で短くした形
-        public var enabled: Bool
-        public init(path: String, enabled: Bool = true) { self.path = path; self.enabled = enabled }
-        public var absolutePath: String { ScanScope.norm(path) }
-    }
     public struct HotKeySetting: Codable, Equatable, Sendable {
         public var keyCode: UInt32
         public var modifiers: UInt32   // Carbon の修飾キー（cmdKey / optionKey ...）
@@ -86,15 +78,15 @@ public struct RaidenSettings: Codable, Equatable, Sendable {
     }
 
     public var version = 1
-    // 検索範囲
-    public var folders: [Folder] = RaidenSettings.defaultFolders
-    public var excludeFolders: [String] = []
+    // 除外（Spotlight の結果から外す）
+    public var excludeFolders: [String] = RaidenSettings.defaultExcludeFolders
     public var excludeNames: [String] = ScanScope.defaultExcludeNames
     /// 今まで足した除外の初期値。初期値が増えたら、ここに無い分だけを excludeNames に足す（ユーザーが消した物は戻さない）
     public var knownExcludeDefaults: [String] = ScanScope.defaultExcludeNames
+    /// 除くフォルダの初期値のうち、今まで足した物（同じ考え方。前の版の settings.json には ~/Library を足す）
+    public var knownExcludeFolderDefaults: [String] = RaidenSettings.defaultExcludeFolders
     // 一般
     public var hotKey: HotKeySetting?          // nil = 既定（⌥Space、取れなければ ⌃⌥⌘Space）
-    public var unloadMinutes = 0               // 入力欄を閉じてから何分でモデルを解放するか（0 = 解放しない）
     public var maxRows = 9                     // 候補の最大件数（アプリ＋ファイル）
     public var sectionOrder: SectionOrder = .auto
     public var transparency = RaidenSettings.defaultTransparency  // 入力欄と設定窓の透け具合（0 = 白い、0.9 = いちばん透ける）
@@ -108,18 +100,17 @@ public struct RaidenSettings: Codable, Equatable, Sendable {
 
     public init() {}
 
-    public static var defaultFolders: [Folder] {
-        ["~/Documents", "~/Downloads", "~/Desktop", "~/Documents/Obsidian Vault"].map { Folder(path: $0) }
-    }
+    /// 除くフォルダの初期値（Spotlight はメールやキャッシュも返すので ~/Library は見ない）
+    public static let defaultExcludeFolders = ["~/Library"]
     public static let maxRowsRange = 5...15
     public static let defaultTransparency = 0.6
     public static let transparencyRange = 0.0...0.9
 
     public static var defaultURL: URL { RaidenPaths.support.appendingPathComponent("settings.json") }
 
-    public var scope: ScanScope {
-        ScanScope(roots: folders.filter(\.enabled).map(\.absolutePath),
-                  excludeDirs: excludeFolders.map(ScanScope.norm), excludeNames: excludeNames)
+    /// Spotlight の結果から外す物
+    public var exclude: ScanScope {
+        ScanScope(roots: [], excludeDirs: excludeFolders.map(ScanScope.norm), excludeNames: excludeNames)
     }
 
     /// ~/ で短くする（保存と表示用）
@@ -132,7 +123,7 @@ public struct RaidenSettings: Codable, Equatable, Sendable {
 
     // 項目ごとに読めなければ初期値（古い版・壊れた値で全部が初期値に戻らないように）
     enum CodingKeys: String, CodingKey {
-        case version, folders, excludeFolders, excludeNames, knownExcludeDefaults, hotKey, unloadMinutes, maxRows, sectionOrder, transparency, learn, dictionary, savedFilters, logSearches, logDays
+        case version, excludeFolders, excludeNames, knownExcludeDefaults, knownExcludeFolderDefaults, hotKey, maxRows, sectionOrder, transparency, learn, dictionary, savedFilters, logSearches, logDays
     }
 
     public init(from d: Decoder) throws {
@@ -140,15 +131,16 @@ public struct RaidenSettings: Codable, Equatable, Sendable {
         let def = RaidenSettings()
         func get<T: Decodable>(_ k: CodingKeys, _ dv: T) -> T { (try? c.decodeIfPresent(T.self, forKey: k)).flatMap { $0 } ?? dv }
         version = get(.version, def.version)
-        folders = get(.folders, def.folders)
         excludeFolders = get(.excludeFolders, def.excludeFolders)
+        let knownF = get(.knownExcludeFolderDefaults, [String]())
+        for f in Self.defaultExcludeFolders where !knownF.contains(f) && !excludeFolders.contains(f) { excludeFolders.append(f) }
+        knownExcludeFolderDefaults = knownF + Self.defaultExcludeFolders.filter { !knownF.contains($0) }
         excludeNames = get(.excludeNames, def.excludeNames)
         // 初期値が増えた分だけを足す。knownExcludeDefaults が無いのは前の版の settings.json（前の初期値だけを知っている）
         let known = get(.knownExcludeDefaults, ScanScope.legacyExcludeNames)
         for n in ScanScope.defaultExcludeNames where !known.contains(n) && !excludeNames.contains(n) { excludeNames.append(n) }
         knownExcludeDefaults = known + ScanScope.defaultExcludeNames.filter { !known.contains($0) }
         hotKey = (try? c.decodeIfPresent(HotKeySetting.self, forKey: .hotKey)) ?? nil
-        unloadMinutes = max(0, get(.unloadMinutes, def.unloadMinutes))
         maxRows = min(max(get(.maxRows, def.maxRows), Self.maxRowsRange.lowerBound), Self.maxRowsRange.upperBound)
         sectionOrder = get(.sectionOrder, def.sectionOrder)
         transparency = min(max(get(.transparency, def.transparency), Self.transparencyRange.lowerBound), Self.transparencyRange.upperBound)
@@ -173,38 +165,5 @@ public struct RaidenSettings: Codable, Equatable, Sendable {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         try enc.encode(self).write(to: url, options: .atomic)
-    }
-}
-
-/// 範囲の中の件数を数える（設定窓の各行・広すぎる場所の注意用）。limit を超えたら数えるのをやめる
-public enum ScopeCounter {
-    public struct Result: Sendable {
-        public var count: Int
-        public var capped: Bool
-        public init(count: Int, capped: Bool) { self.count = count; self.capped = capped }
-    }
-
-    public static func count(root: String, scope: ScanScope, limit: Int = 200_000, cancelled: () -> Bool = { false }) -> Result {
-        let fm = FileManager.default
-        guard let en = fm.enumerator(at: URL(fileURLWithPath: root), includingPropertiesForKeys: [.isDirectoryKey],
-                                     options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return Result(count: 0, capped: false) }
-        var n = 0
-        for case let url as URL in en {
-            if scope.excludesName(url.lastPathComponent) || scope.excludesPath(url.path.precomposedStringWithCanonicalMapping) {
-                if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true { en.skipDescendants() }
-                continue
-            }
-            n += 1
-            if n >= limit { return Result(count: n, capped: true) }
-            if n % 2000 == 0 && cancelled() { break }
-        }
-        return Result(count: n, capped: false)
-    }
-
-    /// 広すぎる場所の目安。ANE 版のアプリに ~/Project 168,530 件を入れた実測（2026-11-20）から:
-    /// footprint 1,311MB（1 件約 8.0KB）、DB 102MB（1 件約 0.6KB）、初回のベクトル化 749 秒（短い説明と中身を読む作り直しを合わせて 1 件約 4.5ms）
-    public static let warnAbove = 50_000
-    public static func estimate(_ n: Int) -> (memoryMB: Int, dbMB: Int, minutes: Int) {
-        (Int(Double(n) * 8.0 / 1024.0), Int(Double(n) * 0.6 / 1024.0), Int((Double(n) * 0.0045 / 60).rounded(.up)))
     }
 }

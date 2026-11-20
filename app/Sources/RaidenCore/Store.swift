@@ -5,8 +5,9 @@ import SQLite3
 ///
 /// ベクトルとグラフを一緒に使えるよう、点（nodes）と線（edges）の 2 表にしている。
 ///   nodes  id, kind（app / example / file / folder）, key（bundle id・入力文・パス）, name, description,
-///          vector（Float32 の BLOB）, desc_hash（モデル名＋説明文のハッシュ。変わった時だけ作り直す）, updated_at
-///   edges  from_id, to_id, kind（example→app の chose、folder→中の物の contains、同じ日に使った物どうしの co_used）,
+///          vector・desc_hash（前の版の名残。今は使わず空）, updated_at
+///          file / folder は「選んだ」「Raiden から開いた」記録の相手としてだけ置く（一覧・ベクトルは持たない。検索は Spotlight）
+///   edges  from_id, to_id, kind（example→app / file の chose、file→app の opened_with、Raiden から 30 分以内に続けて開いた物どうしの co_used）,
 ///          weight（選んだ回数など）, last_used
 public final class Store {
     var db: OpaquePointer?
@@ -45,9 +46,7 @@ public final class Store {
         CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
         """)
         try exec(Store.searchLogSchema)
-        // ファイル・フォルダの一覧の中身（FileEntry.encoded）。起動のたびに OS に問い合わせ直さず、ここから読む
-        if !columns("nodes").contains("entry") { try? exec("ALTER TABLE nodes ADD COLUMN entry BLOB") }
-        migratedFiles = migrateFileVectorsToBinary()
+        migratedFiles = dropFileIndex()
         // 前の起動の VACUUM や書き込みが -wal に残っていると本体が大きいままなので、起動のたびに書き戻す（変換済みの DB も）
         try? exec("PRAGMA wal_checkpoint(TRUNCATE)")
         compactIfBloated()
@@ -71,7 +70,7 @@ public final class Store {
         return free
     }
 
-    /// 起動時に float32 から 2 値へ変換したファイル・フォルダの点の数（0 なら変換済み・新しい DB）
+    /// 起動時に消した前の版のファイル・フォルダの点の数（0 なら済み・新しい DB。dropFileIndex）
     public private(set) var migratedFiles = 0
 
     deinit { sqlite3_close(db) }
@@ -99,18 +98,8 @@ public final class Store {
         sqlite3_bind_text(st, i, s, -1, Store.TRANSIENT)
     }
 
-    func bind(_ st: OpaquePointer?, _ i: Int32, _ v: [Float]) {
-        _ = v.withUnsafeBytes { sqlite3_bind_blob(st, i, $0.baseAddress, Int32($0.count), Store.TRANSIENT) }
-    }
-
     func text(_ st: OpaquePointer?, _ i: Int32) -> String {
         sqlite3_column_text(st, i).map { String(cString: $0) } ?? ""
-    }
-
-    func blob(_ st: OpaquePointer?, _ i: Int32) -> [Float] {
-        let n = Int(sqlite3_column_bytes(st, i)) / MemoryLayout<Float>.size
-        guard n > 0, let p = sqlite3_column_blob(st, i) else { return [] }
-        return Array(UnsafeBufferPointer(start: p.assumingMemoryBound(to: Float.self), count: n))
     }
 
     var now: Int64 { Int64(Date().timeIntervalSince1970) }
@@ -122,64 +111,24 @@ public final class Store {
         return String(h, radix: 16)
     }
 
-    /// 点を足すか更新して id を返す（vector が nil なら触らない）
-    func upsertNode(kind: String, key: String, name: String, description: String,
-                            vector: [Float]?, hash: String?) -> Int64 {
-        let sql = vector == nil
-            ? "INSERT INTO nodes(kind,key,name,description,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(kind,key) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at RETURNING id"
-            : "INSERT INTO nodes(kind,key,name,description,updated_at,vector,desc_hash) VALUES(?,?,?,?,?,?,?) ON CONFLICT(kind,key) DO UPDATE SET name=excluded.name, description=excluded.description, vector=excluded.vector, desc_hash=excluded.desc_hash, updated_at=excluded.updated_at RETURNING id"
+    /// 点を足すか更新して id を返す
+    func upsertNode(kind: String, key: String, name: String, description: String) -> Int64 {
+        let sql = "INSERT INTO nodes(kind,key,name,description,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(kind,key) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at RETURNING id"
         guard let st = prepare(sql) else { return -1 }
         defer { sqlite3_finalize(st) }
         bind(st, 1, kind); bind(st, 2, key); bind(st, 3, name); bind(st, 4, description)
         sqlite3_bind_int64(st, 5, now)
-        if let vector { bind(st, 6, vector); bind(st, 7, hash ?? "") }
         return sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int64(st, 0) : -1
-    }
-
-    // MARK: - アプリの点
-
-    /// アプリの点のベクトルを返す。説明文かモデルが変わったものだけ embed で作り直し、消えたアプリの点は消す。
-    public func appVectors(_ apps: [AppEntry], descriptions: [String], model: String,
-                           embed: (String) -> [Float]) -> [[Float]] {
-        lock.lock(); defer { lock.unlock() }
-        var have: [String: (String, [Float])] = [:]
-        if let st = prepare("SELECT key, desc_hash, vector FROM nodes WHERE kind='app'") {
-            while sqlite3_step(st) == SQLITE_ROW { have[text(st, 0)] = (text(st, 1), blob(st, 2)) }
-            sqlite3_finalize(st)
-        }
-        try? exec("BEGIN")
-        var out: [[Float]] = []
-        for (a, d) in zip(apps, descriptions) {
-            let h = Store.hash(model + "\n" + d)
-            if let old = have[a.key], old.0 == h, !old.1.isEmpty {
-                out.append(old.1)
-                continue
-            }
-            let v = embed(d)
-            out.append(v)
-            _ = upsertNode(kind: "app", key: a.key, name: a.jp, description: d, vector: v, hash: h)
-        }
-        let live = Set(apps.map(\.key))
-        if let del = prepare("DELETE FROM nodes WHERE kind='app' AND key = ?") {
-            for k in have.keys where !live.contains(k) {
-                sqlite3_reset(del); bind(del, 1, k); sqlite3_step(del)
-            }
-            sqlite3_finalize(del)
-        }
-        try? exec("COMMIT")
-        return out
     }
 
     // MARK: - 例の点と chose の線
 
-    /// 例の点を、chose の線でつながったアプリと一緒に全部読む。モデルが違う点はベクトルを作り直す。
-    public func examples(model: String, embed: (String) -> [Float]) -> [(ExampleNode, [Float])] {
+    /// 例の点を、chose の線でつながったアプリと一緒に全部読む（ベクトルは使わない。入力の文字の一致で引く）
+    public func examples() -> [ExampleNode] {
         lock.lock(); defer { lock.unlock() }
-        var nodes: [(Int64, String, String, [Float])] = []
-        if let st = prepare("SELECT id, key, desc_hash, vector FROM nodes WHERE kind='example'") {
-            while sqlite3_step(st) == SQLITE_ROW {
-                nodes.append((sqlite3_column_int64(st, 0), text(st, 1), text(st, 2), blob(st, 3)))
-            }
+        var nodes: [(Int64, String)] = []
+        if let st = prepare("SELECT id, key FROM nodes WHERE kind='example'") {
+            while sqlite3_step(st) == SQLITE_ROW { nodes.append((sqlite3_column_int64(st, 0), text(st, 1))) }
             sqlite3_finalize(st)
         }
         var links: [Int64: [ExampleNode.Link]] = [:]
@@ -194,30 +143,15 @@ public final class Store {
             }
             sqlite3_finalize(st)
         }
-        let up = prepare("UPDATE nodes SET vector=?, desc_hash=?, updated_at=? WHERE id=?")
-        defer { sqlite3_finalize(up) }
-        var out: [(ExampleNode, [Float])] = []
-        for (id, q, h, v) in nodes {
-            guard let ls = links[id], !ls.isEmpty else { continue }
-            var vec = v
-            let want = Store.hash(model + "\n" + q)
-            if h != want || v.isEmpty {
-                vec = embed(q)
-                sqlite3_reset(up); bind(up, 1, vec); bind(up, 2, want); sqlite3_bind_int64(up, 3, now)
-                sqlite3_bind_int64(up, 4, id); sqlite3_step(up)
-            }
-            out.append((ExampleNode(q: q, links: ls), vec))
-        }
-        return out
+        return nodes.compactMap { id, q in links[id].flatMap { $0.isEmpty ? nil : ExampleNode(q: q, links: $0) } }
     }
 
     /// 「入力文 q でアプリ app を選んだ」を記録する。例の点を足し、chose の線の重み（回数）を 1 増やす。
-    public func recordChoice(query q: String, app: AppEntry, appDescription: String, vector: [Float], model: String) {
+    public func recordChoice(query q: String, app: AppEntry) {
         lock.lock(); defer { lock.unlock() }
         try? exec("BEGIN")
-        let ex = upsertNode(kind: "example", key: q, name: q, description: q, vector: vector,
-                            hash: Store.hash(model + "\n" + q))
-        let ap = upsertNode(kind: "app", key: app.key, name: app.jp, description: appDescription, vector: nil, hash: nil)
+        let ex = upsertNode(kind: "example", key: q, name: q, description: q)
+        let ap = upsertNode(kind: "app", key: app.key, name: app.jp, description: app.jp)
         if ex >= 0, ap >= 0, let st = prepare("""
             INSERT INTO edges(from_id, to_id, kind, weight, last_used) VALUES(?,?,'chose',1,?)
             ON CONFLICT(from_id, to_id, kind) DO UPDATE SET weight = weight + 1, last_used = excluded.last_used
@@ -230,13 +164,13 @@ public final class Store {
     }
 
     /// 「入力文 q でファイル・フォルダ path を選んだ」を記録する。例の点を足し、例 → ファイルの chose の線の重みを 1 増やす。
-    /// ファイルの点が無い（まだベクトル化していない）ときは、ベクトル無しの点を作っておく（次の fileVectors で埋まる）。
-    public func recordFileChoice(query q: String, path: String, isDir: Bool, name: String, vector: [Float], model: String) {
+    /// ファイルの点はベクトル無しで作る。例の点のベクトルは作らない（ファイルの例は文字の一致で引く。同じ言い方でアプリも選べば
+    /// recordChoice がベクトルを入れる）
+    public func recordFileChoice(query q: String, path: String, isDir: Bool, name: String) {
         lock.lock(); defer { lock.unlock() }
         try? exec("BEGIN")
-        let ex = upsertNode(kind: "example", key: q, name: q, description: q, vector: vector,
-                            hash: Store.hash(model + "\n" + q))
-        let fid = upsertNode(kind: isDir ? "folder" : "file", key: path, name: name, description: "", vector: nil, hash: nil)
+        let ex = upsertNode(kind: "example", key: q, name: q, description: q)
+        let fid = upsertNode(kind: isDir ? "folder" : "file", key: path, name: name, description: "")
         if ex >= 0, fid >= 0, let st = prepare("""
             INSERT INTO edges(from_id, to_id, kind, weight, last_used) VALUES(?,?,'chose',1,?)
             ON CONFLICT(from_id, to_id, kind) DO UPDATE SET weight = weight + 1, last_used = excluded.last_used
@@ -248,38 +182,18 @@ public final class Store {
         try? exec("COMMIT")
     }
 
-    /// ファイル・フォルダを選んだ例を（入力文, パス）で全部読む（Engine.addFileExamples に渡す用）
-    public func fileExamples() -> [(String, String)] {
+    /// ファイル・フォルダを選んだ例を（入力文, パス, 回数）で全部読む（SpotlightSearch.examples）
+    public func fileExamples() -> [(String, String, Float)] {
         lock.lock(); defer { lock.unlock() }
         guard let st = prepare("""
-            SELECT x.key, f.key FROM edges e JOIN nodes x ON x.id = e.from_id JOIN nodes f ON f.id = e.to_id
+            SELECT x.key, f.key, e.weight FROM edges e JOIN nodes x ON x.id = e.from_id JOIN nodes f ON f.id = e.to_id
             WHERE e.kind='chose' AND x.kind='example' AND f.kind IN ('file','folder')
             ORDER BY e.last_used
             """) else { return [] }
         defer { sqlite3_finalize(st) }
-        var out: [(String, String)] = []
-        while sqlite3_step(st) == SQLITE_ROW { out.append((text(st, 0), text(st, 1))) }
+        var out: [(String, String, Float)] = []
+        while sqlite3_step(st) == SQLITE_ROW { out.append((text(st, 0), text(st, 1), Float(sqlite3_column_double(st, 2)))) }
         return out
-    }
-
-    // MARK: - ファイル・フォルダの点と線
-
-    /// 保存済みのファイル・フォルダの点（パス → (desc_hash, 2 値のベクトル 128 バイト)）。ベクトルの無い点は空の配列
-    public func storedFileCodes() -> [String: (hash: String, code: [UInt8])] {
-        lock.lock(); defer { lock.unlock() }
-        var have: [String: (hash: String, code: [UInt8])] = [:]
-        if let st = prepare("SELECT key, desc_hash, vector FROM nodes WHERE kind IN ('file','folder')") {
-            while sqlite3_step(st) == SQLITE_ROW {
-                let n = Int(sqlite3_column_bytes(st, 2))
-                var code: [UInt8] = []
-                if n == BinVec.bytes, let p = sqlite3_column_blob(st, 2) {
-                    code = Array(UnsafeBufferPointer(start: p.assumingMemoryBound(to: UInt8.self), count: n))
-                }
-                have[text(st, 0)] = (text(st, 1), code)
-            }
-            sqlite3_finalize(st)
-        }
-        return have
     }
 
     func columns(_ table: String) -> Set<String> {
@@ -309,237 +223,96 @@ public final class Store {
         sqlite3_step(st)
     }
 
-    // MARK: - ファイル・フォルダの一覧
-
-    /// 一覧の中身を書く（点が無ければ作る）。中身が同じ行は書き換えない
-    public func saveFileEntries(_ es: [FileEntry]) {
-        guard !es.isEmpty else { return }
-        lock.lock(); defer { lock.unlock() }
-        try? exec("BEGIN")
-        if let st = prepare("""
-            INSERT INTO nodes(kind,key,name,description,updated_at,entry) VALUES(?,?,?,'',?,?)
-            ON CONFLICT(kind,key) DO UPDATE SET entry=excluded.entry WHERE entry IS NOT excluded.entry
-            """) {
-            let t = now
-            for e in es {
-                sqlite3_reset(st)
-                bind(st, 1, e.isDir ? "folder" : "file"); bind(st, 2, e.path); bind(st, 3, e.name)
-                sqlite3_bind_int64(st, 4, t)
-                let d = e.encoded
-                _ = d.withUnsafeBytes { sqlite3_bind_blob(st, 5, $0.baseAddress, Int32($0.count), Store.TRANSIENT) }
-                sqlite3_step(st)
-            }
-            sqlite3_finalize(st)
-        }
-        try? exec("COMMIT")
-    }
-
-    /// 保存した一覧を読む（中身の無い点は飛ばす。同じパスがファイルとフォルダの両方にあれば新しい方）
-    public func loadFileEntries() -> [FileEntry] {
-        lock.lock(); defer { lock.unlock() }
-        guard let st = prepare("SELECT key, kind, entry FROM nodes WHERE kind IN ('file','folder') AND entry IS NOT NULL ORDER BY updated_at") else { return [] }
-        defer { sqlite3_finalize(st) }
-        var out: [FileEntry] = [], at: [String: Int] = [:]
-        while sqlite3_step(st) == SQLITE_ROW {
-            let n = Int(sqlite3_column_bytes(st, 2))
-            guard n > 0, let p = sqlite3_column_blob(st, 2) else { continue }
-            let d = Array(UnsafeBufferPointer(start: p.assumingMemoryBound(to: UInt8.self), count: n))
-            let key = text(st, 0)
-            guard let e = FileEntry(path: key, isDir: text(st, 1) == "folder", encoded: d) else { continue }
-            if let i = at[key] { out[i] = e } else { at[key] = out.count; out.append(e) }
-        }
-        return out
-    }
-
-    /// 一覧の中身の合計バイト数と件数（DB がどれだけ増えたかの目安）
-    public func fileEntryBytes() -> (bytes: Int, count: Int) {
-        lock.lock(); defer { lock.unlock() }
-        guard let st = prepare("SELECT coalesce(sum(length(entry)),0), count(entry) FROM nodes WHERE kind IN ('file','folder')") else { return (0, 0) }
-        defer { sqlite3_finalize(st) }
-        return sqlite3_step(st) == SQLITE_ROW ? (Int(sqlite3_column_int64(st, 0)), Int(sqlite3_column_int64(st, 1))) : (0, 0)
-    }
-
-    /// storedFileCodes の一部だけ（差分で直すとき。key で 1 件ずつ引く）
-    public func fileCodes(_ keys: [String]) -> [String: (hash: String, code: [UInt8])] {
-        guard !keys.isEmpty else { return [:] }
-        lock.lock(); defer { lock.unlock() }
-        var have: [String: (hash: String, code: [UInt8])] = [:]
-        guard let st = prepare("SELECT desc_hash, vector FROM nodes WHERE kind IN ('file','folder') AND key = ?") else { return have }
-        defer { sqlite3_finalize(st) }
-        for k in keys {
-            sqlite3_reset(st); bind(st, 1, k)
-            guard sqlite3_step(st) == SQLITE_ROW else { continue }
-            let n = Int(sqlite3_column_bytes(st, 1))
-            var code: [UInt8] = []
-            if n == BinVec.bytes, let p = sqlite3_column_blob(st, 1) {
-                code = Array(UnsafeBufferPointer(start: p.assumingMemoryBound(to: UInt8.self), count: n))
-            }
-            have[k] = (text(st, 0), code)
-        }
-        return have
-    }
-
-    /// ファイル・フォルダどうしの線を足す（差分で直すとき。replaceFileEdges と違い、その種類の線を消さない）。組はパス
-    public func addFileEdges(kind: String, _ pairs: [(String, String, Float)]) {
-        guard !pairs.isEmpty else { return }
-        lock.lock(); defer { lock.unlock() }
-        guard let q = prepare("SELECT id FROM nodes WHERE kind IN ('file','folder') AND key = ?") else { return }
-        defer { sqlite3_finalize(q) }
-        func id(_ k: String) -> Int64? {
-            sqlite3_reset(q); bind(q, 1, k)
-            return sqlite3_step(q) == SQLITE_ROW ? sqlite3_column_int64(q, 0) : nil
-        }
-        try? exec("BEGIN")
-        if let st = prepare("INSERT OR REPLACE INTO edges(from_id, to_id, kind, weight, last_used) VALUES(?,?,?,?,?)") {
-            for (a, b, w) in pairs {
-                guard let x = id(a), let y = id(b) else { continue }
-                sqlite3_reset(st)
-                sqlite3_bind_int64(st, 1, x); sqlite3_bind_int64(st, 2, y); bind(st, 3, kind)
-                sqlite3_bind_double(st, 4, Double(w)); sqlite3_bind_int64(st, 5, now)
-                sqlite3_step(st)
-            }
-            sqlite3_finalize(st)
-        }
-        try? exec("COMMIT")
-    }
-
-    /// ファイル・フォルダの点を書く。保存するのはパス・名前・desc_hash（説明文の元・日付・大きさのハッシュ）と 2 値のベクトルだけ。
-    /// 説明文は保存しない（要るときは FileCatalog から作り直す）。code が nil なら点だけ作ってベクトルは触らない（線を張るため）
-    public func saveFileNodes(_ rows: [(entry: FileEntry, code: [UInt8]?, hash: String)]) {
-        guard !rows.isEmpty else { return }
-        lock.lock(); defer { lock.unlock() }
-        try? exec("BEGIN")
-        let withVec = prepare("""
-            INSERT INTO nodes(kind,key,name,description,updated_at,vector,desc_hash) VALUES(?,?,?,'',?,?,?)
-            ON CONFLICT(kind,key) DO UPDATE SET name=excluded.name, description='', vector=excluded.vector,
-            desc_hash=excluded.desc_hash, updated_at=excluded.updated_at
-            """)
-        for r in rows {
-            if let c = r.code, let st = withVec {
-                sqlite3_reset(st)
-                bind(st, 1, r.entry.isDir ? "folder" : "file"); bind(st, 2, r.entry.path); bind(st, 3, r.entry.name)
-                sqlite3_bind_int64(st, 4, now)
-                _ = c.withUnsafeBytes { sqlite3_bind_blob(st, 5, $0.baseAddress, Int32($0.count), Store.TRANSIENT) }
-                bind(st, 6, r.hash)
-                sqlite3_step(st)
-            } else {
-                _ = upsertNode(kind: r.entry.isDir ? "folder" : "file", key: r.entry.path, name: r.entry.name, description: "", vector: nil, hash: nil)
-            }
-        }
-        sqlite3_finalize(withVec)
-        try? exec("COMMIT")
-    }
-
-    /// 前の版の DB（ファイル・フォルダに float32 のベクトル 4KB と説明文）を、作り直さずに 2 値（128 バイト）へ変換し、説明文を消す。
-    /// 起動時に一度だけ（meta の file_vectors が bin1 になったら何もしない）。変換したら VACUUM でファイルを詰める。変換した点の数を返す
-    @discardableResult
-    public func migrateFileVectorsToBinary() -> Int {
-        lock.lock(); defer { lock.unlock() }
-        if let st = prepare("SELECT v FROM meta WHERE k='file_vectors'") {
-            defer { sqlite3_finalize(st) }
-            if sqlite3_step(st) == SQLITE_ROW, text(st, 0) == "bin1" { return 0 }
-        }
-        var rows: [(Int64, [Float])] = []
-        if let st = prepare("SELECT id, vector FROM nodes WHERE kind IN ('file','folder') AND length(vector) > \(BinVec.bytes)") {
-            while sqlite3_step(st) == SQLITE_ROW { rows.append((sqlite3_column_int64(st, 0), blob(st, 1))) }
-            sqlite3_finalize(st)
-        }
-        try? exec("BEGIN")
-        if let up = prepare("UPDATE nodes SET vector=? WHERE id=?") {
-            for (id, v) in rows {
-                let c = BinVec.encode(v)
-                sqlite3_reset(up)
-                _ = c.withUnsafeBytes { sqlite3_bind_blob(up, 1, $0.baseAddress, Int32($0.count), Store.TRANSIENT) }
-                sqlite3_bind_int64(up, 2, id)
-                sqlite3_step(up)
-            }
-            sqlite3_finalize(up)
-        }
-        try? exec("UPDATE nodes SET description='' WHERE kind IN ('file','folder')")
-        try? exec("INSERT OR REPLACE INTO meta(k, v) VALUES('file_vectors', 'bin1')")
-        try? exec("COMMIT")
-        if !rows.isEmpty {
-            try? exec("VACUUM")
-            // WAL のままだと詰めた結果が -wal に残り、本体のファイルは小さくならないので書き戻す
-            try? exec("PRAGMA wal_checkpoint(TRUNCATE)")
-        }
-        return rows.count
-    }
-
-    /// keys の点を消す（一覧から消えたパス）
-    public func deleteFileNodes(_ keys: [String]) {
-        guard !keys.isEmpty else { return }
-        lock.lock(); defer { lock.unlock() }
-        try? exec("BEGIN")
-        if let del = prepare("DELETE FROM nodes WHERE kind IN ('file','folder') AND key = ?") {
-            for k in keys { sqlite3_reset(del); bind(del, 1, k); sqlite3_step(del) }
-            sqlite3_finalize(del)
-        }
-        try? exec("COMMIT")
-    }
-
-    /// 検索の記録で選んだファイル・フォルダの親フォルダ（パス → 選んだ回数）。ベクトル化の順番に使う
-    public func chosenFolders() -> [String: Int] {
-        lock.lock(); defer { lock.unlock() }
-        var out: [String: Int] = [:]
-        guard let st = prepare("SELECT chosen_kind, chosen_key FROM search_log WHERE chosen_kind IN ('file','folder') AND chosen_key IS NOT NULL") else { return out }
-        defer { sqlite3_finalize(st) }
-        while sqlite3_step(st) == SQLITE_ROW {
-            let k = text(st, 1)
-            let dir = text(st, 0) == "folder" ? k : (k as NSString).deletingLastPathComponent
-            out[dir, default: 0] += 1
-        }
-        return out
-    }
-
-    /// ファイル・フォルダどうしの線（contains / co_used）を、その種類の分だけ入れ替える。組はパス
-    public func replaceFileEdges(kind: String, _ pairs: [(String, String, Float)]) {
-        lock.lock(); defer { lock.unlock() }
-        var ids: [String: Int64] = [:]
-        if let st = prepare("SELECT id, key FROM nodes WHERE kind IN ('file','folder')") {
-            while sqlite3_step(st) == SQLITE_ROW { ids[text(st, 1)] = sqlite3_column_int64(st, 0) }
-            sqlite3_finalize(st)
-        }
-        try? exec("BEGIN")
-        if let del = prepare("DELETE FROM edges WHERE kind = ?") { bind(del, 1, kind); sqlite3_step(del); sqlite3_finalize(del) }
-        if let st = prepare("INSERT OR REPLACE INTO edges(from_id, to_id, kind, weight, last_used) VALUES(?,?,?,?,?)") {
-            for (a, b, w) in pairs {
-                guard let x = ids[a], let y = ids[b] else { continue }
-                sqlite3_reset(st)
-                sqlite3_bind_int64(st, 1, x); sqlite3_bind_int64(st, 2, y); bind(st, 3, kind)
-                sqlite3_bind_double(st, 4, Double(w)); sqlite3_bind_int64(st, 5, now)
-                sqlite3_step(st)
-            }
-            sqlite3_finalize(st)
-        }
-        try? exec("COMMIT")
-    }
-
     // MARK: - アプリとファイルの線
 
-    /// app → file の opens（手元のファイルを開くアプリ。OpenWithIndex）を全部張り直す。組は（アプリのキー, パス）。
-    /// まだ点の無いファイルは、ベクトル無しの点として足す（fileVectors が後でベクトルを作る）
-    public func replaceOpens(_ pairs: [(String, String)], apps: [AppEntry]) {
+    /// 前の版（自前のファイル一覧とベクトル）の名残を消す。起動時に一度だけ（meta の files が spotlight1 になったら何もしない）。
+    /// ファイル・フォルダの点のうち「選んだ」「開いた」記録の相手でない物と、contains / co_used / co_time / opens の線を消し、
+    /// どの点もベクトル・desc_hash を空に、ファイル・フォルダは一覧の中身（entry）も空にして、一覧の保存の印（file_scope など）を
+    /// 消して VACUUM する。消したファイル・フォルダの点の数を返す
+    @discardableResult
+    public func dropFileIndex() -> Int {
         lock.lock(); defer { lock.unlock() }
-        let names = Dictionary(apps.map { ($0.key, $0.jp) }, uniquingKeysWith: { a, _ in a })
-        var appIds: [String: Int64] = [:]
+        if let st = prepare("SELECT v FROM meta WHERE k='files'") {
+            defer { sqlite3_finalize(st) }
+            if sqlite3_step(st) == SQLITE_ROW, text(st, 0) == "spotlight1" { return 0 }
+        }
+        func int(_ sql: String) -> Int {
+            guard let st = prepare(sql) else { return 0 }
+            defer { sqlite3_finalize(st) }
+            return sqlite3_step(st) == SQLITE_ROW ? Int(sqlite3_column_int64(st, 0)) : 0
+        }
+        let before = int("SELECT COUNT(*) FROM nodes WHERE kind IN ('file','folder')")
         try? exec("BEGIN")
-        if let del = prepare("DELETE FROM edges WHERE kind = 'opens'") { sqlite3_step(del); sqlite3_finalize(del) }
-        if let st = prepare("INSERT OR REPLACE INTO edges(from_id, to_id, kind, weight, last_used) VALUES(?,?,'opens',1,?)") {
-            for (k, p) in pairs {
-                guard let name = names[k] else { continue }  // 一覧に無いアプリ（ヘルパーなど）は張らない
-                let a = appIds[k] ?? upsertNode(kind: "app", key: k, name: name, description: name, vector: nil, hash: nil)
-                appIds[k] = a
-                let f = upsertNode(kind: "file", key: p, name: (p as NSString).lastPathComponent,
-                                   description: "", vector: nil, hash: nil)
-                guard a >= 0, f >= 0 else { continue }
-                sqlite3_reset(st)
-                sqlite3_bind_int64(st, 1, a); sqlite3_bind_int64(st, 2, f); sqlite3_bind_int64(st, 3, now)
-                sqlite3_step(st)
+        try? exec("DELETE FROM edges WHERE kind IN ('contains','co_used','co_time','opens')")
+        try? exec("""
+            DELETE FROM nodes WHERE kind IN ('file','folder') AND id NOT IN
+              (SELECT to_id FROM edges WHERE kind='chose' UNION SELECT from_id FROM edges WHERE kind='opened_with')
+            """)
+        let hasEntry = columns("nodes").contains("entry")
+        try? exec("UPDATE nodes SET description=''\(hasEntry ? ", entry=NULL" : "") WHERE kind IN ('file','folder')")
+        try? exec("UPDATE nodes SET vector=NULL, desc_hash=NULL")
+        try? exec("DELETE FROM meta WHERE k IN ('file_scope','fs_event_id','fs_uuid','file_vectors')")
+        try? exec("INSERT OR REPLACE INTO meta(k, v) VALUES('files', 'spotlight1')")
+        try? exec("COMMIT")
+        let after = int("SELECT COUNT(*) FROM nodes WHERE kind IN ('file','folder')")
+        try? exec("VACUUM")
+        try? exec("PRAGMA wal_checkpoint(TRUNCATE)")
+        return before - after
+    }
+
+    /// Raiden から開いた記録の続き: path を開いた時刻を残し（opened_with の線の last_used）、直前 window 秒以内に Raiden から開いた
+    /// ほかのファイル・フォルダと co_used の線を張る（両向き、重みに 1 足す）。#with の加点に使う
+    public func recordOpenedTogether(path: String, isDir: Bool, window: Int = SpotlightSearch.withWindow) {
+        lock.lock(); defer { lock.unlock() }
+        try? exec("BEGIN")
+        let me = upsertNode(kind: isDir ? "folder" : "file", key: path, name: (path as NSString).lastPathComponent,
+                            description: "")
+        var others: [Int64] = []
+        if me >= 0, let st = prepare("""
+            SELECT DISTINCT e.from_id FROM edges e JOIN nodes f ON f.id = e.from_id
+            WHERE e.kind IN ('opened_with','opened') AND f.kind IN ('file','folder') AND e.last_used >= ? AND e.from_id != ?
+            """) {
+            sqlite3_bind_int64(st, 1, now - Int64(window)); sqlite3_bind_int64(st, 2, me)
+            while sqlite3_step(st) == SQLITE_ROW { others.append(sqlite3_column_int64(st, 0)) }
+            sqlite3_finalize(st)
+        }
+        if let st = prepare("""
+            INSERT INTO edges(from_id, to_id, kind, weight, last_used) VALUES(?,?,'co_used',1,?)
+            ON CONFLICT(from_id, to_id, kind) DO UPDATE SET weight = weight + 1, last_used = excluded.last_used
+            """) {
+            for o in others {
+                for (a, b) in [(me, o), (o, me)] {
+                    sqlite3_reset(st)
+                    sqlite3_bind_int64(st, 1, a); sqlite3_bind_int64(st, 2, b); sqlite3_bind_int64(st, 3, now)
+                    sqlite3_step(st)
+                }
             }
             sqlite3_finalize(st)
         }
+        // 開いた時刻（開くアプリが分からなかった物も残すよう、自分への 'opened' の線に時刻を置く）
+        if me >= 0, let st = prepare("""
+            INSERT INTO edges(from_id, to_id, kind, weight, last_used) VALUES(?,?,'opened',1,?)
+            ON CONFLICT(from_id, to_id, kind) DO UPDATE SET weight = weight + 1, last_used = excluded.last_used
+            """) {
+            sqlite3_bind_int64(st, 1, me); sqlite3_bind_int64(st, 2, me); sqlite3_bind_int64(st, 3, now)
+            sqlite3_step(st)
+            sqlite3_finalize(st)
+        }
         try? exec("COMMIT")
+    }
+
+    /// path と co_used の線でつながったファイル・フォルダ（パス → 重み）
+    public func coUsed(_ path: String) -> [String: Float] {
+        lock.lock(); defer { lock.unlock() }
+        guard let st = prepare("""
+            SELECT t.key, e.weight FROM edges e JOIN nodes f ON f.id = e.from_id JOIN nodes t ON t.id = e.to_id
+            WHERE e.kind='co_used' AND f.kind IN ('file','folder') AND f.key = ?
+            """) else { return [:] }
+        defer { sqlite3_finalize(st) }
+        bind(st, 1, path)
+        var out: [String: Float] = [:]
+        while sqlite3_step(st) == SQLITE_ROW { out[text(st, 0)] = Float(sqlite3_column_double(st, 1)) }
+        return out
     }
 
     /// Raiden から開いたファイルと、実際に開いたアプリ（file → app の opened_with。重みは回数）
@@ -547,8 +320,8 @@ public final class Store {
         lock.lock(); defer { lock.unlock() }
         try? exec("BEGIN")
         let f = upsertNode(kind: "file", key: path, name: (path as NSString).lastPathComponent,
-                           description: "", vector: nil, hash: nil)
-        let a = upsertNode(kind: "app", key: appKey, name: appName, description: appName, vector: nil, hash: nil)
+                           description: "")
+        let a = upsertNode(kind: "app", key: appKey, name: appName, description: appName)
         if f >= 0, a >= 0, let st = prepare("""
             INSERT INTO edges(from_id, to_id, kind, weight, last_used) VALUES(?,?,'opened_with',1,?)
             ON CONFLICT(from_id, to_id, kind) DO UPDATE SET weight = weight + 1, last_used = excluded.last_used

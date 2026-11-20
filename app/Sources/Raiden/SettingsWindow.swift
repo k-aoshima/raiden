@@ -3,25 +3,11 @@ import RaidenCore
 import UniformTypeIdentifiers
 
 /// 一覧とベクトル化の状態（設定窓の「検索範囲」に出す）
-struct IndexStatus {
-    var count = 0
-    /// まだベクトルの無い物を作っている（その間も名前の一致と絞り込みでは候補に出る）
-    var embedding: (done: Int, total: Int)?
-    /// 中身の頭を入れた説明文で作り直している（検索はもう全部に効く）
-    var refining: (done: Int, total: Int)?
-    var scanning = false
-    var ready = false
-}
-
 /// 設定窓から呼ぶアプリ側の口（AppDelegate と、PNG の書き出し用のダミーが持つ）
 protocol SettingsHost: AnyObject {
     var settings: RaidenSettings { get }
     /// 設定を変えて保存し、アプリに当てる
     func updateSettings(_ f: (inout RaidenSettings) -> Void)
-    var indexStatus: IndexStatus { get }
-    func rebuildIndex()
-    /// フォルダの中の件数（数え終わっていなければ nil、数え始める）。数え終わったら then
-    func folderCount(_ path: String, then: @escaping (ScopeCounter.Result) -> Void) -> ScopeCounter.Result?
     var hotKeyLabel: String { get }
     /// ホットキーを当てる（nil は既定）。登録できなければ理由を返す（前のキーに戻す）
     func applyHotKey(_ hk: RaidenSettings.HotKeySetting?) -> String?
@@ -95,8 +81,8 @@ final class TintView: NSView {
 final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDelegate {
     enum Tab: Int, CaseIterable {
         case scope, general, learning, log
-        var title: String { ["検索範囲", "一般", "学習", "記録"][rawValue] }
-        var symbol: String { ["folder.badge.gearshape", "gearshape", "brain", "list.bullet.rectangle"][rawValue] }
+        var title: String { ["除外", "一般", "学習", "記録"][rawValue] }
+        var symbol: String { ["folder.badge.minus", "gearshape", "brain", "list.bullet.rectangle"][rawValue] }
         var file: String { ["scope", "general", "learning", "log"][rawValue] }
     }
 
@@ -107,12 +93,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
     private let tint = TintView()
     private let paneHost = NSView()
     private var pane: NSView?
-    // 検索範囲の画面の、状態だけ書き換える部品
-    private var statusLabel: NSTextField?
-    private var statusIcon: NSImageView?
-    private var statusBar: NSProgressIndicator?
-    /// 足したが件数が多すぎてオフのままにしたフォルダ
-    private var largeOff: [String: Int] = [:]
     private var notesDraft: [(String, String)]?
     /// 学習タブの辞書・保存した絞り込みの編集中の値（SettingsLearning.swift）
     let learningState = LearningPaneState()
@@ -196,7 +176,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
     /// 今の画面を作り直す
     func reload() {
         pane?.removeFromSuperview()
-        statusLabel = nil; statusIcon = nil; statusBar = nil
         let content: [NSView]
         switch tab {
         case .scope: content = scopePane()
@@ -211,48 +190,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
             v.leadingAnchor.constraint(equalTo: paneHost.leadingAnchor), v.trailingAnchor.constraint(equalTo: paneHost.trailingAnchor),
         ])
         pane = v
-        refreshStatus()
-    }
-
-    /// 件数を数え終わったときなど。続けて来ても 1 回にまとめて作り直す（検索範囲の画面のときだけ）
-    func scheduleReload() {
-        guard !rebuildPending else { return }
-        rebuildPending = true
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.rebuildPending = false
-            if self.tab == .scope && self.window.isVisible { self.reload() }
-        }
-    }
-
-    /// 一覧の状態が変わったとき（AppDelegate から）
-    func refreshStatus() {
-        guard let host, let label = statusLabel else { return }
-        let st = host.indexStatus
-        let nf = NumberFormatter(); nf.numberStyle = .decimal
-        if let (d, t) = st.embedding {
-            label.stringValue = "1/2 名前と場所で意味を登録中 \(nf.string(from: d as NSNumber) ?? "\(d)")/\(nf.string(from: t as NSNumber) ?? "\(t)")（終わると次は中身を読みます）"
-            statusIcon?.image = symbol("arrow.triangle.2.circlepath", size: 14, weight: .medium)
-            statusIcon?.contentTintColor = SettingsStyle.accent
-            statusBar?.isHidden = false
-            statusBar?.maxValue = Double(max(t, 1)); statusBar?.doubleValue = Double(d)
-        } else if let (d, t) = st.refining, !st.scanning {
-            label.stringValue = "2/2 PDF・文書の中身を読んで登録し直し中 \(nf.string(from: d as NSNumber) ?? "\(d)")/\(nf.string(from: t as NSNumber) ?? "\(t)")（検索はもう使えます）"
-            statusIcon?.image = symbol("doc.text.magnifyingglass", size: 14, weight: .medium)
-            statusIcon?.contentTintColor = SettingsStyle.subText
-            statusBar?.isHidden = false
-            statusBar?.maxValue = Double(max(t, 1)); statusBar?.doubleValue = Double(d)
-        } else if st.scanning || !st.ready {
-            label.stringValue = st.ready ? "見直しています…（\(nf.string(from: st.count as NSNumber) ?? "")件）" : "一覧を作っています…"
-            statusIcon?.image = symbol("hourglass", size: 14, weight: .medium)
-            statusIcon?.contentTintColor = SettingsStyle.subText
-            statusBar?.isHidden = true
-        } else {
-            label.stringValue = "\(nf.string(from: st.count as NSNumber) ?? "\(st.count)") 件・最新"
-            statusIcon?.image = symbol("checkmark.circle.fill", size: 14, weight: .medium)
-            statusIcon?.contentTintColor = NSColor(srgbRed: 0.2, green: 0.65, blue: 0.35, alpha: 1)
-            statusBar?.isHidden = true
-        }
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -338,7 +275,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
     }
 
     private func folderIcon(_ path: String) -> NSImageView {
-        let abs = RaidenSettings.Folder(path: path).absolutePath
+        let abs = ScanScope.norm(path)
         let img = FileManager.default.fileExists(atPath: abs) ? NSWorkspace.shared.icon(forFile: abs) : NSWorkspace.shared.icon(for: .folder)
         img.size = NSSize(width: 32, height: 32)
         let v = NSImageView(image: img)
@@ -360,70 +297,13 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
         return p.urls.map { RaidenSettings.tilde($0.path) }
     }
 
-    // MARK: - 検索範囲
+    // MARK: - 除外
 
     private func scopePane() -> [NSView] {
         guard let host else { return [] }
         let s = host.settings
-        var out: [NSView] = [header(.scope, "ファイル・フォルダを探す場所と、探さないもの。アプリを探す場所はいつも同じです。")]
+        var out: [NSView] = [header(.scope, "ファイル・フォルダは Mac 全体を Spotlight で探します。ここに入れたフォルダと名前は結果から外します。")]
 
-        // 件数とベクトル化の状態
-        let status = NSView()
-        status.translatesAutoresizingMaskIntoConstraints = false
-        let ic = sIcon("checkmark.circle.fill", size: 14)
-        let l = sLabel("", size: 13, weight: .medium)
-        let bar = NSProgressIndicator()
-        bar.style = .bar; bar.isIndeterminate = false; bar.controlSize = .small; bar.isHidden = true
-        bar.translatesAutoresizingMaskIntoConstraints = false
-        let rebuild = sButton("今すぐ作り直す", symbol: "arrow.clockwise", small: true) { [weak self] in self?.host?.rebuildIndex() }
-        for x in [ic, l, bar, rebuild] as [NSView] { status.addSubview(x) }
-        NSLayoutConstraint.activate([
-            status.heightAnchor.constraint(equalToConstant: 48),
-            ic.leadingAnchor.constraint(equalTo: status.leadingAnchor, constant: 14),
-            ic.centerYAnchor.constraint(equalTo: status.centerYAnchor),
-            l.leadingAnchor.constraint(equalTo: ic.trailingAnchor, constant: 8),
-            l.centerYAnchor.constraint(equalTo: status.centerYAnchor),
-            bar.leadingAnchor.constraint(equalTo: l.trailingAnchor, constant: 12),
-            bar.trailingAnchor.constraint(lessThanOrEqualTo: rebuild.leadingAnchor, constant: -12),
-            bar.widthAnchor.constraint(equalToConstant: 140),
-            bar.centerYAnchor.constraint(equalTo: status.centerYAnchor),
-            rebuild.trailingAnchor.constraint(equalTo: status.trailingAnchor, constant: -14),
-            rebuild.centerYAnchor.constraint(equalTo: status.centerYAnchor),
-        ])
-        statusLabel = l; statusIcon = ic; statusBar = bar
-        out.append(card([status]))
-
-        // 広すぎる場所の注意
-        if let warn = scopeWarning(s) {
-            let b = BannerView()
-            b.label.stringValue = warn
-            out.append(b)
-        }
-
-        // 探すフォルダ
-        out.append(sectionTitle("検索するフォルダ", symbol: "folder",
-                                trailing: [sButton("フォルダを追加…", symbol: "plus", small: true) { [weak self] in self?.addFolders() }]))
-        let folders = CardView()
-        for (i, f) in s.folders.enumerated() {
-            let sw = sSwitch(f.enabled) { [weak self] on in
-                self?.host?.updateSettings { $0.folders[i].enabled = on }
-                if on { self?.largeOff[f.path] = nil }
-                self?.reload()
-            }
-            let count = sLabel(countText(f.path), size: 11, color: SettingsStyle.subText)
-            count.alignment = .right
-            let del = sIconButton("minus.circle", tip: "一覧から外す") { [weak self] in
-                self?.host?.updateSettings { $0.folders.remove(at: i) }
-                self?.largeOff[f.path] = nil
-                self?.reload()
-            }
-            folders.add(itemRow(icon: folderIcon(f.path), title: f.path, dim: !f.enabled, leading: [sw], trailing: [count, del]))
-        }
-        if s.folders.isEmpty { folders.add(formRow("tray", "フォルダがありません（ファイルは探しません）", iconColor: SettingsStyle.faint)) }
-        out.append(folders)
-
-        // 除くもの
-        out.append(spacer(4))
         out.append(sectionTitle("除外するフォルダ", symbol: "folder.badge.minus",
                                 trailing: [sButton("フォルダを追加…", symbol: "plus", small: true) { [weak self] in self?.addExcludeFolders() }]))
         let ex = CardView()
@@ -513,53 +393,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
         return row
     }
 
-    private func countText(_ path: String) -> String {
-        guard let host else { return "" }
-        guard let r = host.folderCount(path, then: { [weak self] _ in self?.scheduleReload() }) else { return "数えています…" }
-        if !FileManager.default.fileExists(atPath: RaidenSettings.Folder(path: path).absolutePath) { return "見つかりません" }
-        return r.capped ? "\(Self.num(r.count)) 件以上" : "\(Self.num(r.count)) 件"
-    }
-
-    /// 広すぎる場所の注意（件数が数え終わっている分だけで見る）
-    private func scopeWarning(_ s: RaidenSettings) -> String? {
-        guard let host else { return nil }
-        if let (p, n) = largeOff.first {
-            let e = ScopeCounter.estimate(n)
-            return "「\(p)」は \(Self.num(n)) 件\(n >= 200_000 ? "以上" : "")あるので、オフのまま追加しました。オンにすると、メモリが約 \(Self.num(e.memoryMB))MB、データベースが約 \(Self.num(e.dbMB))MB 増え、最初のベクトル作成に約 \(Self.num(e.minutes)) 分かかります（作成中も名前では探せます）。"
-        }
-        var total = 0
-        for f in s.folders where f.enabled {
-            guard let r = host.folderCount(f.path, then: { _ in }) else { continue }
-            total += r.count
-        }
-        guard total > ScopeCounter.warnAbove else { return nil }
-        let e = ScopeCounter.estimate(total)
-        return "検索するのは合わせて約 \(Self.num(total)) 件です。5 万件を超えると、メモリが約 \(Self.num(e.memoryMB))MB、データベースが約 \(Self.num(e.dbMB))MB になり、最初のベクトル作成に約 \(Self.num(e.minutes)) 分かかります（作成中も名前では探せます）。狭いフォルダに分けるか、除外を足すのがおすすめです。"
-    }
-
-    private func addFolders() {
-        guard let host else { return }
-        for p in chooseFolders("検索するフォルダを選ぶ") where !host.settings.folders.contains(where: { $0.path == p }) {
-            // 件数が分かるまではオフで足し、数え終わって多すぎなければオンにする
-            host.updateSettings { $0.folders.append(.init(path: p, enabled: false)) }
-            let decide: (ScopeCounter.Result) -> Void = { [weak self] r in
-                DispatchQueue.main.async {
-                    guard let self, let host = self.host, let i = host.settings.folders.firstIndex(where: { $0.path == p }) else { return }
-                    var total = r.count
-                    for f in host.settings.folders where f.enabled { total += host.folderCount(f.path, then: { _ in })?.count ?? 0 }
-                    if r.count > ScopeCounter.warnAbove || total > ScopeCounter.warnAbove {
-                        self.largeOff[p] = r.count
-                    } else {
-                        host.updateSettings { $0.folders[i].enabled = true }
-                    }
-                    self.reload()
-                }
-            }
-            if let r = host.folderCount(p, then: decide) { decide(r) }
-        }
-        reload()
-    }
-
     private func addExcludeFolders() {
         guard let host else { return }
         for p in chooseFolders("除外するフォルダを選ぶ") where !host.settings.excludeFolders.contains(p) {
@@ -609,15 +442,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
         let hkRow = formRow("keyboard", "入力欄を開くキー", detail: "クリックしてキーを押す（Esc でやめる）", trailing: [rec, reset], height: 56)
 
         let login = sSwitch(host.loginOn) { [weak self] on in self?.host?.setLogin(on) }
-        let unloadValues = [0, 5, 30]
-        var unloadTitles = ["解放しない", "閉じて 5 分後", "閉じて 30 分後"]
-        var unloadSel = unloadValues.firstIndex(of: s.unloadMinutes) ?? -1
-        if unloadSel < 0 { unloadTitles.append("閉じて \(s.unloadMinutes) 分後"); unloadSel = unloadTitles.count - 1 }
-        let custom = s.unloadMinutes
-        let unload = sPopup(unloadTitles, selected: unloadSel) { [weak self] i in
-            let m = i < unloadValues.count ? unloadValues[i] : custom
-            self?.host?.updateSettings { $0.unloadMinutes = m }
-        }
         let rowsRange = Array(RaidenSettings.maxRowsRange)
         let maxRows = sPopup(rowsRange.map { "\($0) 件" }, selected: rowsRange.firstIndex(of: s.maxRows) ?? 4) { [weak self] i in
             self?.host?.updateSettings { $0.maxRows = rowsRange[i] }
@@ -669,7 +493,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
         out.append(sectionTitle("動作", symbol: "gearshape.2"))
         out.append(card([
             formRow("power", "ログイン時に起動", trailing: [login]),
-            formRow("memorychip", "モデルを解放", detail: "閉じてしばらくでメモリを返す", trailing: [unload]),
         ]))
         return out
     }

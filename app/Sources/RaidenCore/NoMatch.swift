@@ -5,141 +5,28 @@ public struct MatchSignals: Sendable, CustomStringConvertible {
     public var top1: Float = 0        // 1 位の点数
     public var top2: Float = 0        // 2 位の点数
     public var gap: Float { top1 - top2 }
-    public var gapNoEx: Float = 0     // 例（k近傍法）を抜いて並べたときの 1 位と 2 位の差
     public var nameHit = false        // 1 位の名前が入力と文字で一致（先頭・途中・ローマ字）
-    public var rawV: Float = 0        // 1 位の説明文との素の近さ（加点の前）
-    public var maxV: Float = 0        // 全部の点の中で一番の素の近さ
-    public var vGap: Float = 0        // 素の近さの 1 番と 2 番の差
-    public var vZ: Float = 0          // maxV が全体の近さの分布から何σ離れているか
-    public var knnSim: Float = 0      // 一番近い例との近さ（例が無ければ 0）
-    public var hasIntent = false      // 時間・種類の言葉があった
-    public var relation = false       // 「A と同じ日の B」のようなつながりの言い方で並べた
+    public var dictHit = false        // 1 位の辞書の言葉に入力の文字が入っている
+    public var exampleHit = false     // 1 位に「選んだ」記録が当たった
+    public var fetched = 0            // ファイル: Spotlight から受け取った件数（ふるう前）
+    public var ms: Double = 0         // ファイル: Spotlight の問い合わせの時間
     public init() {}
 
     public var description: String {
-        String(format: "1位 %.3f 差 %.3f（例抜き %.3f） 名前 %@ V %.3f maxV %.3f 例 %.3f%@%@",
-               top1, gap, gapNoEx, nameHit ? "○" : "-", rawV, maxV, knnSim,
-               hasIntent ? " 絞込" : "", relation ? " つながり" : "")
+        String(format: "1位 %.3f 差 %.3f 名前 %@ 辞書 %@ 記録 %@", top1, gap, nameHit ? "○" : "-", dictHit ? "○" : "-", exampleHit ? "○" : "-")
     }
 }
 
-/// 「見つからない」の判定。弾いても候補は消さず、印（noMatch）を付けるだけ（画面で薄く出せるように）。
-/// しきい値は raiden-eval --files --section nomatch で決めた（README 参照）。
-///
-///   残す: 名前が文字で一致 / つながりの言い方 / 近い例がある（knnSim ≥ keepKnnSim）
-///   弾く: 素の近さの一番（maxV）が lowMaxV 未満、または midMaxV 未満で 1 位と 2 位の差（例抜き）が maxGap 未満
-///
-/// 答えの無い入力は「どれにもそこそこ近く、どれも抜けていない」形になる（1 位の点数だけだと、
-/// 時間・種類の加点や名前の一致で上がった点と区別できない）。
-public struct NoMatchRule: Sendable {
-    public var lowMaxV: Float
-    public var midMaxV: Float
-    public var maxGap: Float
-    public var keepKnnSim: Float
-
-    public init(lowMaxV: Float, midMaxV: Float, maxGap: Float, keepKnnSim: Float) {
-        self.lowMaxV = lowMaxV; self.midMaxV = midMaxV; self.maxGap = maxGap; self.keepKnnSim = keepKnnSim
-    }
-
-    /// しきい値の数字（ここにまとめる）。CPU int4 版で決めた値と、ANE 版（cos が全体に低く出る）に合わせ直した値
-    public enum Thresholds {
-        // ファイル・フォルダ
-        public static let fileLowMaxV: Float = 0.46
-        public static let fileMidMaxV: Float = 0.55
-        public static let fileMaxGap: Float = 0.03
-        public static let fileKeepKnnSim: Float = 0.68
-        // アプリ（件数が少なく例が必ず効くので、差は見ずに素の近さがかなり低いときだけ弾く）
-        public static let appLowMaxV: Float = 0.47
-        public static let appKeepKnnSim: Float = 0.55
-        // ANE 版。同じ入力・同じ説明文で、細かい近さの一番が CPU 版より中央値 0.014（平均 0.016）、
-        // 一番近い例との近さが 0.011 低い。近さのしきい値はどれも 0.01 下げる（差は近さの引き算なので動かさない）
-        public static let aneFileLowMaxV: Float = 0.45
-        public static let aneFileMidMaxV: Float = 0.54
-        public static let aneFileMaxGap: Float = 0.03
-        public static let aneFileKeepKnnSim: Float = 0.67
-        public static let aneAppLowMaxV: Float = 0.46
-        public static let aneAppKeepKnnSim: Float = 0.54
-    }
-
-    public static let filesCPU = NoMatchRule(lowMaxV: Thresholds.fileLowMaxV, midMaxV: Thresholds.fileMidMaxV,
-                                             maxGap: Thresholds.fileMaxGap, keepKnnSim: Thresholds.fileKeepKnnSim)
-    public static let appsCPU = NoMatchRule(lowMaxV: Thresholds.appLowMaxV, midMaxV: 0, maxGap: 0,
-                                            keepKnnSim: Thresholds.appKeepKnnSim)
-    public static let filesANE = NoMatchRule(lowMaxV: Thresholds.aneFileLowMaxV, midMaxV: Thresholds.aneFileMidMaxV,
-                                             maxGap: Thresholds.aneFileMaxGap, keepKnnSim: Thresholds.aneFileKeepKnnSim)
-    public static let appsANE = NoMatchRule(lowMaxV: Thresholds.aneAppLowMaxV, midMaxV: 0, maxGap: 0,
-                                            keepKnnSim: Thresholds.aneAppKeepKnnSim)
-    /// 答え合わせで差し替える用（nil ならモデルの units で選ぶ）
-    nonisolated(unsafe) public static var filesOverride: NoMatchRule?
-    nonisolated(unsafe) public static var appsOverride: NoMatchRule?
-    /// いまのモデル（BinVec.units。meta.json の "units"）に合うしきい値
-    public static var files: NoMatchRule { filesOverride ?? (BinVec.units == "ane" ? filesANE : filesCPU) }
-    public static var apps: NoMatchRule { appsOverride ?? (BinVec.units == "ane" ? appsANE : appsCPU) }
-
-    public func isNoMatch(_ s: MatchSignals) -> Bool {
-        if s.nameHit || s.relation || s.knnSim >= keepKnnSim { return false }
-        return s.maxV < lowMaxV || (s.maxV < midMaxV && s.gapNoEx < maxGap)
-    }
-}
-
-/// 検索の結果と「見つからない」の印
+/// 検索の結果と「見つからない」の印。弾いても候補は消さず、印（noMatch）を付けるだけ（画面で薄く出せるように）。
+///   アプリ: 1 位が名前・辞書・「選んだ」記録のどれにも当たっていない
+///   ファイル・フォルダ: Spotlight の結果が 0 件（条件に合う物が無い）
 public struct Judged<R: Sendable>: Sendable {
     public let results: [R]          // 弾いたときも点数の順に残す（画面で薄く出す用）
     public let noMatch: Bool         // true なら「見つからない」と出し、results は控えめに見せる
     public let signals: MatchSignals
     /// 入力欄のコマンドの読み取り結果（コマンドが無い入力では nil）。検索の記録（SearchLog）に残す用
     public var filters: QueryFilters? = nil
-}
-
-public enum NoMatch {
-    /// ranked（Ranker.rank の結果）と入力から手がかりを集める。
-    /// rankedNoEx は例（k近傍法）を抜いて並べた結果（例が無ければ nil で ranked を使う）
-    public static func signals(_ c: Corpus, query q: String, vec v: [Float], mix m: Mix,
-                               ranked: [(Int, Float)], rankedNoEx: [(Int, Float)]?,
-                               intent: QueryIntent?, relation: Bool, allow: [Bool]? = nil, exact: [Int: Float] = [:]) -> MatchSignals {
-        var s = MatchSignals()
-        guard let first = ranked.first else { return s }
-        let allow = c.liveAllow(allow)   // 消した印の点（差分で直したときの穴）は数えない
-        s.top1 = first.1
-        s.top2 = ranked.count > 1 ? ranked[1].1 : first.1 - 1
-        let r0 = rankedNoEx ?? ranked
-        s.gapNoEx = r0.count > 1 ? r0[0].1 - r0[1].1 : 1
-        s.relation = relation
-        s.hasIntent = !(intent?.isEmpty ?? true)
-        // exact: 並べ直しでその場で作った細かいベクトルとの近さ（2 値の近さより正確なので差し替える）
-        var V0 = c.dots(v)
-        for (i, x) in exact where i < V0.count { V0[i] = x }
-        // 絞り込みがあるときは、残った物の中で見る
-        let V = allow.map { a in V0.indices.filter { a[$0] }.map { V0[$0] } } ?? V0
-        if !V.isEmpty {
-            s.rawV = V0[first.0]
-            var a: Float = -9, b: Float = -9, sum: Float = 0
-            for x in V { sum += x; if x > a { b = a; a = x } else if x > b { b = x } }
-            s.maxV = a
-            s.vGap = V.count > 1 ? a - b : 0
-            let mean = sum / Float(V.count)
-            let sd = (V.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Float(V.count)).squareRoot()
-            s.vZ = sd > 0 ? (a - mean) / sd : 0
-        }
-        s.nameHit = nameHit(c, query: q, index: first.0, mix: m)
-        if m.k { for ev in c.exVecs { s.knnSim = max(s.knnSim, Vec.dot(ev, v)) } }
-        return s
-    }
-
-    /// Ranker と同じ名前の文字一致（先頭・単語の先頭・途中・ローマ字の 1 文字違いまで）
-    static func nameHit(_ c: Corpus, query q: String, index i: Int, mix m: Mix) -> Bool {
-        let nq = Lexical.normalize(q)
-        let asciiQ = nq.allSatisfy { $0.isASCII }
-        if nq.isEmpty || (asciiQ && nq.count < 2) { return false }
-        for nn in c.names[i] {
-            let words = nn.split(whereSeparator: { " -_.".contains($0) })
-            if nn.contains(nq) || words.contains(where: { $0.hasPrefix(nq) }) { return true }
-        }
-        let rq = asciiQ ? Lexical.canonRomaji(nq.filter { $0.isLetter || $0.isNumber }) : ""
-        if m.fuzzyBonus > 0 && rq.count >= 3 && !c.romaji[i].isEmpty {
-            let d = Lexical.approxSubstringDistance(rq, in: c.romaji[i])
-            if d == 0 || (d == 1 && rq.count >= 4) { return true }
-        }
-        return false
+    public init(results: [R], noMatch: Bool, signals: MatchSignals, filters: QueryFilters? = nil) {
+        self.results = results; self.noMatch = noMatch; self.signals = signals; self.filters = filters
     }
 }

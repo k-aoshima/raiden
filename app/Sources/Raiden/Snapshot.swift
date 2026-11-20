@@ -36,8 +36,6 @@ enum Snapshot {
         var weakApps = appSec, weakFiles = fileSec
         weakApps.items = Array(apps.prefix(2)); weakFiles.items = Array(files.prefix(2))
         shoot(dir + "/panel-notfound.png", query: "ふわふわのやつ", sections: [weakApps, weakFiles], notFound: true)
-        shoot(dir + "/panel-preparing.png", query: "PDFを見るやつ", sections: [appSec],
-              status: ("ファイル準備中… 120/300", "hourglass"))
         shootSettings(dir: dir)
         FilterSnapshots.run(dir: dir)
     }
@@ -47,14 +45,12 @@ enum Snapshot {
         let host = DummySettingsHost()
         let c = SettingsWindowController(host: host)
         for t in SettingsWindowController.Tab.allCases {
-            host.status = t == .scope ? IndexStatus(count: 1024, embedding: (120, 300), scanning: true, ready: true) : IndexStatus(count: 1024, ready: true)
             c.window.setContentSize(NSSize(width: SettingsStyle.width, height: SettingsStyle.height))
             c.select(t)
             // 中身が長い画面は窓を伸ばして全部写す
             c.window.setContentSize(NSSize(width: SettingsStyle.width, height: max(SettingsStyle.height, min(1100, c.contentHeight()))))
             guard let v = c.snapshotContent() else { continue }
             v.layoutSubtreeIfNeeded()
-            c.refreshStatus()
             let b = v.bounds
             var shot: NSBitmapImageRep?
             SettingsStyle.appearance.performAsCurrentDrawingAppearance {
@@ -130,17 +126,10 @@ enum Snapshot {
     }
 }
 
-/// 設定窓の見本用の口（私的なものは写さない。フォルダは初期値、例と記録はダミー）
+/// 設定窓の見本用の口（私的なものは写さない。除外は初期値、例と記録はダミー）
 final class DummySettingsHost: SettingsHost {
     var settings = RaidenSettings()
-    var status = IndexStatus(count: 1024, ready: true)
-    var indexStatus: IndexStatus { status }
     func updateSettings(_ f: (inout RaidenSettings) -> Void) { f(&settings) }
-    func rebuildIndex() {}
-    func folderCount(_ path: String, then: @escaping (ScopeCounter.Result) -> Void) -> ScopeCounter.Result? {
-        let n = ["~/Documents": 642, "~/Downloads": 211, "~/Desktop": 37, "~/Documents/Obsidian Vault": 134][path] ?? 0
-        return ScopeCounter.Result(count: n, capped: false)
-    }
     var hotKeyLabel: String { "⌥Space" }
     func applyHotKey(_ hk: RaidenSettings.HotKeySetting?) -> String? { nil }
     func suspendHotKey(_ on: Bool) {}

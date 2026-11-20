@@ -1,15 +1,13 @@
 import AppKit
+import CoreServices
 import Foundation
 
 /// 手元のファイル 1 件ずつの「開くアプリ」。NSWorkspace.urlForApplication(toOpen: ファイルの URL) は、
 /// Finder の「このアプリケーションで開く」の個別設定があればそれを、無ければ種類の既定を返す。
-/// ~/Documents・Downloads・Desktop の 800 件ほどで 0.1 秒かからないので、一覧を作るたびに全部調べる。
-/// ファイルが増えた・変わった・消えたときは update / remove でその分だけ調べ直せる（FSEvents から呼ぶ想定）。
+/// ~/Documents・Downloads・Desktop のファイル（Spotlight で並べる）を、アプリ一覧を作るたびに全部調べる。
 ///
 /// 使い道:
-///   - アプリの説明文の「いつも開くファイル: PDF（手元に 49 個）」（counts → AppEntry.opens → Describe）
 ///   - 「PDF を見るやつ」でいつも PDF を開くアプリに足す点（Engine.openBonus）
-///   - グラフの線 app → file（opens。Store.replaceOpens）
 public struct OpenWithIndex: Sendable {
     /// ファイルのパス → アプリのキー（AppEntry.key と同じ。bundle id、無ければアプリのパス）
     public private(set) var byFile: [String: String] = [:]
@@ -17,32 +15,29 @@ public struct OpenWithIndex: Sendable {
 
     public init() {}
 
-    /// 探す場所はファイル検索と同じ（設定の検索範囲。既定は FileCatalog.defaultRoots）
-    public static func build(scope: ScanScope = .default) -> OpenWithIndex {
+    /// 数える場所は ~/Documents・Downloads・Desktop（FileCatalog.defaultRoots）。ファイルの並べ方は Spotlight に聞く（listFiles）
+    public static func build(roots: [String] = FileCatalog.defaultRoots, exclude: ScanScope = ScanScope(roots: [])) -> OpenWithIndex {
         var idx = OpenWithIndex()
-        idx.update(listFiles(scope: scope))
+        idx.update(listFiles(roots: roots, exclude: exclude))
         return idx
     }
 
-    /// ファイルだけを軽く並べる（隠しファイル・パッケージの中・.app・node_modules などは除く）
-    public static func listFiles(scope: ScanScope) -> [String] {
-        let fm = FileManager.default
-        var out: [String] = []
-        var seen = Set<String>()
-        for root in scope.roots where !scope.excludesPath(root) {
-            guard let en = fm.enumerator(at: URL(fileURLWithPath: root), includingPropertiesForKeys: [.isDirectoryKey, .isPackageKey],
-                                         options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
-            for case let url as URL in en {
-                let name = url.lastPathComponent
-                let rv = try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
-                if scope.excludesName(name) || scope.excludesPath(url.path.precomposedStringWithCanonicalMapping) {
-                    if rv?.isDirectory == true { en.skipDescendants() }
-                    continue
-                }
-                if rv?.isDirectory == true && rv?.isPackage != true { continue }
-                let p = url.path.precomposedStringWithCanonicalMapping
-                if seen.insert(p).inserted { out.append(p) }
-            }
+    /// roots の中のファイル（フォルダ以外）を Spotlight で並べる。隠し・パッケージの中・.app・除外の名前は除く
+    public static func listFiles(roots: [String], exclude: ScanScope) -> [String] {
+        let s = SpotlightSearch(exclude: exclude)
+        let rs = roots.map(ScanScope.norm).filter { FileManager.default.fileExists(atPath: $0) }
+        guard !rs.isEmpty, let q = MDQueryCreate(kCFAllocatorDefault, "kMDItemContentTypeTree == \"public.item\" && kMDItemContentType != \"public.folder\"" as CFString, nil, nil) else { return [] }
+        MDQuerySetSearchScope(q, rs as CFArray, 0)
+        MDQuerySetMaxCount(q, 50_000)
+        guard MDQueryExecute(q, CFOptionFlags(kMDQuerySynchronous.rawValue)) else { return [] }
+        var out: [String] = [], seen = Set<String>()
+        for i in 0..<MDQueryGetResultCount(q) {
+            guard let raw = MDQueryGetResultAtIndex(q, i) else { continue }
+            let item = unsafeBitCast(raw, to: MDItem.self)
+            guard let p0 = MDItemCopyAttribute(item, kMDItemPath) as? String else { continue }
+            let p = p0.precomposedStringWithCanonicalMapping
+            guard !s.excluded(p), seen.insert(p).inserted else { continue }
+            out.append(p)
         }
         return out
     }
@@ -86,16 +81,5 @@ public struct OpenWithIndex: Sendable {
             out[k, default: [:]][f, default: 0] += 1
         }
         return out
-    }
-
-    /// グラフの線（アプリのキー, ファイルのパス）
-    public var pairs: [(String, String)] { byFile.map { ($0.value, $0.key) } }
-
-    /// 説明文の「いつも開くファイル: PDF（手元に 49 個） 画像（手元に 3 個）」。件数の多い順に top 種類まで
-    public static func describe(_ opens: [String: Int], top: Int = 3) -> String {
-        let xs = opens.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.prefix(top)
-        if xs.isEmpty { return "" }
-        return "いつも開くファイル: " + xs.map { "\(FileCatalog.familyJP[$0.key] ?? $0.key.uppercased())（手元に \($0.value) 個）" }
-            .joined(separator: " ")
     }
 }

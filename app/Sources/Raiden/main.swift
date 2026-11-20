@@ -1,10 +1,9 @@
 import AppKit
 import Carbon
-import CoreML
 import RaidenCore
 
-/// メニューバー常駐。ホットキーで入力欄を出し、曖昧な言い方でアプリを探して開く。
-/// 選んで開いた組は raiden.sqlite に例として残り、次から k近傍法で効く。
+/// メニューバー常駐。ホットキーで入力欄を出し、アプリ（名前・辞書・選んだ記録の文字の一致）とファイル・フォルダ（Spotlight）を探して開く。
+/// 選んで開いた組は raiden.sqlite に記録として残り、次から入力の文字が近ければ効く。埋め込みモデルは使わない。
 /// 設定は ~/Library/Application Support/Raiden/settings.json（設定の窓で変える）。
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
@@ -12,43 +11,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var hotKey: HotKey?
     private(set) var hotKeyLabel = ""
     private var engine: Engine?
-    private var bge: BGEEmbedder?
+    /// 値の候補の件数と最近使った物（Spotlight で裏で数える）
+    private var filterSource: SpotlightFilterSource?
     private var store: Store?
     private let work = DispatchQueue(label: "raiden.work", qos: .userInitiated)
-    /// ファイル一覧の作り直し（初回のベクトル化は数十秒かかるので、検索の列とは分ける）と、ファイルを選んだ例の保存。
-    /// FileIndex はこの列からだけ触る
-    private let fileWork = DispatchQueue(label: "raiden.files", qos: .utility)
-    /// アプリを選んだ例の保存（Store がファイルのベクトル化で塞がっていても、検索の列を止めないように分ける）
+    /// 選んだ記録・開いた記録の保存（検索の列を止めないように分ける）
     private let learnWork = DispatchQueue(label: "raiden.learn", qos: .utility)
     /// 検索の記録の書き込み
     private let logWork = DispatchQueue(label: "raiden.searchlog", qos: .utility)
-    /// 設定窓のフォルダの件数を数える
-    private let countWork = DispatchQueue(label: "raiden.count", qos: .utility, attributes: .concurrent)
     private var generation = 0
     private var pendingQuery: DispatchWorkItem?
     /// 入力が止まってから検索するまでの待ち
     private static let debounce: TimeInterval = 0.1
-    private var fileIndex: FileIndex?
-    private var fileWatcher: FSWatcher?
     private var appWatcher: FSWatcher?
-    /// 一度でもファイル一覧ができたか（それまでは「ファイル準備中…」でアプリだけ出す）
-    private var filesReady = false
-    /// 取りこぼしの保険の全体の見直し（ふだんは FSEvents で変化をすぐ拾う）
-    private static let fullScanInterval: TimeInterval = 86400
-    private var unloadTimer: Timer?
-    private var unloadItems: [NSMenuItem] = []
+    /// 1 日 1 回、アプリ一覧を取り直す（ふだんはアプリの場所の FSEvents で拾う）
+    private static let rescanInterval: TimeInterval = 86400
     private var loginItem: NSMenuItem?
 
     private(set) var settings = RaidenSettings()
     private var settingsWindow: SettingsWindowController?
-    private(set) var indexStatus = IndexStatus()
-    /// FileIndex に当てた範囲（設定を変えてから少し待って当てる）
-    private var appliedScope: ScanScope?
-    private var scopeApplyItem: DispatchWorkItem?
-    private var countCache: [String: ScopeCounter.Result] = [:]
-    private var countWaiters: [String: [(ScopeCounter.Result) -> Void]] = [:]
-    private var countGen = 0
-
     /// 入力欄を開いてから閉じるまでの検索の記録（search_log の 1 行になる）
     private struct Session {
         var opened = Date()
@@ -71,18 +52,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.onQuery = { [weak self] q in self?.query(q) }
         panel.onOpen = { [weak self] q, c, reveal in self?.open(q, c, reveal: reveal) }
         panel.onHide = { [weak self] in
-            self?.scheduleUnload()
+            self?.engine?.cancelFiles()
             // 選んで閉じたときは open が先に記録する。残っていれば選ばずに閉じた
             DispatchQueue.main.async { self?.finishSession(chosen: nil) }
         }
-        panel.filterInput.context = { [weak self] in self?.filesReady == true ? self?.engine?.filterContext : nil }
+        // 値の候補の件数と最近使った物は Spotlight で裏で数える（SpotlightFilterSource。届いたら一覧を出し直す）
+        panel.filterInput.context = { [weak self] in self?.filterSource }
         setupFilterHooks()
         panel.setStatus("準備中…", symbol: "hourglass")
         work.async { [weak self] in self?.boot() }
-        // 取りこぼしの保険（1 日 1 回、アプリもファイルも全体を見直す）と、古い検索の記録の掃除
-        Timer.scheduledTimer(withTimeInterval: Self.fullScanInterval, repeats: true) { [weak self] _ in
+        // 取りこぼしの保険（1 日 1 回、アプリ一覧を取り直す）と、古い検索の記録の掃除
+        Timer.scheduledTimer(withTimeInterval: Self.rescanInterval, repeats: true) { [weak self] _ in
             self?.rescan()
-            self?.fullScanFiles()
             self?.pruneSearchLog()
         }
     }
@@ -90,10 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: 設定
 
     private func loadSettings() {
-        let exists = FileManager.default.fileExists(atPath: RaidenSettings.defaultURL.path)
         settings = RaidenSettings.load()
-        // 前の版はモデルを解放する時間を UserDefaults に持っていた
-        if !exists, let m = UserDefaults.standard.object(forKey: "unloadAfterMinutes") as? Int { settings.unloadMinutes = m }
         PanelStyle.transparency = settings.transparency
         SearchPanelController.maxRows = settings.maxRows
         SavedFilters.set(settings.savedFilters)
@@ -109,18 +87,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let old = settings
         settings = s
         do { try s.save() } catch { rlogError("設定を保存できませんでした \(error)") }
-        if old.excludeNames != s.excludeNames || old.excludeFolders != s.excludeFolders {
-            countGen += 1; countCache = [:]; countWaiters = [:]
+        if old.exclude != s.exclude {
+            let ex = s.exclude
+            work.async { [weak self] in self?.engine?.spotlight.exclude = ex; self?.filterSource?.search.exclude = ex }
         }
-        if old.scope != s.scope { scheduleScopeApply() }
         if old.transparency != s.transparency { previewTransparency(s.transparency) }
         if old.maxRows != s.maxRows { SearchPanelController.maxRows = s.maxRows }
         if old.savedFilters != s.savedFilters { SavedFilters.set(s.savedFilters) }
         if old.dictionary != s.dictionary { PhraseDictionary.set(s.dictionary) }
-        if old.unloadMinutes != s.unloadMinutes { unloadItems.forEach { $0.state = $0.tag == s.unloadMinutes ? .on : .off } }
         if old.logDays != s.logDays { pruneSearchLog() }
-        if old.folders != s.folders || old.excludeFolders != s.excludeFolders || old.excludeNames != s.excludeNames {
-            rlog("検索範囲を変更 探す \(s.scope.roots.map(RaidenSettings.tilde)) 除外フォルダ \(s.excludeFolders) 除外名 \(s.excludeNames)")
+        if old.excludeFolders != s.excludeFolders || old.excludeNames != s.excludeNames {
+            rlog("除外を変更 フォルダ \(s.excludeFolders) 名前 \(s.excludeNames)")
         }
     }
 
@@ -140,261 +117,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func boot() {
         let t0 = Date()
         do {
-            let dir = Bundle.main.resourceURL!.appendingPathComponent("model")
-            // 使う装置はモデルの meta.json に従う（ANE 版は ANE、前の版は CPU）
-            let b = try BGEEmbedder(modelDir: dir, body: "body.mlmodelc")
-            try b.load()
             let store = try Store()
             if store.migratedFiles > 0 {
-                rlog("ファイル・フォルダのベクトルを 2 値に変換 \(store.migratedFiles) 件（作り直しなし）")
+                rlog("前の版のファイル一覧とベクトルを消した（ファイル・フォルダの点 \(store.migratedFiles) 件）")
             }
-            // 入力文と例のベクトルは覚えておく（ファイル一覧を作り直すたびに例を入れ直すため）
-            let e = Engine(embedder: CachedEmbedder(b), store: store)
-            let scope = DispatchQueue.main.sync { settings.scope }
-            // 検索範囲のファイルを並べる（フォルダへのアクセスの許可を待っている間はここで止まるので、記録に残す）
-            rlog("いつも開くアプリを調べる（検索範囲のファイルを並べる）")
-            let opens = OpenWithIndex.build(scope: scope)
-            e.setApps(AppCatalog.collect(opens: opens), opens: opens)
+            let ex = DispatchQueue.main.sync { settings.exclude }
+            let e = Engine(store: store, exclude: ex)
+            let opens = OpenWithIndex.build(exclude: ex)
+            e.setApps(AppCatalog.collect(opens: opens))
             e.loadExamples()
-            bge = b
             self.store = store
             engine = e
-            rlog(String(format: "モデル読み込み %.1fs  アプリ %d  例 %d  メモリ %.0fMB",
-                        Date().timeIntervalSince(t0), e.apps.count, e.examples.count, physFootprintMB()))
+            // 検索の問い合わせ（打つたびに前を止める）と取り消し合わないよう、別の SpotlightSearch で数える
+            let fs = SpotlightFilterSource(search: SpotlightSearch(exclude: ex))
+            fs.appCountProvider = { [weak e] in e?.apps.count ?? 0 }
+            fs.onUpdate = { [weak self] in DispatchQueue.main.async { self?.panel.filterInput.sourceDidUpdate() } }
+            DispatchQueue.main.sync { self.filterSource = fs }
+            rlog(String(format: "起動 %.2fs  アプリ %d  記録 %d  メモリ %.0fMB", Date().timeIntervalSince(t0), e.apps.count, e.examples.count, physFootprintMB()))
             DispatchQueue.main.async {
-                self.panel.setStatus("ファイル準備中…", symbol: "hourglass")
-                // 読み込みの間に設定窓で範囲を変えていたら、今の設定で始める
-                self.startFiles(e, scope: self.settings.scope)
+                self.panel.setStatus("")
+                // アプリの場所はフォルダ単位で十分（.app の中の細かい変化はまとめて 1 回の取り直しになる）
+                self.appWatcher = FSWatcher(paths: AppCatalog.dirs, fileEvents: false, quiet: 1.0, maxWait: 5.0) { [weak self] _ in
+                    self?.rescan()
+                }
                 self.pruneSearchLog()
-                self.refreshFilterMemory()
             }
         } catch {
             rlogError("起動に失敗 \(error)")
-            DispatchQueue.main.async { self.panel.setStatus("モデルを読めませんでした", symbol: "exclamationmark.triangle") }
+            DispatchQueue.main.async { self.panel.setStatus("データベースを開けませんでした", symbol: "exclamationmark.triangle") }
         }
     }
 
     private func rescan() {
-        let scope = settings.scope
+        let ex = settings.exclude
         work.async { [weak self] in
             guard let e = self?.engine else { return }
             let t = Date()
-            let opens = OpenWithIndex.build(scope: scope)
-            e.setApps(AppCatalog.collect(opens: opens), opens: opens)
+            let opens = OpenWithIndex.build(exclude: ex)
+            e.setApps(AppCatalog.collect(opens: opens))
             rlog(String(format: "アプリ一覧を作り直し %d 個 %.1fs", e.apps.count, Date().timeIntervalSince(t)))
         }
-    }
-
-    /// ファイルの一覧を用意して見張り始める。保存した一覧（Store の nodes.entry）が今の範囲・除外の物なら、それを読んで入れ、
-    /// 止まっていた間の変化を FSEvents の保存したイベント ID から受け取って差分で当てる（起動のたびに OS に問い合わせ直さない）。
-    /// 無ければ今から見張り、全体の見直しを裏で行う（見張りが先なので、見直しの間の変化も後で拾える）
-    private func startFiles(_ e: Engine, scope: ScanScope) {
-        let idx = FileIndex(engine: e, scope: scope)
-        idx.background = true   // ベクトル化は embedStep で少しずつ（その間も名前の一致と絞り込みでは出る）
-        fileIndex = idx
-        appliedScope = scope
-        // アプリの場所はフォルダ単位で十分（.app の中の細かい変化はまとめて 1 回の取り直しになる）
-        appWatcher = FSWatcher(paths: AppCatalog.dirs, fileEvents: false, quiet: 1.0, maxWait: 5.0) { [weak self] _ in
-            self?.rescan()
-        }
-        indexStatus.scanning = true
-        settingsWindow?.refreshStatus()
-        let progress = progressHandler()
-        fileWork.async { [weak self] in
-            let t = Date()
-            let since = idx.savedEventId()
-            let loaded = since != nil && idx.loadSaved(progress: progress)
-            if loaded {
-                rlog(String(format: "保存した一覧から入れた %d 件 %.1fs（止まっていた間の変化は FSEvents から受け取る）", idx.engine.files.count, Date().timeIntervalSince(t)))
-            } else {
-                rlog("保存した一覧が無いか、範囲・除外・ボリュームが変わったので全体を見直す")
-            }
-            let n = idx.engine.files.count
-            DispatchQueue.main.async {
-                guard let self, idx === self.fileIndex else { return }
-                self.watchFiles(idx, roots: scope.roots, since: loaded ? since : nil)
-                if loaded { self.markFilesReady(n) } else { self.fullScanFiles() }
-            }
-            self?.pumpEmbedding(idx)
-        }
-    }
-
-    private func markFilesReady(_ n: Int) {
-        indexStatus.count = n; indexStatus.ready = true
-        if !scanRunning { indexStatus.scanning = false }
-        settingsWindow?.refreshStatus()
-        guard !filesReady else { return }
-        filesReady = true
-        panel.setStatus("")
-    }
-
-    private func watchFiles(_ idx: FileIndex, roots: [String], since: UInt64? = nil) {
-        fileWatcher?.stop()
-        fileWatcher = FSWatcher(paths: roots, since: since) { [weak self] change in
-            self?.fileWork.async {
-                let st = idx.apply(change)
-                if change.historyDone { rlog("止まっていた間の変化を受け取り終えた") }
-                if !st.rescanned.isEmpty {
-                    rlog("FSEvents の履歴が途切れたので見直し \(st.rescanned.map(RaidenSettings.tilde))")
-                }
-                if st.needsFullScan { DispatchQueue.main.async { self?.fullScanFiles() } }
-                // 範囲の中で何も変わっていない知らせ（除外した場所への書き込み・起動直後に溜まった分）は書かない
-                guard st.changed > 0 || st.removed > 0 else { return }
-                rlog(String(format: "ファイルの変化 %d 件・削除 %d 件（%@、ベクトル化 %d 件）%.2fs", st.changed, st.removed,
-                            st.incremental ? "差分" : "全部入れ直し", st.embedded, st.seconds))
-                let n = idx.engine.files.count
-                DispatchQueue.main.async { self?.indexStatus.count = n; self?.settingsWindow?.refreshStatus() }
-                self?.pumpEmbedding(idx)
-            }
-        }
-    }
-
-    /// fileWork の上でだけ触る
-    private var pumping = false
-    private var pumpStart: (Date, Int) = (Date(), 0)   // 始めた時刻と、そのときの済んだ数
-
-    /// ベクトル化の残りを 1 回分（64 件）ずつ進める。1 回ごとに列に積み直すので、その間の FSEvents や範囲の変更も止まらない。
-    /// まだベクトルの無い物（短い説明）を先に全部作り、中身の頭を入れた作り直しは後で少し間をあけて進める。
-    /// どちらも入力欄を開いている間は止める。fileWork の上で呼ぶ
-    private func pumpEmbedding(_ idx: FileIndex) {
-        guard !pumping else { return }
-        guard idx.hasPending else { publishEmbedding(idx); return }
-        pumping = true
-        pumpStart = (Date(), idx.shortDone + idx.fullDone)
-        stepEmbedding(idx)
-    }
-
-    private func stepEmbedding(_ idx: FileIndex) {
-        guard idx === fileIndex else { pumping = false; return }
-        let visible = DispatchQueue.main.sync { panel.isVisible }
-        if visible {
-            // 入力欄を開いている間は止める（検索の埋め込みを待たせない。まだベクトルの無い物も名前の一致と絞り込みでは出る）
-            fileWork.asyncAfter(deadline: .now() + 1) { [weak self] in self?.stepEmbedding(idx) }
-            return
-        }
-        idx.embedStep()
-        publishEmbedding(idx)
-        if !idx.hasPending {
-            pumping = false
-            rlog(String(format: "ベクトル化を終えた %.1fs（最後の一覧で 短い説明 %d 件・中身あり %d 件）", Date().timeIntervalSince(pumpStart.0), idx.shortTotal, idx.fullTotal))
-            if let n = store?.compactIfBloated(), n > 0 { rlog("データベースの空き \(n) ページを詰めた") }
-            return
-        }
-        let gap: TimeInterval = idx.shortDone >= idx.shortTotal ? 0.05 : 0
-        fileWork.asyncAfter(deadline: .now() + gap) { [weak self] in self?.stepEmbedding(idx) }
-    }
-
-    /// ベクトル化の進み具合を入力欄と設定窓に出す（fileWork の上で呼ぶ）
-    private func publishEmbedding(_ idx: FileIndex) {
-        let s = (idx.shortDone, idx.shortTotal), f = (idx.fullDone, idx.fullTotal)
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.indexStatus.embedding = s.0 < s.1 ? s : nil
-            self.indexStatus.refining = f.0 < f.1 ? f : nil
-            self.settingsWindow?.refreshStatus()
-        }
-    }
-
-    /// ベクトル化の進み具合を入力欄と設定窓に出す
-    private func progressHandler() -> (Int, Int) -> Void {
-        { [weak self] d, t in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.indexStatus.embedding = d < t ? (d, t) : nil
-                if !self.filesReady { self.panel.setStatus("ファイル準備中… \(d)/\(t)", symbol: "hourglass") }
-                self.settingsWindow?.refreshStatus()
-            }
-        }
-    }
-
-    /// main の上でだけ触る: 全体の見直しが走っているか / 終わったらもう一度行うか
-    private var scanRunning = false, scanAgain = false
-
-    /// ファイル一覧を全体から見直す（保存した一覧が使えない起動・1 日 1 回・履歴が途切れた・範囲が増えた・設定の「今すぐ作り直す」）。
-    /// OS への問い合わせ（~/Project 16 万件で数分）は別の列で行い、fileWork は止めない（その間も今の一覧で検索でき、
-    /// FSEvents の変化とベクトル化も進む）。できたら全部入れ直して保存し、見直しの間の変化を当て直す
-    private func fullScanFiles() {
-        guard let idx = fileIndex else { return }
-        guard !scanRunning else { scanAgain = true; return }
-        scanRunning = true
-        indexStatus.scanning = true
-        settingsWindow?.refreshStatus()
-        let progress = progressHandler()
-        fileWork.async { [weak self] in
-            idx.beginScan()
-            let scope = idx.scope
-            DispatchQueue.global(qos: .utility).async {
-                let t = Date()
-                let list = FileCatalog.collect(scope: scope)
-                let tc = Date().timeIntervalSince(t)
-                self?.fileWork.async {
-                    let st = idx.finishScan(list, scope: scope, progress: progress)
-                    rlog(String(format: "ファイル一覧を見直した %d 件（問い合わせ %.1fs・入れ直し %.1fs、ベクトル化 %d 件・残り %d 件、例 %d）",
-                                list.count, tc, st.seconds, st.embedded, idx.shortTotal, st.examples))
-                    let n = idx.engine.files.count
-                    self?.pumpEmbedding(idx)
-                    DispatchQueue.main.async {
-                        guard let self else { return }
-                        self.scanRunning = false
-                        self.markFilesReady(n)
-                        if self.scanAgain { self.scanAgain = false; self.fullScanFiles() }
-                    }
-                }
-            }
-        }
-    }
-
-    /// 範囲を変えたら少し待ってから当てる（続けて変えたときにまとめる）
-    private func scheduleScopeApply() {
-        scopeApplyItem?.cancel()
-        let item = DispatchWorkItem { [weak self] in self?.applyScope() }
-        scopeApplyItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: item)
-    }
-
-    /// FileIndex の範囲を差し替え、FSEvents の見張りを張り直す。増えた場所だけベクトル化し（裏で）、
-    /// 外した場所の点と線は SQLite から消える（FileIndex.setScope）。アプリの「いつも開く」も範囲に合わせて取り直す
-    private func applyScope() {
-        let scope = settings.scope
-        guard let idx = fileIndex, scope != appliedScope else { return }
-        appliedScope = scope
-        watchFiles(idx, roots: scope.roots)
-        indexStatus.scanning = true
-        settingsWindow?.refreshStatus()
-        let progress = progressHandler()
-        fileWork.async { [weak self] in
-            let st = idx.setScope(scope, progress: progress)
-            rlog(String(format: "検索範囲を当てた 外した %d 件%@ %.1fs", st.removed, st.needsFullScan ? "（増えた場所・除外は裏で全体を見直す）" : "", st.seconds))
-            let n = idx.engine.files.count
-            self?.pumpEmbedding(idx)
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.markFilesReady(n)
-                if st.needsFullScan { self.fullScanFiles() }
-                self.rescan()
-            }
-        }
-    }
-
-    func rebuildIndex() { fullScanFiles() }
-
-    func folderCount(_ path: String, then: @escaping (ScopeCounter.Result) -> Void) -> ScopeCounter.Result? {
-        if let r = countCache[path] { return r }
-        let first = countWaiters[path] == nil
-        countWaiters[path, default: []].append(then)
-        guard first else { return nil }
-        let scope = settings.scope, gen = countGen
-        let abs = RaidenSettings.Folder(path: path).absolutePath
-        countWork.async { [weak self] in
-            let r = ScopeCounter.count(root: abs, scope: scope)
-            DispatchQueue.main.async {
-                guard let self, gen == self.countGen else { return }
-                self.countCache[path] = r
-                let ws = self.countWaiters.removeValue(forKey: path) ?? []
-                ws.forEach { $0(r) }
-            }
-        }
-        return nil
     }
 
     // MARK: ホットキー
@@ -454,26 +216,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func toggle() {
         if panel.isVisible { panel.hide(); return }
-        unloadTimer?.invalidate()
         panel.show()
         session = Session()
-        // 解放していたら、打ち始める前に読み直しておく
-        if let b = bge, !b.isLoaded {
-            work.async {
-                let s = (try? b.load()) ?? 0
-                rlog(String(format: "モデル再読み込み %.2fs", s))
-            }
-        }
+        filterSource?.refreshRecent()
     }
 
     // MARK: 検索と開く
 
-    /// 入力のたびに呼ばれる。入力が止まって debounce 秒たってから検索し、古い問い合わせは捨てる
+    /// 入力のたびに呼ばれる。入力が止まって debounce 秒たってから検索し、古い問い合わせは捨てる（走っている Spotlight も止める）
     private func query(_ q: String) {
         generation += 1
         let g = generation
         pendingQuery?.cancel()
         pendingQuery = nil
+        engine?.cancelFiles()
         if var s = session, s.edits.last?.q != q {
             if s.edits.count < 100 { s.edits.append(.init(q: q, t: Int(Date().timeIntervalSince(s.opened) * 1000))) }
             s.query = q
@@ -481,10 +237,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             session = s
         }
         if q.isEmpty { panel.setResults([], query: q); return }
-        let withFiles = filesReady
         let order = settings.sectionOrder
-        // 一覧を作っている間（起動直後・範囲を足した直後）は、まだ一覧に無い物を Spotlight の名前検索で補う
-        let spotlight = indexStatus.scanning || !indexStatus.ready ? settings.scope : nil
         let item = DispatchWorkItem { [weak self] in
             self?.work.async {
                 guard let self, let e = self.engine else { return }
@@ -493,7 +246,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 DispatchQueue.main.sync { stale = g != self.generation }
                 if stale { return }
                 let t0 = Date()
-                let r = Self.sections(q, engine: e, withFiles: withFiles, order: order, spotlight: spotlight)
+                let r = Self.sections(q, engine: e, order: order)
                 let ms = Date().timeIntervalSince(t0) * 1000
                 DispatchQueue.main.async {
                     guard g == self.generation else { return }
@@ -521,7 +274,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// アプリとファイルを節に分けて並べる（合計 maxRows 件）。
-    /// 点数はアプリとファイルで付け方が違う（アプリは k近傍法の重み 1.0、ファイルは時間・種類・フォルダの加点）ので混ぜない。
+    /// 点数はアプリとファイルで付け方が違う（アプリは名前・辞書・記録、ファイルは名前・新しさ・記録）ので混ぜない。
     /// 並び（設定の「一般」）が自動なら、ふだんはアプリの節が先。時間・種類・つながりの言葉（「先週のPDF」「〜のとこ」）があればファイルの節を先にする。
     /// 先の節は最大 4 件、残りを後の節に回す（後の節が少なければ先の節に戻す）。
     /// 「見つからない」は Engine の印（searchJudged / searchFilesJudged）を節ごとに見る。
@@ -531,28 +284,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// 絞り込みで全部出すときの上限（実質なし）
     static let allLimit = 100_000
 
-    static func sections(_ q: String, engine e: Engine, withFiles: Bool, order: SectionOrder = .auto, spotlight: ScanScope? = nil) -> Sections {
+    static func sections(_ q: String, engine e: Engine, withFiles: Bool = true, order: SectionOrder = .auto) -> Sections {
         // 絞り込みのコマンド（#type #kind #ext #date #path #name）が効いているときは上限で切らず全部出す（パネルはスクロール）
         let filtered = QueryFilters.parse(q).isActive
         let total = filtered ? allLimit : SearchPanelController.maxRows
         let aj = e.searchJudged(q, limit: total)
         var appSec = ResultSection(title: "アプリ", symbol: "app.badge", items: aj.results.map { RowItem(.app($0)) })
         appSec.faded = aj.noMatch
-        let fq = QueryFilters.parse(q)
-        let extra = spotlight != nil && !fq.hasSyntax ? SpotlightNames.search(q, scope: spotlight!, limit: 5).filter { !e.hasFile($0.path) } : []
-        guard withFiles || !extra.isEmpty else {
+        guard withFiles else {
             return Sections(sections: [appSec], notFound: aj.noMatch && !appSec.items.isEmpty, appsNoMatch: aj.noMatch, filesNoMatch: false)
         }
-        let fj0 = withFiles ? e.searchFilesJudged(q, limit: total) : nil
-        var fileResults = fj0?.results ?? []
-        var filesNoMatch = fj0?.noMatch ?? false
-        if !extra.isEmpty {
-            // 名前が一致した候補の後ろに入れる（ベクトルの近さだけの候補より前）
-            let nq = Lexical.normalize(q)
-            let k = fileResults.prefix { Lexical.normalize($0.file.stem).contains(nq) }.count
-            fileResults.insert(contentsOf: extra.map { FileResult(file: $0, score: 0) }, at: k)
-            filesNoMatch = false
-        }
+        let fj0 = e.searchFilesJudged(q, limit: total)
+        let fileResults = fj0.results
+        let filesNoMatch = fj0.noMatch
         var fileSec = ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: fileResults.map { RowItem(.file($0)) })
         fileSec.faded = filesNoMatch
         var fileFirst: Bool
@@ -603,8 +347,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // フォルダは既定のアプリに関係なく Finder で開く
                 let cfg = NSWorkspace.OpenConfiguration()
                 cfg.activates = true
-                ws.open([url], withApplicationAt: finder, configuration: cfg) { _, err in
-                    if let err { rlogError("開けませんでした \(err)") }
+                ws.open([url], withApplicationAt: finder, configuration: cfg) { [weak self] _, err in
+                    if let err { rlogError("開けませんでした \(err)"); return }
+                    self?.learnWork.async { self?.engine?.recordOpened(file: r.file.path, isDir: true, appURL: nil) }
                 }
             } else if let appURL = ws.urlForApplication(toOpen: url) {
                 // 開くアプリを先に決めて開き、その組を覚える（file → app の opened_with の線）
@@ -612,7 +357,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 cfg.activates = true
                 ws.open([url], withApplicationAt: appURL, configuration: cfg) { [weak self] _, err in
                     if let err { rlogError("開けませんでした \(err)"); return }
-                    self?.fileWork.async { self?.engine?.recordOpened(file: r.file.path, appURL: appURL) }
+                    self?.learnWork.async { self?.engine?.recordOpened(file: r.file.path, appURL: appURL) }
                 }
             } else if !ws.open(url) {
                 rlogError("開けませんでした \(r.file.path)")
@@ -701,43 +446,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// 「入力 → ファイル」を例として保存し、メモリの Corpus にも足す（次から k近傍法で効く）。
-    /// Engine にはファイル用の保存が無いので Store に記録し、メモリへは addFileExamples で入れる。
-    /// ファイル一覧の作り直し（setFiles）と順番が入れ違わないよう、同じ列で行う
+    /// 「入力 → ファイル」を選んだ記録として残す（次から、入力の文字が近ければ加点する）
     private func learnFile(_ query: String, _ f: FileEntry) {
-        let q = query.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty, let e = engine else { return }
-        fileWork.async {
-            let v = e.embedder.embed(q)
-            e.store?.recordFileChoice(query: q, path: f.path, isDir: f.isDir, name: f.name, vector: v, model: e.embedder.identifier)
-            e.addFileExamples([(q, f.path)])
-        }
+        guard let e = engine else { return }
+        learnWork.async { e.learnFile(query: query, file: f) }
     }
 
-    /// 覚えた例を Store から読み直してメモリに入れる（消したとき）
+    /// 覚えた記録を Store から読み直してメモリに入れる（消したとき）
     private func reloadExamples() {
         guard let e = engine else { return }
         learnWork.async { e.loadExamples() }
-        fileWork.async {
-            e.clearFileExamples()
-            let exs = e.store?.fileExamples() ?? []
-            if !exs.isEmpty { e.addFileExamples(exs) }
-        }
-    }
-
-    // MARK: モデルの解放
-
-    private func scheduleUnload() {
-        unloadTimer?.invalidate()
-        let m = settings.unloadMinutes
-        guard m > 0 else { return }
-        unloadTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(m * 60), repeats: false) { [weak self] _ in
-            guard let self, !self.panel.isVisible else { return }
-            self.work.async {
-                self.bge?.unload()
-                rlog(String(format: "モデルを解放 メモリ %.0fMB", physFootprintMB()))
-            }
-        }
     }
 
     // MARK: メニュー
@@ -779,18 +497,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(withTitle: "Raiden を開く", action: #selector(openPanel), keyEquivalent: "").target = self
         menu.addItem(withTitle: "設定…", action: #selector(openSettings), keyEquivalent: ",").target = self
         menu.addItem(.separator())
-        let sub = NSMenu()
-        for (m, title) in [(0, "解放しない"), (5, "閉じて 5 分後"), (30, "閉じて 30 分後")] {
-            let it = NSMenuItem(title: title, action: #selector(setUnload(_:)), keyEquivalent: "")
-            it.target = self
-            it.tag = m
-            it.state = m == settings.unloadMinutes ? .on : .off
-            sub.addItem(it)
-            unloadItems.append(it)
-        }
-        let parent = NSMenuItem(title: "モデルを解放", action: nil, keyEquivalent: "")
-        parent.submenu = sub
-        menu.addItem(parent)
         menu.addItem(withTitle: "アプリ一覧を更新", action: #selector(rescanNow), keyEquivalent: "").target = self
         let login = NSMenuItem(title: "ログイン時に起動", action: #selector(toggleLogin(_:)), keyEquivalent: "")
         login.target = self
@@ -804,7 +510,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         loginItem?.state = LoginItem.isOn ? .on : .off
-        unloadItems.forEach { $0.state = $0.tag == settings.unloadMinutes ? .on : .off }
     }
 
     @objc private func openPanel() { toggle() }
@@ -812,9 +517,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleLogin(_ s: NSMenuItem) {
         setLogin(s.state != .on)
         s.state = LoginItem.isOn ? .on : .off
-    }
-    @objc private func setUnload(_ s: NSMenuItem) {
-        updateSettings { $0.unloadMinutes = s.tag }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -920,13 +622,12 @@ extension AppDelegate: SettingsHost {
             }
             return
         }
-        guard let idx = fileIndex else { completion("まだ準備中です"); return }
-        fileWork.async {
-            guard let f = idx.entries[path] else { completion("検索範囲の外にあるファイルです。先に「検索範囲」に入れてください"); return }
+        learnWork.async {
+            var dir: ObjCBool = false
+            FileManager.default.fileExists(atPath: path, isDirectory: &dir)
+            let f = SpotlightSearch.entry(path: path) ?? FileEntry(path: path, isDir: dir.boolValue)
             let q = e.query.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
-            let v = engine.embedder.embed(q)
-            store.recordFileChoice(query: q, path: f.path, isDir: f.isDir, name: f.name, vector: v, model: engine.embedder.identifier)
-            engine.addFileExamples([(q, f.path)])
+            engine.learnFile(query: q, file: f)
             store.markSearchLogTaught(id: e.id, kind: f.isDir ? "folder" : "file", key: f.path, name: f.name)
             rlog("正解を教えた「\(q)」→ \(f.name)")
             completion(nil)
