@@ -1045,11 +1045,11 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
 
     func windowDidResignKey(_ notification: Notification) { hide() }
 
-    /// 入力欄の編集部品。帯の上なのでカーソルは金、選んだ文字は白く透かす
+    /// 入力欄の編集部品。帯の上なのでカーソルは白、選んだ文字は白く透かす
     private lazy var bandEditor: NSTextView = {
         let tv = BandFieldEditor()
         tv.isFieldEditor = true
-        tv.insertionPointColor = PanelStyle.gold
+        tv.insertionPointColor = PanelStyle.onBand
         tv.selectedTextAttributes = [.backgroundColor: NSColor(white: 1, alpha: 0.28), .foregroundColor: PanelStyle.onBand]
         tv.markedTextAttributes = [.underlineStyle: NSUnderlineStyle.single.rawValue, .underlineColor: PanelStyle.onBand,
                                    .foregroundColor: PanelStyle.onBand]
