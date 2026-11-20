@@ -455,12 +455,22 @@ final class FilterInput {
     /// 打ちかけの値の後ろに薄い文字を出す（入力欄の文字の幅のすぐ右）
     func updateGhost() {
         guard let field, let g = ghost, let font = field.font else { ghostLabel.isHidden = true; return }
-        let w = (field.stringValue as NSString).size(withAttributes: [.font: font]).width
         ghostLabel.stringValue = g.text
         ghostLabel.sizeToFit()
         let h = ghostLabel.frame.height
-        ghostLabel.frame = NSRect(x: field.frame.minX + w + 2, y: field.frame.midY - h / 2,
-                                  width: min(ghostLabel.frame.width, max(0, field.frame.maxX - field.frame.minX - w)), height: h)
+        // 文字の終わりの位置は、入力中なら編集用の欄の組版から取る（字の幅を足し算すると余白の分ずれる）
+        var endX = field.frame.minX + (field.stringValue as NSString).size(withAttributes: [.font: font]).width + 2
+        if let tv = field.currentEditor() as? NSTextView, let lm = tv.layoutManager, let tc = tv.textContainer,
+           let sup = ghostLabel.superview {
+            lm.ensureLayout(for: tc)
+            let used = lm.usedRect(for: tc)
+            let p = tv.convert(NSPoint(x: tv.textContainerOrigin.x + used.maxX, y: 0), to: sup)
+            endX = p.x
+        }
+        // ラベル自身の左の余白（2pt）の分だけ左へ寄せて、打った文字の直後から始める
+        let x = endX - 2
+        ghostLabel.frame = NSRect(x: x, y: field.frame.midY - h / 2,
+                                  width: min(ghostLabel.frame.width, max(0, field.frame.maxX - x)), height: h)
         ghostLabel.isHidden = false
     }
 }
@@ -632,6 +642,7 @@ enum FilterSnapshots {
         Snapshot.capture(panel("#date "), dir + "/option-date-values.png")
         Snapshot.capture(panel("#type ", committed: ["#date 7d"]), dir + "/option-values-with-chips.png")
         Snapshot.capture(panel("#date 11-1"), dir + "/option-date-typed.png")
+        Snapshot.capture(panel("#date 11"), dir + "/option-date-ghost.png")
         Snapshot.capture(panel("#kind sc"), dir + "/option-ghost.png")
 
         // チップが 2 つ付いた状態（#kind ss #date 7d）。候補は見本
