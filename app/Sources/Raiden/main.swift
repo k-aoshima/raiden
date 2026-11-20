@@ -62,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         // 値の候補の件数と最近使った物は Spotlight で裏で数える（SpotlightFilterSource。届いたら一覧を出し直す）
         panel.filterInput.context = { [weak self] in self?.filterSource }
+        panel.filterInput.clips = { [weak self] in self?.store?.allClips() ?? [] }
         setupFilterHooks()
         panel.setStatus("準備中…", symbol: "hourglass")
         work.async { [weak self] in self?.boot() }

@@ -187,7 +187,7 @@ public struct QueryFilters: Sendable {
     // MARK: - 読み取り
 
     /// 空白で区切る。「"」で始まる値は次の「"」まで 1 つ（#path "Obsidian Vault"）
-    static func tokenize(_ s: String) -> [String] {
+    public static func tokenize(_ s: String) -> [String] {
         var out: [String] = [], cur = "", quoted = false
         for ch in s {
             if ch == "\"" || ch == "”" || ch == "“" {
@@ -202,7 +202,7 @@ public struct QueryFilters: Sendable {
         return out
     }
 
-    static func unquote(_ s: String) -> String {
+    public static func unquote(_ s: String) -> String {
         var t = s
         if t.hasPrefix("\"") { t.removeFirst() }
         if t.hasSuffix("\"") { t.removeLast() }

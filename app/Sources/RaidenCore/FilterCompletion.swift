@@ -126,9 +126,11 @@ public enum FilterCompletion {
         public var also: [String] = []  // 打ちかけで当たる別の言い方（screenshot、Documents）
         public var commits: [String] = []  // 決めたらまとめてチップにするコマンド（よく使う組み合わせ・保存した名前）
         public var badge = ""         // 一覧の行の右に小さく出す印（よく使う・保存）
+        public var bundleID = ""      // アプリの行ならそのアイコンを出す（#from・#to）
     }
 
-    public enum Mode: Sendable, Equatable { case commands, values(QueryFilters.Command), save, alias }
+    /// clipCommands / clipValues はクリップボードの履歴の入力欄（ClipCompletion）。値の一覧は「#from Safari」のように文字のまま入れる
+    public enum Mode: Sendable, Equatable { case commands, values(QueryFilters.Command), save, alias, clipCommands, clipValues(String) }
 
     public struct Palette: Sendable {
         public let mode: Mode
@@ -527,6 +529,10 @@ public enum FilterCompletion {
         case .save:
             // 保存は入力欄の側（FilterInput.onSave）で行う。ここでは入力欄から「#保存 名前」を外すだけ
             return (item.insert.isEmpty ? text : tidy(head), nil, [])
+        case .clipCommands:
+            return (head + item.insert + " ", nil, [])
+        case .clipValues(let k):
+            return (head + "#" + k + " " + item.insert + " ", nil, [])
         }
     }
 

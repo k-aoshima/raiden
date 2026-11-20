@@ -35,6 +35,8 @@ final class FilterInput {
     var onAddDictionary: ((DictEntry) -> Bool)?
     /// 見本・確かめ用の基準日
     var now: () -> Date = { Date() }
+    /// クリップボードの履歴（#date・#from・#to の一覧の件数を数える。AppDelegate が Store.allClips を渡す）
+    var clips: () -> [ClipItem] = { [] }
 
     var isPickingAlias: Bool { aliasPhrase != nil }
     /// クリップボードの履歴を出している間（専用のキーか #clip）。入力欄の文字で履歴を絞る
@@ -98,7 +100,20 @@ final class FilterInput {
             beginClip(rest)
             return
         }
-        if aliasPhrase != nil || clipMode {
+        if clipMode {
+            // 「#date 」「#from 」などを打っている間は値の一覧（履歴の中の件数つき）
+            suggestions = []
+            let text = field.stringValue
+            if dismissedText != text { dismissedText = nil }
+            palette = dismissedText == nil ? ClipCompletion.palette(for: text, clips: clips(), now: now()) : nil
+            if let p = palette {
+                panel.setResults(paletteSections(p), query: currentQuery, extra: [paletteHeader(p)], palette: true)
+            } else {
+                panel.onQuery?(currentQuery)
+            }
+            return
+        }
+        if aliasPhrase != nil {
             palette = nil; suggestions = []
             panel.onQuery?(currentQuery)
             return
@@ -130,6 +145,20 @@ final class FilterInput {
         let sel0 = field.currentEditor()?.selectedRange ?? NSRange(location: 0, length: 0)
         let atEnd = sel0.location >= (field.stringValue as NSString).length
         let atStart = sel0.location == 0 && sel0.length == 0
+        if clipMode, let p = palette {
+            // 履歴の絞り込みの一覧: Enter / Tab で決める、Esc で一覧だけ閉じる（↑↓ は一覧）
+            switch sel {
+            case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertTab(_:)):
+                let items = displayed(p)
+                if items.indices.contains(panel.selectedRow) { accept(items[panel.selectedRow], p) }
+                return true
+            case #selector(NSResponder.cancelOperation(_:)):
+                dismissedText = field.stringValue
+                refresh()
+                return true
+            default: break
+            }
+        }
         if clipMode {
             switch sel {
             case #selector(NSResponder.cancelOperation(_:)):
@@ -287,11 +316,14 @@ final class FilterInput {
         guard let field else { return }
         clipMode = true
         aliasPhrase = nil; aliasBackup = nil
+        // 付けていた期間（#date 昨日）は履歴の絞り込みとして持ち越す。ほかのコマンドはファイル用なので外す
+        let dates = committed.filter { QueryFilters.parse($0).dates[.date] != nil }
         committed = []
         palette = nil
-        field.stringValue = text
+        dismissedText = nil
+        field.stringValue = (dates + [text]).filter { !$0.isEmpty }.joined(separator: " ")
         notice = nil
-        panel?.setPlaceholder("クリップボードの履歴")
+        panel?.setPlaceholder("クリップボードの履歴　# で日付・アプリ")
         refresh()
         moveCaretToEnd()
         panel?.focusField()
@@ -376,7 +408,10 @@ final class FilterInput {
             if !it.alias.isEmpty { title += "    " + it.alias }
             if let c = it.count { title += "  ·  \(FilterCompletion.countText(c)) 件" }
             let hint = p.mode == .save || p.mode == .alias ? "↩ 決める" : "↩ 選ぶ　Tab"
-            return RowItem(title: title, sub: it.detail, iconImage: symbol(it.symbol, size: 18, weight: .regular),
+            // アプリの行（#from・#to）はそのアプリのアイコン
+            let appIcon = it.bundleID.isEmpty ? nil
+                : NSWorkspace.shared.urlForApplication(withBundleIdentifier: it.bundleID).map { NSWorkspace.shared.icon(forFile: $0.path) }
+            return RowItem(title: title, sub: it.detail, iconImage: appIcon ?? symbol(it.symbol, size: 18, weight: .regular),
                            hint: it.badge.isEmpty ? hint : it.badge + "　" + hint)
         }
         return [ResultSection(title: "候補", symbol: "list.bullet", items: rows)]
@@ -398,6 +433,11 @@ final class FilterInput {
             // 日付の書き方は一覧に出ないので見出しで見せる
             title = "\(c.name) の値　11-14・11月・11-1..11-14 とも打てる"; sym = "calendar"
         case .values(let c): title = "\(c.name) の値" + (context?() == nil ? "" : "（件数はほかの条件の中で）"); sym = "line.3.horizontal.decrease"
+        case .clipCommands: title = "履歴の絞り込み"; sym = "doc.on.clipboard"
+        case .clipValues(let k):
+            title = k == "date" ? "#date の値（コピーした日）　11-14・11月・11-1..11-14 とも打てる"
+                : k == "from" ? "#from の値（コピーしたアプリ）" : "#to の値（貼ったアプリ）"
+            sym = k == "date" ? "calendar" : "app"
         case .save: title = "今の条件に名前を付けて保存"; sym = "bookmark"
         case .alias: title = "辞書に足す言い方"; sym = "book"
         }
@@ -416,6 +456,7 @@ final class FilterInput {
                         SearchPanelController.headerHeight + 4))
             return out
         }
+        if clipMode { return out }   // 履歴の絞り込みは入力欄の文字のまま（チップにしない）
         let f = QueryFilters.parse(query, now: now())
         if f.hasSyntax {
             let next = (field?.stringValue.trimmingCharacters(in: .whitespaces).isEmpty ?? false)
@@ -605,6 +646,16 @@ enum FilterSnapshots {
         Snapshot.capture(panel("#date "), dir + "/option-date-values.png")
         Snapshot.capture(panel("#type ", committed: ["#date 7d"]), dir + "/option-values-with-chips.png")
         Snapshot.capture(panel("#date 11-1"), dir + "/option-date-typed.png")
+        // クリップボードの履歴を #from で絞る
+        let cl = [("Safari", 0, "com.apple.Safari"), ("Safari", -3600, "com.apple.Safari"), ("ターミナル", -7200, "com.apple.Terminal"),
+                  ("プレビュー", -90000, "com.apple.Preview"), ("メモ", -200000, "com.apple.Notes")].enumerated().map { i, a in
+            ClipItem(id: Int64(i), text: "サンプル \(i)", source: .init(bundleID: a.2, app: a.0, title: "", at: now.addingTimeInterval(TimeInterval(a.1))), count: 1, pastes: [])
+        }
+        let cp = SearchPanelController()
+        cp.filterInput.now = { now }
+        cp.filterInput.clips = { cl }
+        cp.filterInput.beginClip("#from ")
+        Snapshot.capture(cp, dir + "/clip-from.png")
         Snapshot.capture(panel("#kind sc"), dir + "/option-typing.png")
 
         // チップが 2 つ付いた状態（#kind ss #date 7d）。候補は見本
@@ -965,6 +1016,27 @@ enum FocusTest {
         c = make()
         c.filterInput.beginClip()
         expect(c.filterInput.clipMode && c.filterInput.currentQuery == "#clip " && focused(c), "専用のキーの入口（beginClip）")
+        // 履歴を #date・#from・#to で絞る: 「#」でコマンドの一覧、値は件数つき、Tab で決めると入力欄の文字になる
+        let cnow = Date()
+        let sample = [
+            ClipItem(id: 1, text: "請求書 No.123", source: .init(bundleID: "com.apple.Safari", app: "Safari", title: "", at: cnow), count: 1,
+                     pastes: [.init(bundleID: "com.apple.mail", app: "メール", title: "", at: cnow)]),
+            ClipItem(id: 2, text: "ねこ", source: .init(bundleID: "com.apple.Notes", app: "メモ", title: "", at: cnow.addingTimeInterval(-86400 * 3)), count: 1, pastes: []),
+        ]
+        c.filterInput.clips = { sample }
+        type(c, "#fr")
+        expect(c.filterInput.palette?.mode == .clipCommands && c.resultCount == 1, "履歴で「#fr」→ #from の一覧（\(c.resultCount) 行）")
+        key(c, #selector(NSResponder.insertTab(_:)))
+        expect(c.queryText == "#from " && c.filterInput.palette?.mode == .clipValues("from"), "Tab で「#from 」→ アプリの一覧「\(c.queryText)」")
+        key(c, #selector(NSResponder.insertTab(_:)))
+        expect(c.queryText == "#from Safari " && c.filterInput.palette == nil && c.filterInput.clipMode, "Tab で「#from Safari 」「\(c.queryText)」")
+        expect(c.filterInput.currentQuery == "#clip #from Safari" && focused(c), "検索は「\(c.filterInput.currentQuery)」")
+        // ファイルの検索で付けていた #date は履歴にも持ち越す
+        c = make()
+        c.filterInput.clips = { sample }
+        type(c, "#date 7d ")
+        c.filterInput.beginClip()
+        expect(c.queryText == "#date 7d" && c.filterInput.committed.isEmpty, "#date のチップを履歴に持ち越す「\(c.queryText)」")
 
         print("確かめ \(checks - fails)/\(checks)")
         return fails == 0

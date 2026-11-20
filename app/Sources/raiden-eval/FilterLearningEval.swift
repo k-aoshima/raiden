@@ -308,6 +308,31 @@ func runFilterLearningTests(ctx: FilterContext) -> (Int, Int) {
         let h2 = st.clips(matching: "請求 123")
         expect(h2.count == 1 && h2.first?.pastes.map(\.app) == ["Numbers", "メール"], "言葉を全部含む物・貼った先は新しい順 \(h2.first?.pastes.map(\.app) ?? [])")
         expect(st.clips(matching: "slack").count == 1, "コピー元のアプリの名前でも当たる")
+        // #date・#from・#to（t0 = 2027-01-15 17:20 日本時間ごろ。基準日は t0 の 1 時間後）
+        let cnow = t0.addingTimeInterval(3600)
+        expect(st.clips(matching: "#from slack", now: cnow).map(\.text) == ["請求書 No.123"] && st.clips(matching: "#from メモ", now: cnow).map(\.text) == ["ねこ"],
+               "#from はコピーしたアプリ")
+        expect(st.clips(matching: "#to メール", now: cnow).count == 1 && st.clips(matching: "#to Safari", now: cnow).isEmpty, "#to は貼ったアプリ")
+        expect(st.clips(matching: "#date today", now: cnow).count == 2 && st.clips(matching: "#date yesterday", now: cnow).isEmpty, "#date はコピーした日")
+        expect(st.clips(matching: "#date today #from メモ ね", now: cnow).map(\.text) == ["ねこ"], "組み合わせ")
+        expect(st.clips(matching: "#da", now: cnow).count == 2, "打ちかけのコマンドでは絞らない")
+        let cl = st.allClips()
+        if let pa = ClipCompletion.palette(for: "#fr", clips: cl, now: cnow) {
+            expect(pa.mode == .clipCommands && pa.items.map(\.title) == ["#from"], "「#fr」でコマンドの一覧")
+            expect(FilterCompletion.accept(pa.items[0], palette: pa, text: "#fr").text == "#from ", "選ぶと「#from 」")
+        } else { expect(false, "「#fr」で一覧が出ない") }
+        if let pa = ClipCompletion.palette(for: "請求 #from ", clips: cl, now: cnow) {
+            expect(pa.items.map(\.title) == ["Slack"] && pa.items.first?.count == 1, "#from の値は（ほかの条件の中の）コピー元のアプリと件数 \(pa.items.map(\.title))")
+            expect(FilterCompletion.accept(pa.items[0], palette: pa, text: "請求 #from ").text == "請求 #from Slack ", "選ぶと「#from Slack 」")
+        } else { expect(false, "「#from 」で一覧が出ない") }
+        if let pa = ClipCompletion.palette(for: "#to ", clips: cl, now: cnow) {
+            expect(Set(pa.items.map(\.title)) == ["メール", "Numbers"], "#to の値は貼ったアプリ \(pa.items.map(\.title))")
+        } else { expect(false, "「#to 」で一覧が出ない") }
+        if let pa = ClipCompletion.palette(for: "#date ", clips: cl, now: cnow) {
+            expect(pa.items.first?.title == "今日" && pa.items.first?.count == 2, "#date の値と件数 \(pa.items.first?.title ?? "") \(pa.items.first?.count ?? -1)")
+        } else { expect(false, "「#date 」で一覧が出ない") }
+        expect(ClipCompletion.palette(for: "#date today ", clips: cl, now: cnow) == nil, "値の後に空白で閉じる")
+        expect(ClipCompletion.palette(for: "請求", clips: cl, now: cnow) == nil, "ふつうの言葉では出さない")
         _ = st.addClip("1", source: src("A", "", 50), keep: 3)
         _ = st.addClip("2", source: src("A", "", 60), keep: 3)
         expect(st.clips(matching: "").map(\.text) == ["2", "1", "請求書 No.123"], "keep 件を超えた古い物を消す")
