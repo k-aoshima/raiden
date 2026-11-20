@@ -774,6 +774,10 @@ enum FocusTest {
         key(c, #selector(NSResponder.deleteBackward(_:)))
         expect(c.queryText == "請求 #date ", "触った後の Backspace は 1 文字消す「\(c.queryText)」")
 
+        // 5d) ヒントが空・「　」で始まる行でも落ちない（クリップボードの行で落ちた）
+        for h in ["", "　", "　↩ 貼る", "↩  開く"] { ResultRow().setHint(h) }
+        expect(true, "空のヒントでも落ちない")
+
         // 6) 候補が多いとき: 行は一度に全部作らず、↓ で選ぶとスクロールする
         c = make()
         type(c, "#type app ")

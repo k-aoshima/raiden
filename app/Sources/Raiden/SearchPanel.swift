@@ -118,6 +118,7 @@ final class ResultRow: NSView {
         for (i, part) in s.components(separatedBy: "　").enumerated() {
             if i > 0 { out.append(NSAttributedString(string: "　　", attributes: [.font: NSFont.systemFont(ofSize: 11)])) }
             let sp = part.split(separator: " ", maxSplits: 1).map(String.init)
+            guard !sp.isEmpty else { continue }   // 空の区切り（ヒントが空・「　」で始まる）で落ちないように
             out.append(NSAttributedString(string: sp[0], attributes: [
                 .font: NSFont.systemFont(ofSize: 11, weight: .bold), .foregroundColor: PanelStyle.indigo]))
             if sp.count > 1 {
