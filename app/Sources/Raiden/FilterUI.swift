@@ -6,7 +6,7 @@ import RaidenCore
 ///   「#」を打つと、よく使う組み合わせ・保存した名前・コマンドの一覧、「#date 」で値の候補（件数つき）を候補の場所に出す。
 ///   ↑↓ で選び、Enter / Tab で決める。値まで決まったコマンドはチップ（committed）にして入力欄から抜き、入力欄の下に並べる。
 ///   入力欄の先頭で Backspace / ← を押すと最後のチップを外してそのコマンドの値の一覧に戻る（続けて押すと前のチップの一覧へ）。⌘Backspace で全部のチップを消す。チップの × を押してもその 1 つを消す。
-///   打ちかけの値はゴーストテキスト（薄い文字）で補い、→ / Tab で決める。一覧が出ている間の Esc は一覧だけ閉じる。
+///   打ちかけの値は一覧の先頭の行を Tab / ↩ で決める。一覧が出ている間の Esc は一覧だけ閉じる。
 ///   「#」を打たなくても、「pdf」「先週」のような言葉から絞り込みの候補を入力欄の下に薄く出し、Tab / → で決めたときだけチップにする。
 ///   「#保存 名前」（⌘S）で今のチップに名前を付けて保存、「#alias 言い方」で辞書に足す（行き先を選ぶ状態になる）。
 final class FilterInput {
@@ -15,7 +15,6 @@ final class FilterInput {
     /// 値まで決まったコマンド（"#date 7d"）。付けた順
     private(set) var committed: [String] = []
     private(set) var palette: FilterCompletion.Palette?
-    private var ghost: (text: String, item: FilterCompletion.Item)?
     private var dismissedText: String?
     /// 「#」を打たずに出す絞り込みの候補（入力欄の下）
     private(set) var suggestions: [FilterSuggest.Suggestion] = []
@@ -26,7 +25,6 @@ final class FilterInput {
     private var aliasBackup: (text: String, committed: [String])?
     /// ← / Backspace で前の条件へ戻したときの入力欄の文字と、打っていた言葉（触らずにもう一度押したらさらに戻る）
     private var stepBack: (shown: String, rest: String)?
-    let ghostLabel = NSTextField(labelWithString: "")
     /// 値の候補の件数を数える口（AppDelegate が渡す。今は Engine.filterContext、一覧が無くなったら Spotlight 側の物）
     var context: (() -> FilterSource?)?
     /// 検索の記録から覚えた使い方（よく使う組み合わせ・値・場所・選ばずに閉じた言い方）
@@ -45,17 +43,11 @@ final class FilterInput {
     func attach(_ panel: SearchPanelController, field: NSTextField, content: NSView) {
         self.panel = panel
         self.field = field
-        ghostLabel.font = field.font
-        ghostLabel.textColor = NSColor(white: 0.62, alpha: 1)
-        ghostLabel.lineBreakMode = .byClipping
-        ghostLabel.isHidden = true
-        content.addSubview(ghostLabel)
     }
 
     func reset() {
         committed = []
         palette = nil
-        ghost = nil
         dismissedText = nil
         suggestions = []
         notice = nil
@@ -63,7 +55,6 @@ final class FilterInput {
         aliasBackup = nil
         stepBack = nil
         clipMode = false
-        ghostLabel.isHidden = true
         panel?.setPlaceholder(nil)
     }
 
@@ -108,8 +99,7 @@ final class FilterInput {
             return
         }
         if aliasPhrase != nil || clipMode {
-            palette = nil; ghost = nil; suggestions = []
-            updateGhost()
+            palette = nil; suggestions = []
             panel.onQuery?(currentQuery)
             return
         }
@@ -119,9 +109,7 @@ final class FilterInput {
         let src = context?()
         palette = dismissedText == nil
             ? FilterCompletion.palette(for: text, committed: committed, context: src, memory: mem, now: now()) : nil
-        ghost = palette.flatMap(FilterCompletion.ghost)
         suggestions = palette == nil ? FilterSuggest.suggest(text, committed: committed, memory: mem, source: src) : []
-        updateGhost()
         if let p = palette {
             panel.setResults(paletteSections(p), query: currentQuery, extra: committedBar() + [paletteHeader(p)], palette: true)
         } else {
@@ -136,7 +124,7 @@ final class FilterInput {
 
     // MARK: キー
 
-    /// 一覧・ゴースト・チップ・言葉からの候補用のキー。扱ったら true（SearchPanelController の doCommandBy の先頭で呼ぶ）
+    /// 一覧・チップ・言葉からの候補用のキー。扱ったら true（SearchPanelController の doCommandBy の先頭で呼ぶ）
     func handle(_ sel: Selector) -> Bool {
         guard let field, let panel else { return false }
         let sel0 = field.currentEditor()?.selectedRange ?? NSRange(location: 0, length: 0)
@@ -169,13 +157,9 @@ final class FilterInput {
                 if items.indices.contains(panel.selectedRow) { accept(items[panel.selectedRow], p) }
                 return true
             case #selector(NSResponder.insertTab(_:)):
-                if let g = ghost, panel.selectedRow == 0 { accept(g.item, p); return true }
                 let items = displayed(p)
                 if items.indices.contains(panel.selectedRow) { accept(items[panel.selectedRow], p) }
                 return true
-            case #selector(NSResponder.moveRight(_:)):
-                if let g = ghost, atEnd { accept(g.item, p); return true }
-                return false
             case #selector(NSResponder.cancelOperation(_:)):
                 dismissedText = field.stringValue
                 refresh()
@@ -452,29 +436,6 @@ final class FilterInput {
         return out
     }
 
-    /// 打ちかけの値の後ろに薄い文字を出す（入力欄の文字の幅のすぐ右）
-    func updateGhost() {
-        guard let field, let g = ghost, let font = field.font else { ghostLabel.isHidden = true; return }
-        ghostLabel.stringValue = g.text
-        ghostLabel.sizeToFit()
-        let h = ghostLabel.frame.height
-        // 文字の終わりの位置は、入力中なら編集用の欄の組版から取る（字の幅を足し算すると余白の分ずれる）
-        var endX = field.frame.minX + (field.stringValue as NSString).size(withAttributes: [.font: font]).width
-        if let tv = field.currentEditor() as? NSTextView, let lm = tv.layoutManager, let tc = tv.textContainer,
-           let sup = ghostLabel.superview {
-            // 全体の幅（usedRect）は 1 文字消した直後に古い幅が残ることがあるので、最後の字の右端を見る
-            lm.ensureLayout(for: tc)
-            let n = lm.numberOfGlyphs
-            let right = n == 0 ? tc.lineFragmentPadding
-                : lm.boundingRect(forGlyphRange: NSRange(location: n - 1, length: 1), in: tc).maxX
-            endX = tv.convert(NSPoint(x: tv.textContainerOrigin.x + right, y: 0), to: sup).x
-        }
-        // カーソルの幅の分だけ離して、打った文字の直後から始める
-        let x = endX + 2
-        ghostLabel.frame = NSRect(x: x, y: field.frame.midY - h / 2,
-                                  width: min(ghostLabel.frame.width, max(0, field.frame.maxX - x)), height: h)
-        ghostLabel.isHidden = false
-    }
 }
 
 /// 押せる札（クリックで handler）
@@ -644,8 +605,7 @@ enum FilterSnapshots {
         Snapshot.capture(panel("#date "), dir + "/option-date-values.png")
         Snapshot.capture(panel("#type ", committed: ["#date 7d"]), dir + "/option-values-with-chips.png")
         Snapshot.capture(panel("#date 11-1"), dir + "/option-date-typed.png")
-        Snapshot.capture(panel("#date 11"), dir + "/option-date-ghost.png")
-        Snapshot.capture(panel("#kind sc"), dir + "/option-ghost.png")
+        Snapshot.capture(panel("#kind sc"), dir + "/option-typing.png")
 
         // チップが 2 つ付いた状態（#kind ss #date 7d）。候補は見本
         let c = panel("", committed: ["#kind ss", "#date 7d"])
@@ -773,7 +733,7 @@ enum FocusTest {
         type(c, "sa")
         expect(c.queryText == "sa" && focused(c), "「#t #app」の後に打てる「\(c.queryText)」")
 
-        // 4) 「#t #ap」で Tab（ゴースト）→ 決まる
+        // 4) 「#t #ap」で Tab → 一覧の先頭が決まる
         c = make()
         type(c, "#t #ap")
         key(c, #selector(NSResponder.insertTab(_:)))
@@ -813,30 +773,6 @@ enum FocusTest {
         type(c, "t")
         key(c, #selector(NSResponder.deleteBackward(_:)))
         expect(c.queryText == "請求 #date ", "触った後の Backspace は 1 文字消す「\(c.queryText)」")
-
-        // 5c) 打ちかけの補完（薄い文字）は打った文字の直後から始まる（カーソルに重ならない）
-        c = make()
-        type(c, "#kind sc")
-        if let t = tv(c), let lm = t.layoutManager, let tc = t.textContainer, let sup = c.filterInput.ghostLabel.superview,
-           !c.filterInput.ghostLabel.isHidden {
-            let n = lm.numberOfGlyphs
-            let last = lm.boundingRect(forGlyphRange: NSRange(location: n - 1, length: 1), in: tc)
-            let textEnd = t.convert(NSPoint(x: t.textContainerOrigin.x + last.maxX, y: 0), to: sup).x
-            let g = c.filterInput.ghostLabel
-            let inset = g.cell?.titleRect(forBounds: g.bounds).minX ?? 0
-            let ghostStart = g.frame.minX + inset
-            expect(ghostStart >= textEnd + 1 && ghostStart <= textEnd + 4, "補完は打った文字の直後（終わり \(Int(textEnd)) → 補完 \(Int(ghostStart))）")
-        } else { expect(false, "補完が出ていない") }
-        // 1 文字消した後も合っている
-        type(c, "r"); key(c, #selector(NSResponder.deleteBackward(_:)))
-        if let t = tv(c), let lm = t.layoutManager, let tc = t.textContainer, let sup = c.filterInput.ghostLabel.superview,
-           !c.filterInput.ghostLabel.isHidden {
-            let n = lm.numberOfGlyphs
-            let last = lm.boundingRect(forGlyphRange: NSRange(location: n - 1, length: 1), in: tc)
-            let textEnd = t.convert(NSPoint(x: t.textContainerOrigin.x + last.maxX, y: 0), to: sup).x
-            let gs = c.filterInput.ghostLabel.frame.minX
-            expect(c.queryText == "#kind sc" && gs >= textEnd + 1 && gs <= textEnd + 4, "1 文字消した後も補完は直後（終わり \(Int(textEnd)) → 補完 \(Int(gs))）「\(c.queryText)」")
-        } else { expect(false, "1 文字消した後に補完が出ていない「\(c.queryText)」") }
 
         // 6) 候補が多いとき: 行は一度に全部作らず、↓ で選ぶとスクロールする
         c = make()

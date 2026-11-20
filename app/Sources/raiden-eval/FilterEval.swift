@@ -1,6 +1,6 @@
 // 入力欄の絞り込みコマンド（QueryFilters / FilterCompletion）の確かめ。
 //
-//   raiden-eval --test-filters                 解析・一覧・値の候補・ゴーストテキストの単体の確かめ
+//   raiden-eval --test-filters                 解析・一覧・値の候補の単体の確かめ
 //   raiden-eval --filters [--now 2026-11-19] --file-store <scratch の新しいファイル>
 //       ~/Library/Application Support/Raiden/evals/filters.json の答え合わせ（Engine.searchFilesJudged を通す）
 //       [{"q": 入力, "mode": "all" | "top" | "none", "allowed": [~/ からのパス], "gold": [~/ からのパス]}]
@@ -141,13 +141,6 @@ func runFilterTests() {
     expect(pal("#name ") == nil, "#name は候補なし")
     expect(pal("#date 7d ") == nil, "値の後に空白を打ったら閉じる")
     expect(pal("#help") == nil && pal("#help ") == nil, "#help で一覧は出さない")
-    // ゴーストテキスト
-    func ghost(_ t: String) -> String? { pal(t).flatMap(FilterCompletion.ghost)?.text }
-    expect(ghost("#date 7") == "d（直近7日）", "ゴースト #date 7 → \(ghost("#date 7") ?? "nil")")
-    expect(ghost("#kind sc") == "reenshot → ss（スクショ）", "ゴースト #kind sc → \(ghost("#kind sc") ?? "nil")")
-    expect(ghost("#kind pd") == "f（PDF）", "ゴースト #kind pd → \(ghost("#kind pd") ?? "nil")")
-    expect(ghost("#path Do")?.hasPrefix("cuments") == true || ghost("#path Do")?.hasPrefix("wnloads") == true, "ゴースト #path Do → \(ghost("#path Do") ?? "nil")")
-    expect(ghost("#date ") == nil, "値が空ならゴーストなし")
     // 決める
     if let p1 = pal("請求書 #da") {
         let r = FilterCompletion.accept(p1.items[0], palette: p1, text: "請求書 #da")

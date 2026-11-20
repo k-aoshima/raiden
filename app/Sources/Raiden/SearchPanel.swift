@@ -376,7 +376,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     /// 前に見た入力欄の # の数（増えたら光らせる）
     private var lastHashCount = 0
     private var effectView: NSVisualEffectView?
-    /// 絞り込みのコマンド（#kind ss #date 7d）の一覧・チップ・ゴーストテキスト（FilterUI.swift）
+    /// 絞り込みのコマンド（#kind ss #date 7d）の一覧・チップ（FilterUI.swift）
     let filterInput = FilterInput()
     var selectedRow: Int { selected }
 

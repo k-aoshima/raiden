@@ -113,7 +113,7 @@ public struct FilterContext: FilterSource, Sendable {
     public func recentFiles(limit: Int) -> [String] { Array(recentItems.prefix(limit)) }
 }
 
-/// 入力欄の「#」から出す一覧（コマンドか値の候補）・ゴーストテキスト・次に付けそうなコマンドを決める。
+/// 入力欄の「#」から出す一覧（コマンドか値の候補）・次に付けそうなコマンドを決める。
 /// 画面に依らない部分（raiden-eval --test-filters で確かめる）
 public enum FilterCompletion {
     public struct Item: Sendable, Equatable {
@@ -123,7 +123,7 @@ public enum FilterCompletion {
         public let insert: String     // 決めたときに入れる文字（コマンドなら "#date"、値なら "7d"、次のコマンドなら "#date 7d"）
         public var alias = ""         // 一覧に小さく出す別名（#k）
         public var count: Int?        // その値で残る件数（ほかの条件の中で）。数えられなければ nil
-        public var also: [String] = []  // ゴーストテキストで補う別の言い方（screenshot、Documents）
+        public var also: [String] = []  // 打ちかけで当たる別の言い方（screenshot、Documents）
         public var commits: [String] = []  // 決めたらまとめてチップにするコマンド（よく使う組み合わせ・保存した名前）
         public var badge = ""         // 一覧の行の右に小さく出す印（よく使う・保存）
     }
@@ -497,28 +497,6 @@ public enum FilterCompletion {
             if out.count >= 8 { break }
         }
         return out
-    }
-
-    // MARK: - ゴーストテキスト
-
-    /// 打ちかけの値の補完（「#date 7」→「d（直近7日）」、「#kind sc」→「reenshot → ss（スクショ）」）。
-    /// 返すのは補う文字（薄く出す）と、→ / Tab で決めたときの候補
-    public static func ghost(_ p: Palette) -> (text: String, item: Item)? {
-        guard case .values = p.mode, !p.partial.isEmpty else { return nil }
-        let n = Describe.normalize(p.partial)
-        // 打ったとおりの値が候補の先頭にあれば補わない（「11-1」に「6」を足して 11-16 にしない）
-        if let f = p.items.first, Describe.normalize(f.insert) == n { return nil }
-        let items = p.items.filter { $0.count != 0 } + p.items.filter { $0.count == 0 }
-        for it in items {
-            let forms = [it.insert] + it.also + [it.title]
-            guard let f = forms.first(where: { Describe.normalize($0).hasPrefix(n) && $0.count >= p.partial.count }) else { continue }
-            var t = String(f.dropFirst(p.partial.count))
-            if f != it.insert { t += " → " + it.insert }
-            if it.title != it.insert && it.title != f { t += "（\(it.title)）" }
-            if t.isEmpty { return nil }   // もう打ち終えている
-            return (t, it)
-        }
-        return nil
     }
 
     // MARK: - 決める

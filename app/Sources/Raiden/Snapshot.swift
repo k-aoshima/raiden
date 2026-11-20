@@ -136,7 +136,6 @@ enum Snapshot {
 
     static func capture(_ c: SearchPanelController, _ path: String) {
         c.panel.contentView?.layoutSubtreeIfNeeded()
-        c.filterInput.updateGhost()   // ゴーストテキストは入力欄の位置が決まってから置く
         let v = c.content
         v.layoutSubtreeIfNeeded()
         let b = v.bounds
