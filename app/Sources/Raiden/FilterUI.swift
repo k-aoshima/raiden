@@ -5,7 +5,7 @@ import RaidenCore
 ///
 ///   「#」を打つと、よく使う組み合わせ・保存した名前・コマンドの一覧、「#date 」で値の候補（件数つき）を候補の場所に出す。
 ///   ↑↓ で選び、Enter / Tab で決める。値まで決まったコマンドはチップ（committed）にして入力欄から抜き、入力欄の下に並べる。
-///   入力欄が空のときの Backspace で最後のチップ、⌘Backspace で全部のチップを消す。チップの × を押してもその 1 つを消す。
+///   入力欄の先頭で Backspace / ← を押すと最後のチップを文字に戻して直せる（続けて押すと前の条件へ）。⌘Backspace で全部のチップを消す。チップの × を押してもその 1 つを消す。
 ///   打ちかけの値はゴーストテキスト（薄い文字）で補い、→ / Tab で決める。一覧が出ている間の Esc は一覧だけ閉じる。
 ///   「#」を打たなくても、「pdf」「先週」のような言葉から絞り込みの候補を入力欄の下に薄く出し、Tab / → で決めたときだけチップにする。
 ///   「#保存 名前」（⌘S）で今のチップに名前を付けて保存、「#alias 言い方」で辞書に足す（行き先を選ぶ状態になる）。
@@ -135,7 +135,9 @@ final class FilterInput {
     /// 一覧・ゴースト・チップ・言葉からの候補用のキー。扱ったら true（SearchPanelController の doCommandBy の先頭で呼ぶ）
     func handle(_ sel: Selector) -> Bool {
         guard let field, let panel else { return false }
-        let atEnd = (field.currentEditor()?.selectedRange.location ?? 0) >= (field.stringValue as NSString).length
+        let sel0 = field.currentEditor()?.selectedRange ?? NSRange(location: 0, length: 0)
+        let atEnd = sel0.location >= (field.stringValue as NSString).length
+        let atStart = sel0.location == 0 && sel0.length == 0
         if clipMode {
             switch sel {
             case #selector(NSResponder.cancelOperation(_:)):
@@ -186,11 +188,10 @@ final class FilterInput {
         case #selector(NSResponder.moveRight(_:)):
             if atEnd, palette == nil, let s = suggestions.first { acceptSuggestion(s); return true }
             return false
-        case #selector(NSResponder.deleteBackward(_:)):
-            guard field.stringValue.isEmpty, !committed.isEmpty else { return false }
-            committed.removeLast()
-            refresh()
-            panel.focusField()
+        case #selector(NSResponder.deleteBackward(_:)), #selector(NSResponder.moveLeft(_:)):
+            // 入力欄の先頭で ← / Backspace: 最後のチップを文字に戻して直せるようにする（前の条件へ戻る）
+            guard atStart, !committed.isEmpty else { return false }
+            reopenLastChip()
             return true
         case #selector(NSResponder.deleteToBeginningOfLine(_:)):
             guard field.stringValue.isEmpty, !committed.isEmpty else { return false }
@@ -252,6 +253,16 @@ final class FilterInput {
         field.stringValue = FilterSuggest.accept(s, text: field.stringValue)
         refresh()
         panel?.focusField()
+    }
+
+    /// 最後のチップを入力欄の頭に文字で戻す（「#date 7d」）。カーソルはその後ろ。もう一度 Backspace で値から消していける
+    private func reopenLastChip() {
+        guard let field, let panel, let last = committed.popLast() else { return }
+        let rest = field.stringValue
+        field.stringValue = rest.isEmpty ? last : last + " " + rest
+        refresh()
+        panel.focusField(caretToEnd: false)
+        field.currentEditor()?.selectedRange = NSRange(location: (last as NSString).length, length: 0)
     }
 
     /// チップの × を押したとき: そのコマンドのチップを全部外す
@@ -732,9 +743,25 @@ enum FocusTest {
         c.filterInput.acceptNext("#kind ss")
         expect(focused(c), "札を押した後も入力欄が first responder")
         key(c, #selector(NSResponder.deleteBackward(_:)))
-        expect(c.filterInput.committed.isEmpty && focused(c), "Backspace でチップを消した後も打てる")
+        expect(c.filterInput.committed.isEmpty && c.queryText == "#kind ss" && focused(c), "Backspace でチップを文字に戻す「\(c.queryText)」")
+        for _ in 0..<8 { key(c, #selector(NSResponder.deleteBackward(_:))) }
         type(c, "y")
-        expect(c.queryText == "y", "チップを消した後に打てる「\(c.queryText)」")
+        expect(c.queryText == "y", "戻した文字を消した後に打てる「\(c.queryText)」")
+
+        // 5b) #を繋げたとき: 先頭で ← / Backspace を押すたびに前の条件へ戻る
+        c = make()
+        type(c, "#type app "); type(c, "#date 7d "); type(c, "請求")
+        expect(c.filterInput.committed == ["#type app", "#date 7d"] && c.queryText == "請求", "2 つのチップ \(c.filterInput.committed)「\(c.queryText)」")
+        tv(c)?.setSelectedRange(NSRange(location: 0, length: 0))
+        key(c, #selector(NSResponder.moveLeft(_:)))
+        expect(c.filterInput.committed == ["#type app"] && c.queryText == "#date 7d 請求", "← で #date 7d を文字に戻す「\(c.queryText)」")
+        expect(tv(c)?.selectedRange().location == 8, "カーソルは戻した条件の後ろ")
+        expect(c.filterInput.currentQuery == "#type app #date 7d 請求", "戻しても絞り込みは同じ \(c.filterInput.currentQuery)")
+        key(c, #selector(NSResponder.moveLeft(_:)))
+        expect(c.filterInput.committed.count == 1, "先頭でなければ ← はふつうにカーソルを動かす")
+        tv(c)?.setSelectedRange(NSRange(location: 0, length: 0))
+        key(c, #selector(NSResponder.deleteBackward(_:)))
+        expect(c.filterInput.committed.isEmpty && c.queryText == "#type app #date 7d 請求", "Backspace でさらに前の条件へ「\(c.queryText)」")
 
         // 6) 候補が多いとき: 行は一度に全部作らず、↓ で選ぶとスクロールする
         c = make()
