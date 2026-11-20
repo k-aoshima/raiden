@@ -469,32 +469,25 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         setResults([], query: "")
         NSApp.activate(ignoringOtherApps: true)
         hiding = false
-        // Spotlight のように、少し小さく薄い状態から 0.18 秒でふわっと出す
+        // Spotlight のように、少し小さく薄い状態から 0.18 秒でふわっと出す。
+        // 中身（ガラスの部品）の layer には触らない（基準点を変えると角の切り抜きが効かず四角い影が出た）。窓の大きさと透明度だけで動かす
         let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let target = panel.frame
         panel.alphaValue = 0
+        if !reduce {
+            let dx = (target.width * 0.03).rounded(), dy = (target.height * 0.03).rounded()
+            panel.setFrame(target.insetBy(dx: dx, dy: dy), display: false)
+        }
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(field)
-        panel.invalidateShadow()   // 前に開いた時の大きさの影が残らないように
-        if let v = panel.contentView, !reduce {
-            v.wantsLayer = true
-            if let l = v.layer {
-                let b = v.bounds
-                l.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-                l.position = CGPoint(x: b.midX, y: b.midY)
-                let a = CABasicAnimation(keyPath: "transform.scale")
-                a.fromValue = 0.96; a.toValue = 1.0
-                a.duration = 0.18
-                a.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1.0)
-                l.add(a, forKey: "raiden.show")
-            }
-        }
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = reduce ? 0.08 : 0.15
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            ctx.duration = reduce ? 0.08 : 0.18
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1.0)
             panel.animator().alphaValue = 1
+            if !reduce { panel.animator().setFrame(target, display: true) }
         }, completionHandler: { [weak self] in
-            // 拡大の途中の形で作られた影を、出し終えた形で作り直す
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { self?.panel.invalidateShadow() }
+            guard let self else { return }
+            self.panel.invalidateShadow()
         })
     }
 
