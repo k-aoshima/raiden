@@ -35,7 +35,11 @@ cp app/Resources/Info.plist "$APP/Contents/Info.plist"
 for f in vocab.bin embed_int8.bin embed_scale.bin meta.json center.bin; do cp "$MODEL_DIR/$f" "$APP/Contents/Resources/model/"; done
 # 本体はコンパイル済み（.mlmodelc）で入れる。コンパイルは raiden-eval --compile（MLModel.compileModel）で行う
 ./build/raiden-eval --compile "$MODEL_DIR/body_$BODY.mlpackage" "$APP/Contents/Resources/model/body.mlmodelc"
-codesign --force --deep --sign - --identifier com.kosuke.raiden "$APP"
+# 署名。アドホック（-）だとビルドごとに cdhash が変わり、macOS が別のアプリと見なして、書類・デスクトップ・ダウンロードへの
+# アクセス許可を入れ直すたびに聞き直す。キーチェーンの自己署名の証明書（Andon と同じ「Andon Local Signing」）があればそれで署名する
+SIGN=$(security find-identity -p codesigning 2>/dev/null | awk -F'"' '/Andon Local Signing/{print $2; exit}')
+SIGN=${SIGN:--}
+codesign --force --deep --sign "$SIGN" --identifier com.kosuke.raiden "$APP"
 echo "built $APP ($(du -sh "$APP" | cut -f1))"
 
 if [ "${1:-}" = "--install" ]; then
