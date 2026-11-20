@@ -278,12 +278,23 @@ public final class Engine {
         var tm: [(String, Double)] = []
         var tt = Date()
         func lap(_ name: String) { let n = Date(); tm.append((name, n.timeIntervalSince(tt))); tt = n }
-        let cm = FileCatalog.childrenMap(entries)
+        // パス → 添字と、親の添字は 1 回だけ作り、中の物の一覧・contains の線・fileIndex で使い回す
+        // （前は childrenMap・containsEdges・fileIndex がそれぞれ 16 万件の辞書と親のパスを作り直していた）
+        let parents = entries.parallelMap { ($0.path as NSString).deletingLastPathComponent }
+        var newIndex: [String: Int] = [:]
+        newIndex.reserveCapacity(entries.count)
+        for (i, e) in entries.enumerated() where newIndex[e.path] == nil { newIndex[e.path] = i }
+        var kidsOf = [[Int]](repeating: [], count: entries.count)
+        var contains: [(Int, Int)] = []
+        contains.reserveCapacity(entries.count)
+        for i in entries.indices { if let j = newIndex[parents[i]] { kidsOf[j].append(i); contains.append((j, i)) } }
         lap("childrenMap")
-        let bases = entries.map { FileCatalog.baseDescription($0, children: cm[$0.path] ?? []) }
+        let bases = entries.indices.map { $0 }.parallelMap { i in
+            FileCatalog.baseDescription(entries[i], children: entries[i].isDir ? kidsOf[i].map { entries[$0] } : [])
+        }
         lap("baseDescription")
         let model = embedder.identifier
-        let stamps = zip(entries, bases).map { Store.hash("\(model)\n\($1)\n\($0.mtime) \($0.size)") }
+        let stamps = Array(zip(entries, bases)).parallelMap { Store.hash("\(model)\n\($0.1)\n\($0.0.mtime) \($0.0.size)") }
         lap("hash")
         let have = store?.storedFileCodes() ?? [:]
         lap("storedFileCodes")
@@ -331,7 +342,6 @@ public final class Engine {
             return shortSet.contains(p) ? "" : fullSet.contains(p) ? stamps[i] + Self.shortMark : stamps[i]
         }
         lap("memStamps")
-        let contains = FileCatalog.containsEdges(entries)
         lap("containsEdges")
         let co = FileCatalog.coUsedEdges(entries)
         lap("coUsedEdges")
@@ -351,7 +361,7 @@ public final class Engine {
         lap("Corpus.setItems")
         c.addEdges(contains: contains, coUsed: co, coTime: ct)
         lap("Corpus.addEdges")
-        let keys = entries.map(QueryFilters.FileKeys.init)
+        let keys = entries.parallelMap(QueryFilters.FileKeys.init)
         lap("FileKeys")
         lock.lock()
         slots = entries
@@ -360,7 +370,7 @@ public final class Engine {
         fileStamps = memStamps
         targetStamps = stamps
         ctxCache = nil
-        fileIndex = Dictionary(entries.enumerated().map { ($1.path, $0) }, uniquingKeysWith: { a, _ in a })
+        fileIndex = newIndex
         fileCorpus = c
         fileGeneration += 1
         lock.unlock()

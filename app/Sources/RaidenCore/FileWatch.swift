@@ -7,8 +7,27 @@ public final class FSWatcher {
     public struct Change: Sendable {
         public var paths: Set<String> = []      // 変化した物（NFC）
         public var rescan: Set<String> = []     // 履歴が途切れたので中を全部見直す場所
+        /// この中で一番新しいイベントの ID（0 は無し）。処理し終えたら保存し、次の起動でここから受け取る
+        public var lastId: UInt64 = 0
+        /// 起動前の分（sinceWhen から今まで）を受け取り終えた印が入っていた
+        public var historyDone = false
         public var isEmpty: Bool { paths.isEmpty && rescan.isEmpty }
         public init(paths: Set<String> = [], rescan: Set<String> = []) { self.paths = paths; self.rescan = rescan }
+    }
+
+    /// いまのイベント ID（ここから見張り始めるとき、これを保存しておけば次の起動で続きを受け取れる）
+    public static var currentEventId: UInt64 { UInt64(FSEventsGetCurrentEventId()) }
+
+    /// paths の載っているボリュームの FSEvents の UUID（並べてつないだ文字列）。変わっていたら保存したイベント ID は使えない
+    public static func volumeUUIDs(_ paths: [String]) -> String {
+        var out: [String] = []
+        for p in paths {
+            var st = stat()
+            guard stat(p, &st) == 0, let u = FSEventsCopyUUIDForDevice(st.st_dev) else { out.append("?"); continue }
+            let s = CFUUIDCreateString(nil, u) as String? ?? "?"
+            if !out.contains(s) { out.append(s) }
+        }
+        return out.joined(separator: ",")
     }
 
     private var stream: FSEventStreamRef?
@@ -20,7 +39,8 @@ public final class FSWatcher {
     private var flushItem: DispatchWorkItem?
 
     /// fileEvents: true なら 1 ファイルずつ、false ならフォルダ単位（アプリの場所はこれで足りる）
-    public init?(paths: [String], fileEvents: Bool = true, latency: TimeInterval = 0.2,
+    /// since: このイベント ID より後の変化から受け取る（止まっていた間の分も届く）。nil なら今から
+    public init?(paths: [String], since: UInt64? = nil, fileEvents: Bool = true, latency: TimeInterval = 0.2,
                  quiet: TimeInterval = 0.6, maxWait: TimeInterval = 2.0, onChange: @escaping (Change) -> Void) {
         let watch = paths.filter { FileManager.default.fileExists(atPath: $0) }
         guard !watch.isEmpty else { return nil }
@@ -30,15 +50,16 @@ public final class FSWatcher {
                                        retain: nil, release: nil, copyDescription: nil)
         var flags = UInt32(kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagWatchRoot)
         if fileEvents { flags |= UInt32(kFSEventStreamCreateFlagFileEvents) }
-        let cb: FSEventStreamCallback = { _, info, n, rawPaths, rawFlags, _ in
+        let cb: FSEventStreamCallback = { _, info, n, rawPaths, rawFlags, ids in
             guard let info else { return }
             let me = Unmanaged<FSWatcher>.fromOpaque(info).takeUnretainedValue()
             let paths = Unmanaged<CFArray>.fromOpaque(rawPaths).takeUnretainedValue() as? [String] ?? []
-            var ev: [(String, FSEventStreamEventFlags)] = []
-            for i in 0..<min(n, paths.count) { ev.append((paths[i], rawFlags[i])) }
+            var ev: [(String, FSEventStreamEventFlags, UInt64)] = []
+            for i in 0..<min(n, paths.count) { ev.append((paths[i], rawFlags[i], UInt64(ids[i]))) }
             me.receive(ev)
         }
-        guard let s = FSEventStreamCreate(nil, cb, &ctx, watch as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+        let start = since.map { FSEventStreamEventId($0) } ?? FSEventStreamEventId(kFSEventStreamEventIdSinceNow)
+        guard let s = FSEventStreamCreate(nil, cb, &ctx, watch as CFArray, start,
                                           latency, FSEventStreamCreateFlags(flags)) else { return nil }
         stream = s
         FSEventStreamSetDispatchQueue(s, queue)
@@ -59,8 +80,12 @@ public final class FSWatcher {
                                                   | kFSEventStreamEventFlagKernelDropped | kFSEventStreamEventFlagRootChanged)
 
     /// queue の上で呼ばれる
-    private func receive(_ ev: [(String, FSEventStreamEventFlags)]) {
-        for (p, f) in ev {
+    private func receive(_ ev: [(String, FSEventStreamEventFlags, UInt64)]) {
+        for (p, f, id) in ev {
+            pending.lastId = max(pending.lastId, id)
+            if f & FSEventStreamEventFlags(kFSEventStreamEventFlagHistoryDone) != 0 { pending.historyDone = true; continue }
+            // イベント ID が一周した: どこまで受け取ったか分からないので全体を見直す
+            if f & FSEventStreamEventFlags(kFSEventStreamEventFlagEventIdsWrapped) != 0 { pending.rescan.insert("/"); continue }
             let path = p.hasSuffix("/") && p.count > 1 ? String(p.dropLast()) : p
             let n = path.precomposedStringWithCanonicalMapping
             if f & Self.mustScan != 0 { pending.rescan.insert(n) } else { pending.paths.insert(n) }
@@ -76,7 +101,7 @@ public final class FSWatcher {
     private func flush() {
         let c = pending
         pending = Change(); firstAt = nil; flushItem = nil
-        if !c.isEmpty { onChange(c) }
+        if !c.isEmpty || c.historyDone { onChange(c) }
     }
 }
 
@@ -94,8 +119,91 @@ public final class FileIndex {
         public var seconds: Double = 0
         /// FSEvents の履歴が途切れて中を見直した場所（全体を見直したときは roots）
         public var rescanned: [String] = []
-        /// 差分で当てたか（false は全部入れ直した）
+        /// 差分で当てたか（false は全部入れ直した。changed も removed も 0 なら入れ直していない）
         public var incremental = false
+        /// 全体の見直しが要る（background のとき。履歴が途切れた・範囲が増えた・除外が変わった）。呼んだ側が裏で
+        /// beginScan → FileCatalog.collect → finishScan を行う（その間も今の一覧で検索できる）
+        public var needsFullScan = false
+    }
+
+    // MARK: - 一覧の保存（起動のたびに OS に問い合わせ直さない）
+    //
+    // 一覧の中身は Store の nodes.entry に置き、起動時は loadSaved で読んで入れる。止まっていた間の変化は、保存した
+    // FSEvents のイベント ID（meta の fs_event_id）から受け取って apply で当てる。範囲・除外が保存したときと違う、
+    // ボリュームが替わった、履歴が途切れたときだけ全体を見直す。全体の見直しが終わるまで meta の file_scope は空にしておき、
+    // 途中でアプリが終わっても次の起動で見直し直す
+
+    /// 範囲と除外の印（保存した一覧がいまの設定のものか）
+    public var scopeSignature: String {
+        "v1\n" + scope.roots.joined(separator: "\u{1}") + "\n" + scope.excludeDirs.joined(separator: "\u{1}") + "\n"
+            + scope.excludeNames.joined(separator: "\u{1}")
+    }
+
+    /// 保存した一覧を読んで入れる（範囲・除外が同じで、中身があるとき）。入れたら true
+    @discardableResult
+    public func loadSaved(progress: ((Int, Int) -> Void)? = nil) -> Bool {
+        guard let store = engine.store, store.meta("file_scope") == scopeSignature else { return false }
+        let list = store.loadFileEntries()
+        guard !list.isEmpty else { return false }
+        var es: [String: FileEntry] = [:]
+        es.reserveCapacity(list.count)
+        for e in list { es[e.path] = e }
+        entries = es
+        commit(progress: progress, persist: false)
+        return true
+    }
+
+    /// 保存したイベント ID（ボリュームが同じとき）。これを FSWatcher の since に渡す
+    public func savedEventId() -> UInt64? {
+        guard let store = engine.store, let s = store.meta("fs_event_id"), let id = UInt64(s), id > 0,
+              store.meta("fs_uuid") == FSWatcher.volumeUUIDs(roots) else { return nil }
+        return id
+    }
+
+    private func saveEventId(_ id: UInt64) {
+        guard id > 0, let store = engine.store else { return }
+        if let s = store.meta("fs_event_id"), let old = UInt64(s), old >= id, store.meta("fs_uuid") == FSWatcher.volumeUUIDs(roots) { return }
+        store.setMeta("fs_event_id", String(id))
+        store.setMeta("fs_uuid", FSWatcher.volumeUUIDs(roots))
+    }
+
+    /// 保存した一覧をいまの設定のものと見なさない（全体の見直しが終わるまで）
+    private func invalidateSaved() { engine.store?.setMeta("file_scope", "") }
+
+    /// 全体の見直しの間（beginScan から finishScan まで）に来た変化。見直しの結果の上に当て直す
+    private var scanBuffer: FSWatcher.Change?
+    private var scanStartId: UInt64 = 0
+    public var isScanning: Bool { scanBuffer != nil }
+
+    /// 全体の見直しを始める（この後、別の列で FileCatalog.collect(scope:) を作り、できたら finishScan に渡す）
+    public func beginScan() {
+        if scanBuffer == nil { scanBuffer = FSWatcher.Change() }
+        scanStartId = FSWatcher.currentEventId
+        invalidateSaved()
+    }
+
+    /// 全体の見直しの結果を入れる。全部入れ直し（co_used / co_time の線と消した印もここで作り直す）、
+    /// 見直しの間に来た変化を当て直し、一覧を保存する。scope は見直しを始めたときの物（途中で変わっていたら何もしない）
+    @discardableResult
+    public func finishScan(_ list: [FileEntry], scope s: ScanScope, progress: ((Int, Int) -> Void)? = nil) -> Stats {
+        let t0 = Date()
+        let buffered = scanBuffer ?? FSWatcher.Change()
+        scanBuffer = nil
+        guard s == scope else { return Stats() }
+        var es: [String: FileEntry] = [:]
+        es.reserveCapacity(list.count)
+        for e in list { es[e.path] = e }
+        entries = es
+        var st = commit(progress: progress, persist: true)
+        st.changed = es.count
+        if !buffered.isEmpty {
+            let b = apply(buffered)
+            st.embedded += b.embedded
+        }
+        engine.store?.setMeta("file_scope", scopeSignature)
+        saveEventId(scanStartId)
+        st.seconds = Date().timeIntervalSince(t0)
+        return st
     }
 
     /// 足した・変わった・消えた物がこれより多ければ、差分でなく全部入れ直す（解凍・git の大きな切り替えなど）。
@@ -122,16 +230,29 @@ public final class FileIndex {
         var st = Stats()
         if old.excludeNames != s.excludeNames || old.excludeDirs != s.excludeDirs {
             // 除外が変わったら、どこが増えるか分からないので全体を見直す（変わっていない物はベクトルを作り直さない）
+            if background { invalidateSaved(); st.needsFullScan = true; return st }
             return fullScan(progress: progress)
         }
         let before = entries.count
-        entries = entries.filter { FileCatalog.isIncluded($0.key, scope: s) }
+        let gone = entries.keys.filter { !FileCatalog.isIncluded($0, scope: s) }
+        for k in gone { entries[k] = nil }
         st.removed = before - entries.count
         let added = s.roots.filter { r in !old.roots.contains { r == $0 || r.hasPrefix($0 + "/") } }
+        if background {
+            // 外れた物はすぐ外す。増えた場所は裏の全体の見直しで拾う（数分かかることがあるので、この列を止めない）
+            if !gone.isEmpty {
+                if engine.fileSlotCount > 0 && gone.count <= incrementalLimit { _ = engine.patchFiles(upsert: [], remove: gone); st.incremental = true }
+                else { commit(progress: nil, persist: false) }
+            }
+            if added.isEmpty { engine.store?.setMeta("file_scope", scopeSignature) } else { invalidateSaved(); st.needsFullScan = true }
+            st.seconds = Date().timeIntervalSince(t0)
+            return st
+        }
         for e in FileCatalog.collect(roots: added, scope: s) where entries[e.path] == nil && FileCatalog.isIncluded(e.path, scope: s) {
             entries[e.path] = e; st.changed += 1
         }
         let s2 = commit(progress: progress)
+        engine.store?.setMeta("file_scope", scopeSignature)
         st.embedded = s2.embedded; st.examples = s2.examples
         st.seconds = Date().timeIntervalSince(t0)
         return st
@@ -142,17 +263,12 @@ public final class FileIndex {
     @discardableResult
     public func fullScan(progress: ((Int, Int) -> Void)? = nil) -> Stats {
         let t0 = Date()
-        var es: [String: FileEntry] = [:]
-        for e in FileCatalog.collect(scope: scope) { es[e.path] = e }
-        entries = es
-        var st = commit(progress: progress)
-        st.changed = es.count
+        beginScan()
+        var st = finishScan(FileCatalog.collect(scope: scope), scope: scope, progress: progress)
         st.seconds = Date().timeIntervalSince(t0)
         return st
     }
 
-    /// FSEvents の変化を当てる。追加・変更・名前変更はその物を作り直し、消えた物は中の物ごと外す。
-    /// 中の物が増減したフォルダは説明文（中身の名前と数）が変わるので、親も作り直す。
     /// いまの一覧を全部入れ直す（消した印を詰める。読み直しはしない）
     @discardableResult
     public func rebuild(progress: ((Int, Int) -> Void)? = nil) -> Stats {
@@ -163,13 +279,30 @@ public final class FileIndex {
         return st
     }
 
+    /// FSEvents の変化を当てる。追加・変更・名前変更はその物を作り直し、消えた物は中の物ごと外す。
+    /// 中の物が増減したフォルダは説明文（中身の名前と数）が変わるので、親も作り直す。
+    /// 当て終えたら c.lastId を保存する（次の起動はその続きから受け取る）
     @discardableResult
     public func apply(_ c: FSWatcher.Change) -> Stats {
+        let st = applyChange(c)
+        if !st.needsFullScan { saveEventId(c.lastId) }
+        return st
+    }
+
+    private func applyChange(_ c: FSWatcher.Change) -> Stats {
         let t0 = Date()
         var st = Stats()
         var upserted = Set<String>(), removed = Set<String>()
-        // roots より上（"/" など）で履歴が途切れたら全体を見直す
+        // 全体の見直しの最中なら、結果の上に当て直すため覚えておく（今の一覧にもそのまま当てる）
+        if scanBuffer != nil { scanBuffer!.paths.formUnion(c.paths); scanBuffer!.rescan.formUnion(c.rescan) }
+        // roots より上（"/" など）で履歴が途切れたら全体を見直す（background なら裏で。呼んだ側が beginScan から行う）
         if c.rescan.contains(where: { r in roots.contains { $0 == r || $0.hasPrefix(r + "/") } }) {
+            if background {
+                invalidateSaved()
+                st.needsFullScan = true
+                st.rescanned = Array(c.rescan)
+                return st
+            }
             var full = fullScan()
             full.rescanned = Array(c.rescan)
             return full
@@ -216,6 +349,7 @@ public final class FileIndex {
         if n > 0 && upserted.count + removed.count <= incrementalLimit {
             let list = upserted.compactMap { entries[$0] }.sorted { $0.path < $1.path }
             let p = engine.patchFiles(upsert: list, remove: Array(removed))
+            engine.store?.saveFileEntries(list)
             let dead = engine.fileDeadCount
             if dead >= compactMin && Double(dead) > compactRatio * Double(engine.fileSlotCount) {
                 // 消した印がたまったので詰める
@@ -274,10 +408,17 @@ public final class FileIndex {
     /// ベクトル化の残りは大事な物から順に列に積む。background でなければ（答え合わせ・確かめ）、ここで全部作る。
     /// background でも残りが少なければ（FSEvents の数件の変化）ここで作る。
     /// setFiles で Corpus が作り直されて例が消えるので、保存済みの「入力 → ファイル」の例を入れ直す
-    private func commit(progress: ((Int, Int) -> Void)?) -> Stats {
+    /// persist: 一覧を Store に書く（中身が変わった行だけ書き換わる。保存した一覧から入れたときは書かない）
+    @discardableResult
+    private func commit(progress: ((Int, Int) -> Void)?, persist: Bool = true) -> Stats {
         var st = Stats()
         let list = entries.values.sorted { $0.path < $1.path }
         let p = engine.installFiles(list)
+        if persist {
+            let t = Date()
+            engine.store?.saveFileEntries(list)
+            lastSaveSeconds = Date().timeIntervalSince(t)
+        }
         shortQueue = prioritized(p.short)
         fullQueue = prioritized(p.full)
         shortTotal = shortQueue.count; shortDone = 0
@@ -294,6 +435,9 @@ public final class FileIndex {
         st.examples = exs.count
         return st
     }
+
+    /// 最後に一覧を全部保存した秒数
+    public private(set) var lastSaveSeconds: Double = 0
 
     /// true なら commit でベクトルを作らず、embedStep で少しずつ進める（アプリ）
     public var background = false
@@ -354,8 +498,9 @@ public final class FileIndex {
             }
             return hits > 0 ? (1, -hits, -recent) : (2, 0, -recent)
         }
-        let keys = Dictionary(paths.map { ($0, key($0)) }, uniquingKeysWith: { a, _ in a })
-        return paths.sorted { keys[$0]! < keys[$1]! }
+        // 鍵は 1 回ずつ（複数のコアで）作って並べる。前は並べ替えの比べのたびに辞書を引き、16 万件で数秒かかった
+        let keys = paths.parallelMap(minCount: 2048) { key($0) }
+        return paths.indices.sorted { keys[$0] != keys[$1] ? keys[$0] < keys[$1] : $0 < $1 }.map { paths[$0] }
     }
 }
 

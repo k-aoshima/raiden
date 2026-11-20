@@ -45,6 +45,8 @@ public final class Store {
         CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
         """)
         try exec(Store.searchLogSchema)
+        // ファイル・フォルダの一覧の中身（FileEntry.encoded）。起動のたびに OS に問い合わせ直さず、ここから読む
+        if !columns("nodes").contains("entry") { try? exec("ALTER TABLE nodes ADD COLUMN entry BLOB") }
         migratedFiles = migrateFileVectorsToBinary()
         // 前の起動の VACUUM や書き込みが -wal に残っていると本体が大きいままなので、起動のたびに書き戻す（変換済みの DB も）
         try? exec("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -278,6 +280,83 @@ public final class Store {
             sqlite3_finalize(st)
         }
         return have
+    }
+
+    func columns(_ table: String) -> Set<String> {
+        var out = Set<String>()
+        guard let st = prepare("PRAGMA table_info(\(table))") else { return out }
+        defer { sqlite3_finalize(st) }
+        while sqlite3_step(st) == SQLITE_ROW { out.insert(text(st, 1)) }
+        return out
+    }
+
+    // MARK: - meta
+
+    public func meta(_ k: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        guard let st = prepare("SELECT v FROM meta WHERE k = ?") else { return nil }
+        defer { sqlite3_finalize(st) }
+        bind(st, 1, k)
+        return sqlite3_step(st) == SQLITE_ROW ? text(st, 0) : nil
+    }
+
+    public func setMeta(_ k: String, _ v: String?) {
+        lock.lock(); defer { lock.unlock() }
+        guard let st = prepare(v == nil ? "DELETE FROM meta WHERE k = ?" : "INSERT OR REPLACE INTO meta(k, v) VALUES(?, ?)") else { return }
+        defer { sqlite3_finalize(st) }
+        bind(st, 1, k)
+        if let v { bind(st, 2, v) }
+        sqlite3_step(st)
+    }
+
+    // MARK: - ファイル・フォルダの一覧
+
+    /// 一覧の中身を書く（点が無ければ作る）。中身が同じ行は書き換えない
+    public func saveFileEntries(_ es: [FileEntry]) {
+        guard !es.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        try? exec("BEGIN")
+        if let st = prepare("""
+            INSERT INTO nodes(kind,key,name,description,updated_at,entry) VALUES(?,?,?,'',?,?)
+            ON CONFLICT(kind,key) DO UPDATE SET entry=excluded.entry WHERE entry IS NOT excluded.entry
+            """) {
+            let t = now
+            for e in es {
+                sqlite3_reset(st)
+                bind(st, 1, e.isDir ? "folder" : "file"); bind(st, 2, e.path); bind(st, 3, e.name)
+                sqlite3_bind_int64(st, 4, t)
+                let d = e.encoded
+                _ = d.withUnsafeBytes { sqlite3_bind_blob(st, 5, $0.baseAddress, Int32($0.count), Store.TRANSIENT) }
+                sqlite3_step(st)
+            }
+            sqlite3_finalize(st)
+        }
+        try? exec("COMMIT")
+    }
+
+    /// 保存した一覧を読む（中身の無い点は飛ばす。同じパスがファイルとフォルダの両方にあれば新しい方）
+    public func loadFileEntries() -> [FileEntry] {
+        lock.lock(); defer { lock.unlock() }
+        guard let st = prepare("SELECT key, kind, entry FROM nodes WHERE kind IN ('file','folder') AND entry IS NOT NULL ORDER BY updated_at") else { return [] }
+        defer { sqlite3_finalize(st) }
+        var out: [FileEntry] = [], at: [String: Int] = [:]
+        while sqlite3_step(st) == SQLITE_ROW {
+            let n = Int(sqlite3_column_bytes(st, 2))
+            guard n > 0, let p = sqlite3_column_blob(st, 2) else { continue }
+            let d = Array(UnsafeBufferPointer(start: p.assumingMemoryBound(to: UInt8.self), count: n))
+            let key = text(st, 0)
+            guard let e = FileEntry(path: key, isDir: text(st, 1) == "folder", encoded: d) else { continue }
+            if let i = at[key] { out[i] = e } else { at[key] = out.count; out.append(e) }
+        }
+        return out
+    }
+
+    /// 一覧の中身の合計バイト数と件数（DB がどれだけ増えたかの目安）
+    public func fileEntryBytes() -> (bytes: Int, count: Int) {
+        lock.lock(); defer { lock.unlock() }
+        guard let st = prepare("SELECT coalesce(sum(length(entry)),0), count(entry) FROM nodes WHERE kind IN ('file','folder')") else { return (0, 0) }
+        defer { sqlite3_finalize(st) }
+        return sqlite3_step(st) == SQLITE_ROW ? (Int(sqlite3_column_int64(st, 0)), Int(sqlite3_column_int64(st, 1))) : (0, 0)
     }
 
     /// storedFileCodes の一部だけ（差分で直すとき。key で 1 件ずつ引く）

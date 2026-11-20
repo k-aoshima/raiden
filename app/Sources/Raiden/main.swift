@@ -159,8 +159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.async {
                 self.panel.setStatus("ファイル準備中…", symbol: "hourglass")
                 // 読み込みの間に設定窓で範囲を変えていたら、今の設定で始める
-                self.startWatching(e, scope: self.settings.scope)
-                self.fullScanFiles()
+                self.startFiles(e, scope: self.settings.scope)
                 self.pruneSearchLog()
             }
         } catch {
@@ -180,27 +179,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// FSEvents で見張り始める。全体の見直しより先に始めるので、見直しの間の変化も後で拾える
-    private func startWatching(_ e: Engine, scope: ScanScope) {
+    /// ファイルの一覧を用意して見張り始める。保存した一覧（Store の nodes.entry）が今の範囲・除外の物なら、それを読んで入れ、
+    /// 止まっていた間の変化を FSEvents の保存したイベント ID から受け取って差分で当てる（起動のたびに OS に問い合わせ直さない）。
+    /// 無ければ今から見張り、全体の見直しを裏で行う（見張りが先なので、見直しの間の変化も後で拾える）
+    private func startFiles(_ e: Engine, scope: ScanScope) {
         let idx = FileIndex(engine: e, scope: scope)
         idx.background = true   // ベクトル化は embedStep で少しずつ（その間も名前の一致と絞り込みでは出る）
         fileIndex = idx
         appliedScope = scope
-        watchFiles(idx, roots: scope.roots)
         // アプリの場所はフォルダ単位で十分（.app の中の細かい変化はまとめて 1 回の取り直しになる）
         appWatcher = FSWatcher(paths: AppCatalog.dirs, fileEvents: false, quiet: 1.0, maxWait: 5.0) { [weak self] _ in
             self?.rescan()
         }
+        indexStatus.scanning = true
+        settingsWindow?.refreshStatus()
+        let progress = progressHandler()
+        fileWork.async { [weak self] in
+            let t = Date()
+            let since = idx.savedEventId()
+            let loaded = since != nil && idx.loadSaved(progress: progress)
+            if loaded {
+                rlog(String(format: "保存した一覧から入れた %d 件 %.1fs（止まっていた間の変化は FSEvents から受け取る）", idx.engine.files.count, Date().timeIntervalSince(t)))
+            } else {
+                rlog("保存した一覧が無いか、範囲・除外・ボリュームが変わったので全体を見直す")
+            }
+            let n = idx.engine.files.count
+            DispatchQueue.main.async {
+                guard let self, idx === self.fileIndex else { return }
+                self.watchFiles(idx, roots: scope.roots, since: loaded ? since : nil)
+                if loaded { self.markFilesReady(n) } else { self.fullScanFiles() }
+            }
+            self?.pumpEmbedding(idx)
+        }
     }
 
-    private func watchFiles(_ idx: FileIndex, roots: [String]) {
+    private func markFilesReady(_ n: Int) {
+        indexStatus.count = n; indexStatus.ready = true
+        if !scanRunning { indexStatus.scanning = false }
+        settingsWindow?.refreshStatus()
+        guard !filesReady else { return }
+        filesReady = true
+        panel.setStatus("")
+    }
+
+    private func watchFiles(_ idx: FileIndex, roots: [String], since: UInt64? = nil) {
         fileWatcher?.stop()
-        fileWatcher = FSWatcher(paths: roots) { [weak self] change in
+        fileWatcher = FSWatcher(paths: roots, since: since) { [weak self] change in
             self?.fileWork.async {
                 let st = idx.apply(change)
+                if change.historyDone { rlog("止まっていた間の変化を受け取り終えた") }
                 if !st.rescanned.isEmpty {
                     rlog("FSEvents の履歴が途切れたので見直し \(st.rescanned.map(RaidenSettings.tilde))")
                 }
+                if st.needsFullScan { DispatchQueue.main.async { self?.fullScanFiles() } }
+                // 範囲の中で何も変わっていない知らせ（除外した場所への書き込み・起動直後に溜まった分）は書かない
+                guard st.changed > 0 || st.removed > 0 else { return }
                 rlog(String(format: "ファイルの変化 %d 件・削除 %d 件（%@、ベクトル化 %d 件）%.2fs", st.changed, st.removed,
                             st.incremental ? "差分" : "全部入れ直し", st.embedded, st.seconds))
                 let n = idx.engine.files.count
@@ -268,25 +301,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// ファイル一覧を全体から作り直す（起動時と 1 日 1 回・設定の「今すぐ作り直す」）。変わったものだけベクトル化する
+    /// main の上でだけ触る: 全体の見直しが走っているか / 終わったらもう一度行うか
+    private var scanRunning = false, scanAgain = false
+
+    /// ファイル一覧を全体から見直す（保存した一覧が使えない起動・1 日 1 回・履歴が途切れた・範囲が増えた・設定の「今すぐ作り直す」）。
+    /// OS への問い合わせ（~/Project 16 万件で数分）は別の列で行い、fileWork は止めない（その間も今の一覧で検索でき、
+    /// FSEvents の変化とベクトル化も進む）。できたら全部入れ直して保存し、見直しの間の変化を当て直す
     private func fullScanFiles() {
         guard let idx = fileIndex else { return }
+        guard !scanRunning else { scanAgain = true; return }
+        scanRunning = true
         indexStatus.scanning = true
         settingsWindow?.refreshStatus()
         let progress = progressHandler()
         fileWork.async { [weak self] in
-            let st = idx.fullScan(progress: progress)
-            rlog(String(format: "ファイル一覧を作り直し %d 件（ベクトル化 %d 件・残り %d 件、例 %d）%.1fs", st.changed, st.embedded,
-                        idx.shortTotal, st.examples, st.seconds))
-            let n = idx.engine.files.count
-            self?.pumpEmbedding(idx)
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.indexStatus.count = n; self.indexStatus.scanning = false; self.indexStatus.ready = true
-                self.settingsWindow?.refreshStatus()
-                guard !self.filesReady else { return }
-                self.filesReady = true
-                self.panel.setStatus("")
+            idx.beginScan()
+            let scope = idx.scope
+            DispatchQueue.global(qos: .utility).async {
+                let t = Date()
+                let list = FileCatalog.collect(scope: scope)
+                let tc = Date().timeIntervalSince(t)
+                self?.fileWork.async {
+                    let st = idx.finishScan(list, scope: scope, progress: progress)
+                    rlog(String(format: "ファイル一覧を見直した %d 件（問い合わせ %.1fs・入れ直し %.1fs、ベクトル化 %d 件・残り %d 件、例 %d）",
+                                list.count, tc, st.seconds, st.embedded, idx.shortTotal, st.examples))
+                    let n = idx.engine.files.count
+                    self?.pumpEmbedding(idx)
+                    DispatchQueue.main.async {
+                        guard let self else { return }
+                        self.scanRunning = false
+                        self.markFilesReady(n)
+                        if self.scanAgain { self.scanAgain = false; self.fullScanFiles() }
+                    }
+                }
             }
         }
     }
@@ -311,13 +358,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let progress = progressHandler()
         fileWork.async { [weak self] in
             let st = idx.setScope(scope, progress: progress)
-            rlog(String(format: "検索範囲を当てた 増えた %d 件・外した %d 件（ベクトル化 %d 件）%.1fs", st.changed, st.removed, st.embedded, st.seconds))
+            rlog(String(format: "検索範囲を当てた 外した %d 件%@ %.1fs", st.removed, st.needsFullScan ? "（増えた場所・除外は裏で全体を見直す）" : "", st.seconds))
             let n = idx.engine.files.count
             self?.pumpEmbedding(idx)
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.indexStatus.count = n; self.indexStatus.scanning = false; self.indexStatus.ready = true
-                self.settingsWindow?.refreshStatus()
+                self.markFilesReady(n)
+                if st.needsFullScan { self.fullScanFiles() }
                 self.rescan()
             }
         }

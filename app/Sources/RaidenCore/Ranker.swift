@@ -151,9 +151,9 @@ public struct Corpus {
 
     private mutating func setNames(_ raw: [[String]], meta: [Meta?]?) {
         n = raw.count
-        names = raw.map(Self.normNames)
-        romaji = raw.map(Self.romajiOf)
-        grams = names.map(Self.gramsOf)
+        names = raw.parallelMap(Self.normNames)   // 16 万件で 6 秒（ほぼローマ字）かかるので複数のコアで
+        romaji = raw.parallelMap(Self.romajiOf)
+        grams = names.parallelMap(Self.gramsOf)
         self.meta = meta ?? Array(repeating: nil, count: n)
         adj = Array(repeating: [], count: n)
         filesBelow = Array(repeating: 0, count: n)

@@ -156,6 +156,8 @@ if let i = args.firstIndex(of: "--check-tokens"), i + 2 < args.count {
 
 // --bench-rank --roots ~/Project --entries <scratch のファイル>: 広い範囲で Ranker.rank の段ごとの時間と、
 // 名前の索引あり・なしの比べ（RankBench.swift）。並べ方の時間だけ見るので、入力のベクトルは文字列から作る乱数（モデルを読まない）
+// --check-cotime --entries <json>: co_time の線が前の作りと同じか（StartupBench.swift。モデルを読まない）
+if args.contains("--check-cotime") { try runCheckCoTime(); exit(0) }
 if args.contains("--bench-rank") {
     runBenchRank(embedder: HashEmbedder())
     exit(0)
@@ -206,6 +208,10 @@ if args.contains("--scope-run") {
     try runScopeRun(embedder: embedder)
     exit(0)
 }
+
+// --startup-bench --entries <json> --file-store <new> / --offline-test --store <new>: 保存した一覧からの起動（StartupBench.swift）
+if args.contains("--startup-bench") { try runStartupBench(embedder: embedder); exit(0) }
+if args.contains("--offline-test") { try runOfflineTest(embedder: embedder); exit(0) }
 
 // --bench-apply --roots ~/Project --file-store <scratch の新しいファイル>: FSEvents の変化を当てる手間（ApplyBench.swift）
 if args.contains("--bench-apply") {

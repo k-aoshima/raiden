@@ -5,7 +5,7 @@ import PDFKit
 import UniformTypeIdentifiers
 
 /// ファイルかフォルダ 1 個分。key はパス。
-public struct FileEntry: Sendable {
+public struct FileEntry: Sendable, Equatable {
     public let path: String
     public let name: String
     public let parentName: String
@@ -19,6 +19,60 @@ public struct FileEntry: Sendable {
     public let lastUsed: Int       // kMDItemLastUsedDate（無ければ 0）
     public let usedDays: [Int]     // kMDItemUsedDates（その土地の日付の通し番号）
     public let downloaded: Bool    // kMDItemWhereFroms があるか ~/Downloads の中
+
+    public init(path: String, name: String, parentName: String, isDir: Bool, kind: String, families: [String], size: Int,
+                mtime: Int, created: Int, added: Int, lastUsed: Int, usedDays: [Int], downloaded: Bool) {
+        self.path = path; self.name = name; self.parentName = parentName; self.isDir = isDir; self.kind = kind
+        self.families = families; self.size = size; self.mtime = mtime; self.created = created; self.added = added
+        self.lastUsed = lastUsed; self.usedDays = usedDays; self.downloaded = downloaded
+    }
+
+    /// 保存した中身（FileEntry.encoded）とパスから戻す。名前・親の名前・種類（families）はパスから作り直す
+    public init?(path: String, isDir: Bool, encoded d: [UInt8]) {
+        var i = 0
+        func varint() -> Int? {
+            var x: UInt64 = 0, shift: UInt64 = 0
+            while i < d.count {
+                let b = d[i]; i += 1
+                x |= UInt64(b & 0x7f) << shift
+                if b & 0x80 == 0 { return Int(Int64(bitPattern: (x >> 1) ^ (0 &- (x & 1)))) }   // zigzag
+                shift += 7
+                if shift > 63 { return nil }
+            }
+            return nil
+        }
+        guard d.count >= 1 else { return nil }
+        let flags = d[0]; i = 1
+        guard let size = varint(), let mtime = varint(), let created = varint(), let added = varint(), let lastUsed = varint(),
+              let nDays = varint(), nDays >= 0, nDays < 100_000 else { return nil }
+        var days: [Int] = []
+        days.reserveCapacity(nDays)
+        var prev = 0
+        for _ in 0..<nDays { guard let x = varint() else { return nil }; prev += x; days.append(prev) }
+        let kind = String(decoding: d[i...], as: UTF8.self)
+        let name = (path as NSString).lastPathComponent
+        self.init(path: path, name: name, parentName: ((path as NSString).deletingLastPathComponent as NSString).lastPathComponent,
+                  isDir: isDir, kind: kind, families: FileCatalog.families(name: name, isDir: isDir), size: size, mtime: mtime,
+                  created: created, added: added, lastUsed: lastUsed, usedDays: days, downloaded: flags & 1 != 0)
+    }
+
+    /// 保存する中身（パス・名前・種類（families）・フォルダかどうかは入れない。1 件 30 バイトほど）:
+    /// 印 1 バイト（ダウンロード）＋ size・mtime・created・added・lastUsed・usedDays（数と差分）の zigzag varint ＋ 種類名（UTF-8）
+    public var encoded: [UInt8] {
+        var out: [UInt8] = [downloaded ? 1 : 0]
+        out.reserveCapacity(24 + kind.utf8.count)
+        func put(_ v: Int) {
+            var x = UInt64(bitPattern: Int64((v << 1) ^ (v >> 63)))
+            while x >= 0x80 { out.append(UInt8(x & 0x7f) | 0x80); x >>= 7 }
+            out.append(UInt8(x))
+        }
+        put(size); put(mtime); put(created); put(added); put(lastUsed)
+        put(usedDays.count)
+        var prev = 0
+        for d in usedDays { put(d - prev); prev = d }
+        out.append(contentsOf: kind.utf8)
+        return out
+    }
 
     /// 拡張子を除いた名前（フォルダはそのまま）
     public var stem: String { isDir ? name : (name as NSString).deletingPathExtension }
@@ -140,11 +194,23 @@ public enum FileCatalog {
         "py": "code", "swift": "code", "js": "code", "css": "code", "c": "code", "h": "code", "cpp": "code",
     ]
 
+    private static var imageExt: [String: Bool] = [:]
+    private static let imageExtLock = NSLock()
+    /// 拡張子が画像か（UTType を引くのは拡張子ごとに 1 回。保存した一覧を読むとき 16 万回引かない）
+    static func isImageExt(_ ext: String) -> Bool {
+        imageExtLock.lock()
+        if let b = imageExt[ext] { imageExtLock.unlock(); return b }
+        imageExtLock.unlock()
+        let b = UTType(filenameExtension: ext)?.conforms(to: .image) ?? false
+        imageExtLock.lock(); imageExt[ext] = b; imageExtLock.unlock()
+        return b
+    }
+
     static func families(name: String, isDir: Bool) -> [String] {
         if isDir { return ["folder"] }
         let ext = (name as NSString).pathExtension.lowercased()
         var f: [String] = []
-        if let t = UTType(filenameExtension: ext), t.conforms(to: .image) { f.append("image") }
+        if isImageExt(ext) { f.append("image") }
         if let x = extFamily[ext] { f.append(x) }
         let n = name.precomposedStringWithCanonicalMapping.lowercased()
         if f.contains("image") && (n.contains("スクリーンショット") || n.contains("screenshot")) { f.append("screenshot") }
@@ -269,15 +335,28 @@ public enum FileCatalog {
             for t in Set([e.mtime, e.added, e.lastUsed]) where t > 0 { ev.append((t, i)) }
         }
         ev.sort { $0.0 < $1.0 }
-        let parent = entries.map { ($0.path as NSString).deletingLastPathComponent }
+        // 親フォルダは番号で比べる（文字列の比べを窓の中で繰り返さない）
+        var pid: [String: Int32] = [:]
+        let parent: [Int32] = entries.map { e in
+            let p = (e.path as NSString).deletingLastPathComponent
+            if let i = pid[p] { return i }
+            let i = Int32(pid.count); pid[p] = i; return i
+        }
         var w: [Int64: Float] = [:]
         var lo = 0
+        // 窓の中の物ごとの数（窓をずらすたびに足し引きする。前は毎回窓の中を全部集め直していて、
+        // 同じ時刻の物が何千とあると 16 万件で 15 秒かかった）。group は「窓の中にある物」で、前と同じ
+        var inWin: [Int: Int] = [:]
         for hi in 0..<ev.count {
-            while ev[hi].0 - ev[lo].0 > window { lo += 1 }
-            let group = Set(ev[lo...hi].map(\.1))
-            if group.count > maxGroup { continue }
+            inWin[ev[hi].1, default: 0] += 1
+            while ev[hi].0 - ev[lo].0 > window {
+                let x = ev[lo].1
+                if let c = inWin[x], c > 1 { inWin[x] = c - 1 } else { inWin[x] = nil }
+                lo += 1
+            }
+            if inWin.count > maxGroup { continue }
             let b = ev[hi].1
-            for a in group where a != b && parent[a] != parent[b] {
+            for a in inWin.keys where a != b && parent[a] != parent[b] {
                 let key = Int64(min(a, b)) << 32 | Int64(max(a, b))
                 w[key] = 1
             }
