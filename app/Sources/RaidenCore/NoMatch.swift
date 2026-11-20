@@ -41,7 +41,7 @@ public struct NoMatchRule: Sendable {
         self.lowMaxV = lowMaxV; self.midMaxV = midMaxV; self.maxGap = maxGap; self.keepKnnSim = keepKnnSim
     }
 
-    /// しきい値の数字（ここにまとめる）
+    /// しきい値の数字（ここにまとめる）。CPU int4 版で決めた値と、ANE 版（cos が全体に低く出る）に合わせ直した値
     public enum Thresholds {
         // ファイル・フォルダ
         public static let fileLowMaxV: Float = 0.46
@@ -51,12 +51,30 @@ public struct NoMatchRule: Sendable {
         // アプリ（件数が少なく例が必ず効くので、差は見ずに素の近さがかなり低いときだけ弾く）
         public static let appLowMaxV: Float = 0.47
         public static let appKeepKnnSim: Float = 0.55
+        // ANE 版。同じ入力・同じ説明文で、細かい近さの一番が CPU 版より中央値 0.014（平均 0.016）、
+        // 一番近い例との近さが 0.011 低い。近さのしきい値はどれも 0.01 下げる（差は近さの引き算なので動かさない）
+        public static let aneFileLowMaxV: Float = 0.45
+        public static let aneFileMidMaxV: Float = 0.54
+        public static let aneFileMaxGap: Float = 0.03
+        public static let aneFileKeepKnnSim: Float = 0.67
+        public static let aneAppLowMaxV: Float = 0.46
+        public static let aneAppKeepKnnSim: Float = 0.54
     }
 
-    public static let files = NoMatchRule(lowMaxV: Thresholds.fileLowMaxV, midMaxV: Thresholds.fileMidMaxV,
-                                          maxGap: Thresholds.fileMaxGap, keepKnnSim: Thresholds.fileKeepKnnSim)
-    public static let apps = NoMatchRule(lowMaxV: Thresholds.appLowMaxV, midMaxV: 0, maxGap: 0,
-                                         keepKnnSim: Thresholds.appKeepKnnSim)
+    public static let filesCPU = NoMatchRule(lowMaxV: Thresholds.fileLowMaxV, midMaxV: Thresholds.fileMidMaxV,
+                                             maxGap: Thresholds.fileMaxGap, keepKnnSim: Thresholds.fileKeepKnnSim)
+    public static let appsCPU = NoMatchRule(lowMaxV: Thresholds.appLowMaxV, midMaxV: 0, maxGap: 0,
+                                            keepKnnSim: Thresholds.appKeepKnnSim)
+    public static let filesANE = NoMatchRule(lowMaxV: Thresholds.aneFileLowMaxV, midMaxV: Thresholds.aneFileMidMaxV,
+                                             maxGap: Thresholds.aneFileMaxGap, keepKnnSim: Thresholds.aneFileKeepKnnSim)
+    public static let appsANE = NoMatchRule(lowMaxV: Thresholds.aneAppLowMaxV, midMaxV: 0, maxGap: 0,
+                                            keepKnnSim: Thresholds.aneAppKeepKnnSim)
+    /// 答え合わせで差し替える用（nil ならモデルの units で選ぶ）
+    nonisolated(unsafe) public static var filesOverride: NoMatchRule?
+    nonisolated(unsafe) public static var appsOverride: NoMatchRule?
+    /// いまのモデル（BinVec.units。meta.json の "units"）に合うしきい値
+    public static var files: NoMatchRule { filesOverride ?? (BinVec.units == "ane" ? filesANE : filesCPU) }
+    public static var apps: NoMatchRule { appsOverride ?? (BinVec.units == "ane" ? appsANE : appsCPU) }
 
     public func isNoMatch(_ s: MatchSignals) -> Bool {
         if s.nameHit || s.relation || s.knnSim >= keepKnnSim { return false }

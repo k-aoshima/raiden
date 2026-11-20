@@ -175,6 +175,17 @@ if args.contains("--nl") {
     embedder = b
     bge = b
 }
+// --asym-a / --asym-b: 2 値の目盛りを差し替える（モデルの units で選んだ値の上書き）
+if let x = opt("--asym-a").flatMap(Float.init) { BinVec.asymA = x }
+if let x = opt("--asym-b").flatMap(Float.init) { BinVec.asymB = x }
+// --nm-file low,mid,gap,knn / --nm-app low,knn: 「見つからない」のしきい値を差し替える
+if let xs = opt("--nm-file")?.split(separator: ",").compactMap({ Float($0) }), xs.count == 4 {
+    NoMatchRule.filesOverride = NoMatchRule(lowMaxV: xs[0], midMaxV: xs[1], maxGap: xs[2], keepKnnSim: xs[3])
+}
+if let xs = opt("--nm-app")?.split(separator: ",").compactMap({ Float($0) }), xs.count == 2 {
+    NoMatchRule.appsOverride = NoMatchRule(lowMaxV: xs[0], midMaxV: 0, maxGap: 0, keepKnnSim: xs[1])
+}
+print("2 値の目盛り（\(BinVec.units)）a=\(BinVec.asymA) b=\(BinVec.asymB)  見つからない: ファイル \(NoMatchRule.files) / アプリ \(NoMatchRule.apps)")
 print("モデル \(embedder.identifier)  読み込み \(String(format: "%.2f", Date().timeIntervalSince(t0)))s  読み込み後メモリ \(String(format: "%.0f", physFootprintMB()))MB")
 
 // --watch-test --store <path>: FSEvents で変化が検索にすぐ出るかを確かめる（WatchTest.swift）

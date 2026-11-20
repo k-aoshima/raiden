@@ -440,6 +440,47 @@ func runFileEval(embedder: Embedder, appQs: [(String, [String])], appEngine: Eng
     }
 
     }
+    if on("fitbin") {
+    // 2 値の近さの目盛り（BinVec.asymA / asymB）を合わせ直す。全部の説明文を細かいベクトルにして、入力ごとに
+    // 2 値の近さの上位 --fit-top 件（既定 50。--fit-by exact で細かい近さの上位）で cos − q・center ≈ a × (q・s)/32 + b を最小二乗で解く。
+    // 入力は問題と例の言い方。モデル（CPU / ANE）を替えたらここで合わせ直して BinVec の units 別の値に入れる
+    let topN = opt("--fit-top").flatMap(Int.init) ?? 50
+    let byExact = opt("--fit-by") == "exact"
+    let c = e.fileCorpusSnapshot
+    let descs = e.fileDescriptions
+    let fv = embedder.embedBatch(descs, batch: e.embedBatchSize)
+    let idx = c.present.indices.filter { c.present[$0] && fv[$0].contains { $0 != 0 } }
+    let sv = idx.map { BinVec.decode(c.code($0)) }
+    let center = BinVec.center ?? [Float](repeating: 0, count: 1024)
+    let qv = qs.map(\.vec) + exs.map { embedder.embed($0.q) }
+    var n = 0.0, sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0
+    var pts: [(Double, Double)] = []
+    var dump = ["q\texactMax\tapproxMax"]   // --fit-dump <file>: 入力ごとの細かい近さの一番と 2 値の近さ（いまの目盛り）の一番
+    let qtext = qs.map(\.q) + exs.map(\.q)
+    for (qi, q) in qv.enumerated() {
+        let qm = Vec.dot(q, center)
+        let ys = idx.map { Vec.dot(fv[$0], q) }
+        let xs = sv.map { Vec.dot($0, q) }
+        dump.append("\(qtext[qi])\t\(ys.max() ?? 0)\t\((xs.max() ?? 0) * BinVec.asymA + qm + BinVec.asymB)")
+        // 選ぶのは 2 値の近さの上位（並べ替えが実際に見る範囲。細かい近さで選ぶと、選び方で傾きが大きく出る）
+        let key = byExact ? ys : xs
+        for k in key.indices.sorted(by: { key[$0] > key[$1] }).prefix(topN) {
+            let x = Double(xs[k]), y = Double(ys[k] - qm)
+            n += 1; sx += x; sy += y; sxx += x * x; sxy += x * y; pts.append((x, y))
+        }
+    }
+    let a = (n * sxy - sx * sy) / (n * sxx - sx * sx), b = (sy - a * sx) / n
+    func rms(_ a: Double, _ b: Double) -> (Double, Double) {
+        var se = 0.0, sb = 0.0
+        for (x, y) in pts { let r = y - (a * x + b); se += r * r; sb += r }
+        return ((se / Double(pts.count)).squareRoot(), sb / Double(pts.count))
+    }
+    let cur = rms(Double(BinVec.asymA), Double(BinVec.asymB)), fit = rms(a, b)
+    print("\n== 2 値の目盛り（\(idx.count) 件・入力 \(qv.count) 個・\(byExact ? "細かい" : "2 値の")近さの上位 \(topN) 件ずつ \(pts.count) 点）")
+    print(String(format: "  いまの値 a=%.3f b=%.3f: 残差 %.4f（平均のずれ %+.4f）", BinVec.asymA, BinVec.asymB, cur.0, cur.1))
+    print(String(format: "  最小二乗 a=%.3f b=%.3f: 残差 %.4f", a, b, fit.0))
+    if let out = opt("--fit-dump") { try? dump.joined(separator: "\n").write(toFile: out, atomically: true, encoding: .utf8) }
+    }
     if on("nomatch") {
     // 9) 「見つからない」の判定（NoMatchRule）。手がかりを --dump-signals <file> に TSV で書き出し、
     //    いまの既定（.files / .apps）で答え無しを弾けた数と、答えのある問題を誤って弾いた数を出す。

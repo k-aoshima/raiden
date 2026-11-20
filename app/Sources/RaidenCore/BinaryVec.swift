@@ -24,9 +24,21 @@ public enum BinVec {
     nonisolated(unsafe) public static var asymA: Float = 0.64
     nonisolated(unsafe) public static var asymB: Float = 0.015
     static let asymA0: Float = 1.097, asymB0: Float = 0.135
+    /// モデルごとの目盛り（a, b）。ANE 版（6bit パレット化）は raiden-eval --files --section fitbin（答え合わせの 989 件と
+    ///   入力 349 個、2 値の近さの上位 50 件で最小二乗、残差 0.018）で合わせ直した。前の値のままだと 2 値の近さが
+    ///   細かい近さより平均 0.008 高く出ていた（上位 10 件では 0.023）。CPU 版は前の値のまま
+    public static let scaleCPU: (Float, Float) = (0.64, 0.015)
+    public static let scaleANE: (Float, Float) = (1.006, -0.024)
+    /// 中心と同じフォルダの meta.json の "units"（"ane" なら ANE 版、無ければ "cpu"）。
+    /// 目盛りと「見つからない」のしきい値（NoMatchRule）をこれで切り替える
+    nonisolated(unsafe) public private(set) static var units = "cpu"
 
-    /// center.bin を読む（BGEEmbedder がモデルのフォルダから呼ぶ）
+    /// center.bin を読む（BGEEmbedder がモデルのフォルダから呼ぶ）。同じフォルダの meta.json の units で目盛りも選ぶ
     public static func loadCenter(_ url: URL) {
+        let metaURL = url.deletingLastPathComponent().appendingPathComponent("meta.json")
+        let meta = (try? Data(contentsOf: metaURL)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        units = (meta?["units"] as? String) == "ane" ? "ane" : "cpu"
+        (asymA, asymB) = units == "ane" ? scaleANE : scaleCPU
         guard let d = try? Data(contentsOf: url), d.count == bytes * 8 * 4 else { return }
         center = d.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
     }

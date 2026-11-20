@@ -414,6 +414,17 @@ public final class Engine {
         lock.unlock()
     }
 
+    /// ファイル・フォルダの最終の説明文（files と同じ並び。答え合わせで 2 値の目盛りを合わせ直す用。中身を読むので重い）
+    public var fileDescriptions: [String] {
+        lock.lock()
+        let fs = files, bs = fileBases
+        lock.unlock()
+        return zip(fs, bs).map { e, b in
+            let ct = FileCatalog.content(e)
+            return ct.isEmpty ? b : b + " 中身: " + ct
+        }
+    }
+
     /// いまのファイルの Corpus（答え合わせで件数を増やして試す用）
     public var fileCorpusSnapshot: Corpus { lock.lock(); defer { lock.unlock() }; return fileCorpus }
 
