@@ -183,6 +183,12 @@ public final class FileIndex {
         for p in parents.subtracting(touched) where entries[p] != nil {
             if let e = FileCatalog.entry(path: p) { entries[p] = e } else { removeTree(p, keepSelf: false, &st) }
         }
+        // 範囲の中で増えた・変わった・消えた物が無ければ入れ直さない。入れ直しは全件を並べ直すので、~/Project のように
+        // 16 万件あると 1 回 30 秒かかり、除外した場所（.git・build など）への書き込みのたびに走ってベクトル化が進まなかった
+        if st.changed == 0 && st.removed == 0 {
+            st.seconds = Date().timeIntervalSince(t0)
+            return st
+        }
         let s2 = commit(progress: nil)
         st.embedded = s2.embedded; st.examples = s2.examples
         st.seconds = Date().timeIntervalSince(t0)
