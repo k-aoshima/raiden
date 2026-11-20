@@ -822,12 +822,15 @@ enum FocusTest {
             c.setResults([ResultSection(title: "アプリ", symbol: "app.badge", items: [appItem]),
                           ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: [RowItem(target), RowItem(other)])],
                          query: c.filterInput.currentQuery)
+            expect(!c.wide && c.panel.frame.width == SearchPanelController.width,
+                   "アプリの行を選んでいる間は広げない（幅 \(Int(c.panel.frame.width))）")
+            key(c, #selector(NSResponder.moveDown(_:)))
             expect(c.wide && c.panel.frame.width == SearchPanelController.width + FilePreviewPane.width,
-                   "ファイルの行があると右に広げる（幅 \(Int(c.panel.frame.width))）")
+                   "ファイルの行を選ぶと右に広げる（幅 \(Int(c.panel.frame.width))）")
             expect(c.panel.frame.height >= SearchPanelController.fieldHeight + SearchPanelController.previewMinHeight,
                    "プレビューが読める高さ（\(Int(c.panel.frame.height))）")
             let t0 = c.preview.currentToken
-            for _ in 0..<2 { key(c, #selector(NSResponder.moveDown(_:))) }
+            key(c, #selector(NSResponder.moveDown(_:)))
             expect(c.selectedRow == 2 && c.preview.currentToken > t0 && focused(c), "↓ でプレビューを替えても入力欄のまま")
             type(c, "z")
             expect(c.queryText == "見本z", "プレビューを出した後も打てる「\(c.queryText)」")

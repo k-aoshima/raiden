@@ -291,7 +291,8 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         panel.level = .modalPanel
         panel.backgroundColor = .clear
         panel.isOpaque = false
-        panel.hasShadow = true
+        // 影はシステムに任せない（ガラスの部品の枠なし窓では影が四角く作られ、角の外に四角い線が出る。ガラス自体が縁の光と影を持つ）
+        panel.hasShadow = false
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         panel.isMovableByWindowBackground = true
@@ -327,6 +328,12 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         }
         veilView = veil
         content.appearance = PanelStyle.appearance
+        // 中身（白い面・一覧・プレビュー）もパネルと同じ丸い角で切り抜く。切り抜かないと四角いまま描かれ、
+        // 窓の影がその四角い形で作られて、角の外に四角い影が出る
+        content.wantsLayer = true
+        content.layer?.cornerRadius = PanelStyle.radius
+        content.layer?.cornerCurve = .continuous
+        content.layer?.masksToBounds = true
 
         let glyph = NSImageView(image: symbol("magnifyingglass", size: 20, weight: .medium) ?? NSImage())
         glyph.contentTintColor = PanelStyle.subText
@@ -764,6 +771,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
 
     private func updateSelection() {
         for (i, r) in rows.enumerated() where r.selected != (i == selected) { r.selected = i == selected }
+        updateWide()   // アプリの行に移ったら閉じ、ファイルの行に移ったら広げる（setWide が並べ直す）
         updatePreview()
     }
 
@@ -786,7 +794,8 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
 
     /// 今の候補で広げたいか（ファイルの行がある・絞り込みの一覧ではない・設定がオン・画面が広い）
     private var wantsWide: Bool {
-        Self.previewEnabled && !paletteRows && Self.screenFitsPreview && results.contains { $0.isFile }
+        // 選んでいる行がファイル・フォルダの時だけ（アプリの行ではプレビューを出さない）
+        Self.previewEnabled && !paletteRows && Self.screenFitsPreview && results.indices.contains(selected) && results[selected].isFile
     }
 
     private func updatePreview() {
