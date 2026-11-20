@@ -30,8 +30,8 @@ enum PanelStyle {
     static let goldDeep = NSColor(srgbRed: 0.84, green: 0.58, blue: 0.10, alpha: 1)       // 白の上の金（見出しの印）
     /// 入力欄の帯の上の文字
     static let onBand = NSColor.white
-    static let onBandFaint = NSColor(white: 1, alpha: 0.78)
-    static let onBandFainter = NSColor(white: 1, alpha: 0.6)
+    static let onBandFaint = NSColor(white: 1, alpha: 0.95)
+    static let onBandFainter = NSColor(white: 1, alpha: 0.8)
     /// 帯の濃さ: 1 − 0.5 × 透け具合（0 で不透明、既定 0.6 で 0.7、0.9 で 0.55）。後ろのガラスが透けて見える
     static var bandAlpha: CGFloat { CGFloat(1 - 0.5 * transparency) }
     static let selection = NSColor(srgbRed: 0.231, green: 0.204, blue: 0.839, alpha: 0.10)
@@ -78,6 +78,23 @@ final class BandView: NSView {
         NSGradient(starting: NSColor(white: 1, alpha: 0), ending: NSColor(white: 1, alpha: 0.16))?
             .draw(in: NSRect(x: w * 0.40, y: 0, width: w * 0.13, height: h), angle: 0)
         NSGraphicsContext.restoreGraphicsState()
+    }
+}
+
+/// 帯の上の入力欄の編集部品。変換中の文字の下線を金にする（日本語入力が付ける線の太さはそのまま、色だけ変える）
+final class BandFieldEditor: NSTextView {
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        let m: NSMutableAttributedString
+        if let a = string as? NSAttributedString { m = NSMutableAttributedString(attributedString: a) }
+        else { m = NSMutableAttributedString(string: string as? String ?? "") }
+        let all = NSRange(location: 0, length: m.length)
+        if m.length > 0 {
+            var hasLine = false
+            m.enumerateAttribute(.underlineStyle, in: all) { v, _, _ in if v != nil { hasLine = true } }
+            if !hasLine { m.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: all) }
+            m.addAttribute(.underlineColor, value: PanelStyle.gold, range: all)
+        }
+        super.setMarkedText(m, selectedRange: selectedRange, replacementRange: replacementRange)
     }
 }
 
@@ -445,6 +462,14 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         field.placeholderAttributedString = Self.defaultPlaceholder
         field.delegate = self
         field.cell?.usesSingleLineMode = true
+        // 帯が透けても文字が沈まないよう、帯の上の物に濃い藍の薄い影を付ける（帯の色は変えない）
+        for v in [field, glyph, status, statusIcon] as [NSView] {
+            v.wantsLayer = true
+            v.layer?.shadowColor = NSColor(srgbRed: 0.10, green: 0.08, blue: 0.40, alpha: 1).cgColor
+            v.layer?.shadowOpacity = 0.45
+            v.layer?.shadowRadius = 2
+            v.layer?.shadowOffset = CGSize(width: 0, height: -0.5)
+        }
         statusIcon.contentTintColor = PanelStyle.onBandFaint
         status.font = .systemFont(ofSize: 12)
         status.textColor = PanelStyle.onBandFaint
@@ -461,9 +486,9 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     /// 入力欄が空のときの案内文: 「Raiden 検索」は薄いグレー、「filter: #」は # の使い方の手がかりとしてさらに薄く小さく
     static var defaultPlaceholder: NSAttributedString {
         let ph = NSMutableAttributedString(string: "Raiden 検索", attributes: [
-            .foregroundColor: PanelStyle.onBandFaint, .font: NSFont.systemFont(ofSize: 24)])
+            .foregroundColor: PanelStyle.onBandFaint, .font: NSFont.systemFont(ofSize: 24, weight: .medium)])
         ph.append(NSAttributedString(string: "   filter: #", attributes: [
-            .foregroundColor: PanelStyle.onBandFainter, .font: NSFont.systemFont(ofSize: 15),
+            .foregroundColor: PanelStyle.onBandFainter, .font: NSFont.systemFont(ofSize: 15, weight: .medium),
             .baselineOffset: 2]))
         return ph
     }
@@ -1022,10 +1047,12 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
 
     /// 入力欄の編集部品。帯の上なのでカーソルは金、選んだ文字は白く透かす
     private lazy var bandEditor: NSTextView = {
-        let tv = NSTextView()
+        let tv = BandFieldEditor()
         tv.isFieldEditor = true
         tv.insertionPointColor = PanelStyle.gold
         tv.selectedTextAttributes = [.backgroundColor: NSColor(white: 1, alpha: 0.28), .foregroundColor: PanelStyle.onBand]
+        tv.markedTextAttributes = [.underlineStyle: NSUnderlineStyle.single.rawValue, .underlineColor: PanelStyle.gold,
+                                   .foregroundColor: PanelStyle.onBand]
         return tv
     }()
 
