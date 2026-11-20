@@ -30,8 +30,10 @@ enum PanelStyle {
     static let goldDeep = NSColor(srgbRed: 0.84, green: 0.58, blue: 0.10, alpha: 1)       // 白の上の金（見出しの印）
     /// 入力欄の帯の上の文字
     static let onBand = NSColor.white
-    static let onBandFaint = NSColor(white: 1, alpha: 0.62)
-    static let onBandFainter = NSColor(white: 1, alpha: 0.45)
+    static let onBandFaint = NSColor(white: 1, alpha: 0.78)
+    static let onBandFainter = NSColor(white: 1, alpha: 0.6)
+    /// 帯の濃さ: 1 − 0.5 × 透け具合（0 で不透明、既定 0.6 で 0.7、0.9 で 0.55）。後ろのガラスが透けて見える
+    static var bandAlpha: CGFloat { CGFloat(1 - 0.5 * transparency) }
     static let selection = NSColor(srgbRed: 0.231, green: 0.204, blue: 0.839, alpha: 0.10)
     /// 絞り込みの札（効いている物）の面
     static let pillFill = NSColor(srgbRed: 0.231, green: 0.204, blue: 0.839, alpha: 0.09)
@@ -60,9 +62,10 @@ final class VeilView: NSView {
 /// 入力欄の帯（藍のグラデーションに斜めの光）。上の角はパネルの切り抜きで丸くなる
 final class BandView: NSView {
     override func draw(_ dirtyRect: NSRect) {
-        let g = NSGradient(colors: [NSColor(srgbRed: 0.173, green: 0.153, blue: 0.722, alpha: 1),   // #2C27B8
-                                    NSColor(srgbRed: 0.294, green: 0.231, blue: 0.878, alpha: 1),   // #4B3BE0
-                                    NSColor(srgbRed: 0.424, green: 0.322, blue: 0.949, alpha: 1)],  // #6C52F2
+        let a = PanelStyle.bandAlpha
+        let g = NSGradient(colors: [NSColor(srgbRed: 0.173, green: 0.153, blue: 0.722, alpha: a),   // #2C27B8
+                                    NSColor(srgbRed: 0.294, green: 0.231, blue: 0.878, alpha: a),   // #4B3BE0
+                                    NSColor(srgbRed: 0.424, green: 0.322, blue: 0.949, alpha: a)],  // #6C52F2
                            atLocations: [0, 0.55, 1], colorSpace: .sRGB)
         g?.draw(in: bounds, angle: -8)
         // 斜めの光の筋（稲光）
@@ -353,6 +356,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     private var heightConstraint: NSLayoutConstraint!
     private var glassView: NSView?
     private var veilView: VeilView?
+    private var bandView: BandView?
     private var effectView: NSVisualEffectView?
     /// 絞り込みのコマンド（#kind ss #date 7d）の一覧・チップ・ゴーストテキスト（FilterUI.swift）
     let filterInput = FilterInput()
@@ -499,6 +503,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
                                                name: NSView.boundsDidChangeNotification, object: scroll.contentView)
 
         let band = BandView()
+        bandView = band
         sep.isHidden = true   // 帯の下端が区切りになる
         for v in [veil, band, glyph, field, statusIcon, status, sep, topStack, scroll] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
@@ -567,6 +572,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         }
         effectView?.material = t >= 0.5 ? .underWindowBackground : .popover
         veilView?.needsDisplay = true
+        bandView?.needsDisplay = true
     }
 
     /// クリップボードの履歴の状態で出す（専用のキー）。出ていれば履歴の状態に切り替える
