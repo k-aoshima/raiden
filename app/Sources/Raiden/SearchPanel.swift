@@ -104,6 +104,31 @@ final class ResultRow: NSView {
     }
 
     override func mouseDown(with event: NSEvent) { onClick?() }
+
+    /// マウスを乗せたら選ぶ（プレビューを出すため）
+    var onHover: (() -> Void)?
+    private var tracking: NSTrackingArea?
+    /// 前にマウスで選んだときのマウスの位置。行を作り直しただけ（マウスは動いていない）の入りは無視する
+    private static var lastMouse = NSPoint(x: -1, y: -1)
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = tracking { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+                               owner: self, userInfo: nil)
+        addTrackingArea(t)
+        tracking = t
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovered() }
+    override func mouseMoved(with event: NSEvent) { if !selected { hovered() } }
+
+    private func hovered() {
+        let p = NSEvent.mouseLocation
+        guard p != Self.lastMouse else { return }
+        Self.lastMouse = p
+        onHover?()
+    }
 }
 
 /// アイコンと文字の 1 行（節の見出し・「見つかりません」）。選べない
@@ -162,6 +187,8 @@ struct RowItem {
     var iconPath: String?
     var iconImage: NSImage?
     var hint: String
+    /// 右のプレビューに出す物（nil は出さない）
+    var preview: PreviewTarget?
 
     init(_ c: Candidate) {
         candidate = c
@@ -171,16 +198,21 @@ struct RowItem {
             title = r.app.jp == r.app.name ? r.app.jp : "\(r.app.jp)  \(r.app.name)"
             sub = (r.app.path as NSString).abbreviatingWithTildeInPath
             hint = RowItem.appHint
+            preview = .app(title: title, path: r.app.path)
         case .file(let r):
             title = r.file.name
             sub = RowItem.shortParent(r.file.path)
             hint = r.file.isDir ? RowItem.folderHint : RowItem.fileHint
+            preview = .file(r.file.path)
         }
     }
 
-    init(title: String, sub: String, iconPath: String? = nil, iconImage: NSImage? = nil, hint: String) {
+    init(title: String, sub: String, iconPath: String? = nil, iconImage: NSImage? = nil, hint: String, preview: PreviewTarget? = nil) {
         self.title = title; self.sub = sub; self.iconPath = iconPath; self.iconImage = iconImage; self.hint = hint
+        self.preview = preview
     }
+
+    var isFile: Bool { if case .file = preview { return true } else { return false } }
 
     static let appHint = "↩ 開く　⌘↩ Finder"
     static let fileHint = "↩ 開く　⌘↩ Finder に表示"
@@ -389,11 +421,11 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             sep.heightAnchor.constraint(equalToConstant: 1),
             topStack.topAnchor.constraint(equalTo: sep.bottomAnchor, constant: 4),
             topStack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            topStack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            topStack.widthAnchor.constraint(equalToConstant: Self.width),
             topHeightConstraint,
             scroll.topAnchor.constraint(equalTo: topStack.bottomAnchor),
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            scroll.widthAnchor.constraint(equalToConstant: Self.width),
             heightConstraint,
         ])
         status.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -415,6 +447,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             return ev
         }
         filterInput.attach(self, field: field, content: content)
+        setupPreview()
     }
 
     var isVisible: Bool { panel.isVisible }
@@ -511,16 +544,36 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     static var maxPanelHeight: CGFloat { visibleFrame.height * 0.65 }
 
     private func layoutPanel(top: CGFloat, list: CGFloat) {
+        lastLayout = (top, list)
         topHeightConstraint.constant = top
         let maxList = max(Self.rowHeight * 3, Self.maxPanelHeight - Self.fieldHeight - 16 - top)
         let listH = min(list, maxList)
         heightConstraint.constant = listH
-        let inner = top + listH
+        var inner = top + listH
+        // プレビューを出している間は、プレビューが読める高さを取る
+        if wide { inner = max(inner, min(Self.previewMinHeight, Self.maxPanelHeight - Self.fieldHeight - 16)) }
         let h = Self.fieldHeight + (inner > 0 ? inner + 16 : 0)
         let vf = Self.visibleFrame
         // 上端の位置を固定して下に伸ばす（候補の数で入力欄が動かないように）
         let top = vf.maxY - vf.height * 0.22
-        panel.setFrame(NSRect(x: vf.midX - Self.width / 2, y: top - h, width: Self.width, height: h), display: true)
+        let w = Self.width + (wide ? FilePreviewPane.width : 0)
+        let frame = NSRect(x: (vf.midX - w / 2).rounded(), y: top - h, width: w, height: h)
+        if panel.isVisible && (frame.width != panel.frame.width || animatingFrame)
+            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            // 幅が変わるときは中央のまま 0.18 秒で広げる・狭める（入力欄の出方と同じ動き）
+            animatingFrame = true
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.18
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1.0)
+                panel.animator().setFrame(frame, display: true)
+            }, completionHandler: { [weak self] in
+                guard let self else { return }
+                self.animatingFrame = false
+                if self.panel.frame != frame { self.panel.setFrame(frame, display: true) }
+            })
+        } else {
+            panel.setFrame(frame, display: true)
+        }
     }
 
     /// 節ごとに並べる。中身のある節が 1 つだけなら見出しは出さない。
@@ -593,6 +646,8 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             }
         }
         buildRows(upTo: Self.rowBatch - 1)
+        lastLayout = (topH, listH)
+        updateWide()
         updateSelection()
         layoutPanel(top: topH, list: listH)
         scroll.contentView.scroll(to: .zero)
@@ -622,6 +677,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
                 row.icon.image = item.iconImage ?? item.iconPath.map(icon)
                 row.alphaValue = rowAlpha[i]
                 row.onClick = { [weak self] in self?.clickRow(i) }
+                row.onHover = { [weak self] in self?.hoverRow(i) }
                 stack.addArrangedSubview(row)
                 row.widthAnchor.constraint(equalToConstant: Self.width).isActive = true
                 row.heightAnchor.constraint(equalToConstant: Self.rowHeight).isActive = true
@@ -638,6 +694,12 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         if visible.maxY > listView.frame.height - visible.height {
             buildRows(upTo: rows.count + Self.rowBatch - 1)
         }
+    }
+
+    private func hoverRow(_ i: Int) {
+        guard !paletteRows, selected != i, results.indices.contains(i) else { return }
+        selected = i
+        updateSelection()
     }
 
     private func clickRow(_ i: Int) {
@@ -703,6 +765,91 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
 
     private func updateSelection() {
         for (i, r) in rows.enumerated() where r.selected != (i == selected) { r.selected = i == selected }
+        updatePreview()
+    }
+
+    // MARK: プレビュー
+
+    /// 右のプレビュー（ファイルの行があるときだけパネルを広げて出す）
+    let preview = FilePreviewPane()
+    private let previewLine = HairlineView()
+    /// プレビューを出すか（設定の「一般 → ファイルのプレビューを出す」）
+    static var previewEnabled = true
+    /// 今パネルを広げているか（狭めるのは少し待つ。打っている途中でファイルの行が出たり消えたりしてもガタつかないように）
+    private(set) var wide = false
+    private var shrinkPending: DispatchWorkItem?
+    private var lastLayout: (top: CGFloat, list: CGFloat) = (0, 0)
+    private var animatingFrame = false
+    static let previewMinHeight: CGFloat = 360
+
+    /// 画面がプレビューを並べられる幅か
+    static var screenFitsPreview: Bool { visibleFrame.width >= width + FilePreviewPane.width + 80 }
+
+    /// 今の候補で広げたいか（ファイルの行がある・絞り込みの一覧ではない・設定がオン・画面が広い）
+    private var wantsWide: Bool {
+        Self.previewEnabled && !paletteRows && Self.screenFitsPreview && results.contains { $0.isFile }
+    }
+
+    private func updatePreview() {
+        guard wide, results.indices.contains(selected) else { preview.show(nil, title: "", icon: nil); return }
+        let item = results[selected]
+        let img = rows.indices.contains(selected) ? rows[selected].icon.image : nil
+        preview.show(item.preview, title: item.title, icon: img)
+    }
+
+    private func setupPreview() {
+        for v in [preview, previewLine] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            v.alphaValue = 0
+            content.addSubview(v)
+        }
+        NSLayoutConstraint.activate([
+            preview.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Self.width),
+            preview.widthAnchor.constraint(equalToConstant: FilePreviewPane.width),
+            preview.topAnchor.constraint(equalTo: content.topAnchor, constant: Self.fieldHeight + 1),
+            preview.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            previewLine.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Self.width),
+            previewLine.widthAnchor.constraint(equalToConstant: 1),
+            previewLine.topAnchor.constraint(equalTo: content.topAnchor, constant: Self.fieldHeight + 14),
+            previewLine.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14),
+        ])
+    }
+
+    /// 広げる・狭める。広げるのはすぐ、狭めるのは 0.25 秒待ってまだ要らなければ
+    private func updateWide() {
+        let want = wantsWide
+        if want {
+            shrinkPending?.cancel(); shrinkPending = nil
+            if !wide { setWide(true) }
+        } else if wide {
+            // 開いていない（見本・確かめ）・候補が空・設定を切ったときはすぐ
+            if !panel.isVisible || results.isEmpty || !Self.previewEnabled { setWide(false); return }
+            guard shrinkPending == nil else { return }
+            let w = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.shrinkPending = nil
+                if !self.wantsWide && self.wide { self.setWide(false) }
+            }
+            shrinkPending = w
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: w)
+        }
+    }
+
+    private func setWide(_ on: Bool) {
+        wide = on
+        let animate = panel.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if animate {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.18
+                preview.animator().alphaValue = on ? 1 : 0
+                previewLine.animator().alphaValue = on ? 1 : 0
+            }
+        } else {
+            preview.alphaValue = on ? 1 : 0
+            previewLine.alphaValue = on ? 1 : 0
+        }
+        layoutPanel(top: lastLayout.top, list: lastLayout.list)
+        updatePreview()
     }
 
     /// addToDictionary: ⌥Enter。今の言葉 → 選んだ物を辞書に足してから開く。#alias の行き先を選んでいる間は開かずに辞書に足す

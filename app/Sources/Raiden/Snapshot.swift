@@ -36,8 +36,69 @@ enum Snapshot {
         var weakApps = appSec, weakFiles = fileSec
         weakApps.items = Array(apps.prefix(2)); weakFiles.items = Array(files.prefix(2))
         shoot(dir + "/panel-notfound.png", query: "ふわふわのやつ", sections: [weakApps, weakFiles], notFound: true)
+        shootPreview(dir + "/panel-preview.png", apps: apps)
         shootSettings(dir: dir)
         FilterSnapshots.run(dir: dir)
+    }
+
+    /// プレビューを出した状態（panel-preview.png）。中身はこの場で作った見本のファイル（一時フォルダ）だけ
+    static func shootPreview(_ path: String, apps: [RowItem]) {
+        let root = "/tmp/raiden-preview-sample"
+        try? FileManager.default.removeItem(atPath: root)
+        let docs = (root as NSString).appendingPathComponent("サンプル資料")
+        try? FileManager.default.createDirectory(atPath: docs, withIntermediateDirectories: true)
+        let pdf = (root as NSString).appendingPathComponent("見積書_サンプル.pdf")
+        writeSamplePDF(pdf)
+        let md = (root as NSString).appendingPathComponent("議事録_サンプル.md")
+        try? "# 議事録（見本）\n\n- 次回の日程を決める\n- 見積書を送る\n".write(toFile: md, atomically: true, encoding: .utf8)
+        for n in ["企画書_見本.pdf", "写真_見本.png", "メモ_見本.txt"] {
+            FileManager.default.createFile(atPath: (docs as NSString).appendingPathComponent(n), contents: Data("見本".utf8))
+        }
+        func row(_ p: String, folder: Bool = false) -> RowItem {
+            RowItem(title: (p as NSString).lastPathComponent, sub: "~/Documents/サンプル",
+                    iconImage: NSWorkspace.shared.icon(forFile: p), hint: folder ? RowItem.folderHint : RowItem.fileHint,
+                    preview: .file(p))
+        }
+        let files = [row(pdf), row(md), row(docs, folder: true)]
+        let secs = [ResultSection(title: "アプリ", symbol: "app.badge", items: Array(apps.prefix(2))),
+                    ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: files)]
+        let c = SearchPanelController()
+        c.setQueryText("見積書")
+        c.setResults(secs, query: "見積書")
+        c.select(2)
+        c.panel.contentView?.layoutSubtreeIfNeeded()
+        c.preview.waitUntilLoaded()
+        capture(c, path)
+        try? FileManager.default.removeItem(atPath: root)
+    }
+
+    /// 見本の PDF（A4 の 1 枚に見積書らしい文字を並べる）
+    static func writeSamplePDF(_ path: String) {
+        var box = CGRect(x: 0, y: 0, width: 595, height: 842)
+        guard let ctx = CGContext(URL(fileURLWithPath: path) as CFURL, mediaBox: &box, nil) else { return }
+        ctx.beginPDFPage(nil)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+        func text(_ s: String, _ x: CGFloat, _ y: CGFloat, _ size: CGFloat, bold: Bool = false) {
+            (s as NSString).draw(at: NSPoint(x: x, y: y), withAttributes: [
+                .font: NSFont.systemFont(ofSize: size, weight: bold ? .bold : .regular), .foregroundColor: NSColor.black])
+        }
+        text("御見積書（見本）", 60, 760, 28, bold: true)
+        text("見本株式会社 御中", 60, 710, 14)
+        text("合計金額  ¥123,000（税込）", 60, 660, 18, bold: true)
+        NSColor(white: 0.85, alpha: 1).setFill()
+        NSRect(x: 60, y: 600, width: 475, height: 24).fill()
+        text("品目", 70, 605, 12, bold: true); text("数量", 360, 605, 12, bold: true); text("金額", 460, 605, 12, bold: true)
+        for (i, r) in [("デザイン作業（見本）", "1", "¥80,000"), ("撮影（見本）", "2", "¥30,000"), ("交通費（見本）", "1", "¥13,000")].enumerated() {
+            let y = 570 - CGFloat(i) * 30
+            text(r.0, 70, y, 12); text(r.1, 365, y, 12); text(r.2, 460, y, 12)
+            NSColor(white: 0.9, alpha: 1).setFill()
+            NSRect(x: 60, y: y - 8, width: 475, height: 1).fill()
+        }
+        text("この書類は Raiden の画面の見本です。", 60, 120, 11)
+        NSGraphicsContext.restoreGraphicsState()
+        ctx.endPDFPage()
+        ctx.closePDF()
     }
 
     /// 設定窓の各画面（settings-scope / general / learning / log.png）。中身はダミーと初期値だけ

@@ -811,6 +811,32 @@ enum FocusTest {
         c.setResults([ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: [RowItem(other), RowItem(target)])], query: c.filterInput.currentQuery)
         expect(c.resultCount == 2 && c.firstResultPath == target.path, "辞書の物を先頭に、下の節からは外す（\(c.resultCount) 件）")
 
+        // 13) ファイルの行があるときだけパネルを右に広げてプレビューを出す（設定で切れる。行を動かしても入力欄のまま）
+        if SearchPanelController.screenFitsPreview {
+            c = make()
+            type(c, "見本")
+            let appItem = RowItem(title: "見本アプリ", sub: "/Applications/見本.app", iconImage: NSImage(), hint: RowItem.appHint)
+            c.setResults([ResultSection(title: "アプリ", symbol: "app.badge", items: [appItem])], query: c.filterInput.currentQuery)
+            let narrow = c.panel.frame.width
+            expect(!c.wide && narrow == SearchPanelController.width, "アプリだけのときは広げない（幅 \(Int(narrow))）")
+            c.setResults([ResultSection(title: "アプリ", symbol: "app.badge", items: [appItem]),
+                          ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: [RowItem(target), RowItem(other)])],
+                         query: c.filterInput.currentQuery)
+            expect(c.wide && c.panel.frame.width == SearchPanelController.width + FilePreviewPane.width,
+                   "ファイルの行があると右に広げる（幅 \(Int(c.panel.frame.width))）")
+            expect(c.panel.frame.height >= SearchPanelController.fieldHeight + SearchPanelController.previewMinHeight,
+                   "プレビューが読める高さ（\(Int(c.panel.frame.height))）")
+            let t0 = c.preview.currentToken
+            for _ in 0..<2 { key(c, #selector(NSResponder.moveDown(_:))) }
+            expect(c.selectedRow == 2 && c.preview.currentToken > t0 && focused(c), "↓ でプレビューを替えても入力欄のまま")
+            type(c, "z")
+            expect(c.queryText == "見本z", "プレビューを出した後も打てる「\(c.queryText)」")
+            SearchPanelController.previewEnabled = false
+            c.setResults([ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: [RowItem(target)])], query: c.filterInput.currentQuery)
+            expect(!c.wide && c.panel.frame.width == SearchPanelController.width, "設定を切ると広げない")
+            SearchPanelController.previewEnabled = true
+        }
+
         print("確かめ \(checks - fails)/\(checks)")
         return fails == 0
     }

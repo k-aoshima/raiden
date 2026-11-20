@@ -74,6 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settings = RaidenSettings.load()
         PanelStyle.transparency = settings.transparency
         SearchPanelController.maxRows = settings.maxRows
+        SearchPanelController.previewEnabled = settings.showPreview
         SavedFilters.set(settings.savedFilters)
         PhraseDictionary.set(settings.dictionary)
         panel.applyTransparency()
@@ -93,6 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if old.transparency != s.transparency { previewTransparency(s.transparency) }
         if old.maxRows != s.maxRows { SearchPanelController.maxRows = s.maxRows }
+        if old.showPreview != s.showPreview { SearchPanelController.previewEnabled = s.showPreview }
         if old.savedFilters != s.savedFilters { SavedFilters.set(s.savedFilters) }
         if old.dictionary != s.dictionary { PhraseDictionary.set(s.dictionary) }
         if old.logDays != s.logDays { pruneSearchLog() }

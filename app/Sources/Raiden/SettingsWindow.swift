@@ -488,6 +488,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
             formRow("list.number", "候補の最大件数", detail: "アプリとファイルを合わせた数", trailing: [maxRows]),
             formRow("rectangle.split.1x2", "アプリとファイルの節の並び", detail: "自動は「先週のPDF」のような言い方でファイルを先にします", trailing: [order]),
             formRow("circle.lefthalf.filled", "透明度", detail: "上げるほど後ろが透けます", trailing: [slider, pct]),
+            formRow("sidebar.right", "ファイルのプレビューを出す", detail: "ファイルの行を選ぶと右に中身を出します（画面が狭いときは出しません）",
+                    trailing: [sSwitch(s.showPreview) { [weak self] on in self?.host?.updateSettings { $0.showPreview = on } }]),
         ]))
         out.append(spacer(4))
         out.append(sectionTitle("動作", symbol: "gearshape.2"))
