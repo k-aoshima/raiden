@@ -596,7 +596,7 @@ public final class SpotlightSearch: @unchecked Sendable {
         return Array(out.sorted { $0.lastUsed > $1.lastUsed }.prefix(limit))
     }
 
-    /// 条件に合う物の数（値の候補の件数用の目安。Spotlight の数をそのまま数え、除外・パッケージの中のふるい直しはしない）。
+    /// 条件に合う物の数（値の候補の件数用の目安。exactCountMax 件以下なら除外・パッケージの中を引く。多いときは Spotlight の数のまま）。
     /// max を超えたら max を返す
     public func count(_ f: QueryFilters, max: Int = 10_000, now: Date = Date()) -> Int {
         lock.lock(); let g = generation; lock.unlock()
@@ -606,8 +606,21 @@ public final class SpotlightSearch: @unchecked Sendable {
         MDQuerySetMaxCount(q, max)
         _ = g
         guard MDQueryExecute(q, CFOptionFlags(kMDQuerySynchronous.rawValue)) else { return 0 }
-        return MDQueryGetResultCount(q)
+        let n = MDQueryGetResultCount(q)
+        // 少ないときは除外（Library・build・パッケージの中など）を引いて数え直す。結果の一覧と食い違って
+        // 「6 件」なのに「条件に合う物はありません」になるのは、件数が小さいときほど目立つため
+        guard n <= Self.exactCountMax else { return n }
+        var kept = 0
+        for i in 0..<n {
+            guard let raw = MDQueryGetResultAtIndex(q, i) else { continue }
+            let item = unsafeBitCast(raw, to: MDItem.self)
+            if let path = MDItemCopyAttribute(item, kMDItemPath) as? String, !excluded(path) { kept += 1 }
+        }
+        return kept
     }
+
+    /// これ以下の件数なら除外を引いて数え直す
+    static let exactCountMax = 2000
 }
 
 /// 入力欄の値の候補の件数と「最近使った物」を Spotlight で答える（FilterSource。AppDelegate が FilterInput.context に渡す）。
