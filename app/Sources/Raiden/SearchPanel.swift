@@ -474,6 +474,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         panel.alphaValue = 0
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(field)
+        panel.invalidateShadow()   // 前に開いた時の大きさの影が残らないように
         if let v = panel.contentView, !reduce {
             v.wantsLayer = true
             if let l = v.layer {
@@ -487,11 +488,14 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
                 l.add(a, forKey: "raiden.show")
             }
         }
-        NSAnimationContext.runAnimationGroup { ctx in
+        NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = reduce ? 0.08 : 0.15
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             panel.animator().alphaValue = 1
-        }
+        }, completionHandler: { [weak self] in
+            // 拡大の途中の形で作られた影を、出し終えた形で作り直す
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { self?.panel.invalidateShadow() }
+        })
     }
 
     private var hiding = false
@@ -570,9 +574,11 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
                 guard let self else { return }
                 self.animatingFrame = false
                 if self.panel.frame != frame { self.panel.setFrame(frame, display: true) }
+                self.panel.invalidateShadow()
             })
         } else {
             panel.setFrame(frame, display: true)
+            panel.invalidateShadow()   // 大きさが変わったら影も作り直す（前の大きさの影が枠のように残る）
         }
     }
 
