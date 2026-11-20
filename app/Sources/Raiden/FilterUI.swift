@@ -749,6 +749,16 @@ enum FocusTest {
         for _ in 0..<300 { key(c, #selector(NSResponder.moveDown(_:))) }
         expect(c.selectedRow == 330 && c.builtRowCount > 330, "↓ 330 回で行を足す（作った行 \(c.builtRowCount)）")
         expect(focused(c), "一覧を動かしても入力欄が first responder")
+        // 同じ入力の結果が後から届き直しても（件数が多いと少しずつ届く）、選んでいた物から動かない
+        let off = c.scrollOffset
+        c.setResults([ResultSection(title: "アプリ", symbol: "app.badge", items: many)], query: c.filterInput.currentQuery)
+        expect(c.selectedRow == 330 && abs(c.scrollOffset - off) < 1, "届き直しで選択 \(c.selectedRow)・スクロール \(Int(off)) → \(Int(c.scrollOffset))")
+        let more = (0..<10).map { RowItem(title: "後から来た \($0)", sub: "/Applications/後\($0).app", iconImage: NSImage(), hint: RowItem.appHint) } + many
+        c.setResults([ResultSection(title: "アプリ", symbol: "app.badge", items: more)], query: c.filterInput.currentQuery)
+        expect(c.selectedRow == 340, "前に 10 件増えても同じ物（見本アプリ 330）を選んだまま: \(c.selectedRow)")
+        type(c, "x")
+        c.setResults([ResultSection(title: "アプリ", symbol: "app.badge", items: many)], query: c.filterInput.currentQuery)
+        expect(c.selectedRow == 0, "入力が変わったら先頭から: \(c.selectedRow)")
 
         // 7) 「#」を打たない言葉からの候補: Tab でチップにして言葉を外す
         c = make()

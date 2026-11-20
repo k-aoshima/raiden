@@ -360,6 +360,9 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     private var rowAlpha: [CGFloat] = []
     private var paletteRows = false
     private var selected = 0
+    /// 今の入力で、↑↓ かマウスで選び直したか。同じ入力の結果が後から届いても（件数が多いと少しずつ届く）選んだ物を動かさない
+    private var userMoved = false
+    private var shownQuery: String?
     private var topHeightConstraint: NSLayoutConstraint!
     /// 行を一度に作る数（数千件でも最初はこれだけ作り、スクロールで足す）
     static let rowBatch = 200
@@ -604,6 +607,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     func show() {
         field.stringValue = ""
         lastHashCount = 0
+        userMoved = false
         filterInput.reset()
         setResults([], query: "")
         if let f = NSWorkspace.shared.frontmostApplication, f.bundleIdentifier != Bundle.main.bundleIdentifier { previousApp = f }
@@ -746,6 +750,13 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         // 絞り込みのコマンドが効いているときは全部出すので、節の見出しに件数を出す
         let filtered = !palette && QueryFilters.parse(query, now: filterInput.now()).isActive
         let showHeaders = secs.count > 1 || notFound || filtered
+        // 同じ入力の結果の届き直しで、選び直していたなら、選んでいた物とスクロールの位置を残す
+        let keep = userMoved && query == shownQuery && palette == paletteRows && results.indices.contains(selected)
+        let keepKey = keep ? Self.key(results[selected]) : nil
+        let keepIndex = selected
+        let keepOffset = scroll.contentView.bounds.origin
+        if !keep { userMoved = false }
+        shownQuery = query
         results = []
         rowAlpha = []
         entries = []
@@ -787,15 +798,34 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
                 listH += Self.rowHeight
             }
         }
-        buildRows(upTo: Self.rowBatch - 1)
+        if keep, !results.isEmpty {
+            selected = results.firstIndex { Self.key($0) == keepKey } ?? min(keepIndex, results.count - 1)
+        }
+        buildRows(upTo: max(Self.rowBatch - 1, selected + 20))
         lastLayout = (topH, listH)
         updateWide()
         updateSelection()
         layoutPanel(top: topH, list: listH)
-        scroll.contentView.scroll(to: .zero)
-        scroll.reflectScrolledClipView(scroll.contentView)
+        if keep {
+            listView.layoutSubtreeIfNeeded()
+            scroll.contentView.scroll(to: keepOffset)
+            scroll.reflectScrolledClipView(scroll.contentView)
+            scrollToSelected()
+        } else {
+            scroll.contentView.scroll(to: .zero)
+            scroll.reflectScrolledClipView(scroll.contentView)
+        }
         // 行を作り直しても入力欄は打てるままにする（カーソルの位置は動かさない）
         if panel.isVisible { focusField(caretToEnd: false) }
+    }
+
+    /// 結果が届き直したときに同じ物か見分ける鍵
+    private static func key(_ r: RowItem) -> String {
+        switch r.candidate {
+        case .clip(let c): return "clip:\(c.id)"
+        case .some(let c): return c.path
+        case nil: return "title:" + r.title
+        }
     }
 
     /// results[index] の行まで作る（まだ作っていない見出し・行を順に足す）
@@ -841,6 +871,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     private func hoverRow(_ i: Int) {
         guard !paletteRows, selected != i, results.indices.contains(i) else { return }
         selected = i
+        userMoved = true
         updateSelection()
     }
 
@@ -879,6 +910,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             n = (n + results.count) % results.count
         }
         selected = n
+        userMoved = true
         buildRows(upTo: n + 20)
         updateSelection()
         scrollToSelected()
