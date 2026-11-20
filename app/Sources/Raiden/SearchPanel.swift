@@ -22,18 +22,12 @@ enum PanelStyle {
     static var veil: NSColor { NSColor(white: 1, alpha: CGFloat(0.75 * (1 - transparency))) }
     /// これ以上透けさせるときはガラスを .clear にする
     static let clearGlassAbove = 0.75
-    /// Raiden の色（アイコンの稲妻の藍と、火花の金）
+    /// Raiden の色（アイコンの稲妻の藍）
     static let indigo = NSColor(srgbRed: 0.231, green: 0.204, blue: 0.839, alpha: 1)      // #3B34D6
     static let indigoDeep = NSColor(srgbRed: 0.165, green: 0.141, blue: 0.659, alpha: 1)  // #2A24A8 選んだ行の名前
     static let indigoLabel = NSColor(srgbRed: 0.31, green: 0.29, blue: 0.69, alpha: 1)    // 節の見出し
-    static let gold = NSColor(srgbRed: 0.914, green: 0.698, blue: 0.227, alpha: 1)        // #E9B23A カーソル
-    static let goldDeep = NSColor(srgbRed: 0.84, green: 0.58, blue: 0.10, alpha: 1)       // 白の上の金（見出しの印）
-    /// 入力欄の帯の上の文字
-    static let onBand = NSColor.white
-    static let onBandFaint = NSColor(white: 1, alpha: 0.95)
-    static let onBandFainter = NSColor(white: 1, alpha: 0.8)
-    /// 帯の濃さ: 1 − 0.5 × 透け具合（0 で不透明、既定 0.6 で 0.7、0.9 で 0.55）。後ろのガラスが透けて見える
-    static var bandAlpha: CGFloat { CGFloat(1 - 0.5 * transparency) }
+    /// 入力欄のカーソル・変換中の下線（藍）
+    static let caret = indigo
     static let selection = NSColor(srgbRed: 0.231, green: 0.204, blue: 0.839, alpha: 0.10)
     /// 絞り込みの札（効いている物）の面
     static let pillFill = NSColor(srgbRed: 0.231, green: 0.204, blue: 0.839, alpha: 0.09)
@@ -59,29 +53,29 @@ final class VeilView: NSView {
     }
 }
 
-/// 入力欄の帯（藍のグラデーションに斜めの光）。上の角はパネルの切り抜きで丸くなる
-final class BandView: NSView {
+/// 入力欄の下の光る藍の線（両端は消えていく。藍から紫へ、薄い光をまとう）
+final class GlowLineView: NSView {
     override func draw(_ dirtyRect: NSRect) {
-        let a = PanelStyle.bandAlpha
-        let g = NSGradient(colors: [NSColor(srgbRed: 0.173, green: 0.153, blue: 0.722, alpha: a),   // #2C27B8
-                                    NSColor(srgbRed: 0.294, green: 0.231, blue: 0.878, alpha: a),   // #4B3BE0
-                                    NSColor(srgbRed: 0.424, green: 0.322, blue: 0.949, alpha: a)],  // #6C52F2
-                           atLocations: [0, 0.55, 1], colorSpace: .sRGB)
-        g?.draw(in: bounds, angle: -8)
-        // 斜めの光の筋（稲光）
-        let w = bounds.width, h = bounds.height
-        let sheen = NSBezierPath()
-        sheen.move(to: NSPoint(x: w * 0.40, y: 0)); sheen.line(to: NSPoint(x: w * 0.47, y: 0))
-        sheen.line(to: NSPoint(x: w * 0.53, y: h)); sheen.line(to: NSPoint(x: w * 0.46, y: h)); sheen.close()
+        let line = NSRect(x: 0, y: bounds.midY - 1, width: bounds.width, height: 2)
+        let g = NSGradient(colorsAndLocations:
+            (NSColor(srgbRed: 0.231, green: 0.204, blue: 0.839, alpha: 0), 0),
+            (NSColor(srgbRed: 0.231, green: 0.204, blue: 0.839, alpha: 1), 0.18),
+            (NSColor(srgbRed: 0.416, green: 0.298, blue: 0.941, alpha: 1), 0.6),
+            (NSColor(srgbRed: 0.416, green: 0.298, blue: 0.941, alpha: 0), 1))
         NSGraphicsContext.saveGraphicsState()
-        sheen.addClip()
-        NSGradient(starting: NSColor(white: 1, alpha: 0), ending: NSColor(white: 1, alpha: 0.16))?
-            .draw(in: NSRect(x: w * 0.40, y: 0, width: w * 0.13, height: h), angle: 0)
+        let sh = NSShadow()
+        sh.shadowColor = NSColor(srgbRed: 0.35, green: 0.27, blue: 0.94, alpha: 0.55)
+        sh.shadowBlurRadius = 5
+        sh.shadowOffset = .zero
+        sh.set()
+        NSColor(srgbRed: 0.33, green: 0.25, blue: 0.9, alpha: 0.35).setFill()
+        NSBezierPath(roundedRect: line.insetBy(dx: bounds.width * 0.2, dy: 0), xRadius: 1, yRadius: 1).fill()
         NSGraphicsContext.restoreGraphicsState()
+        g?.draw(in: NSBezierPath(roundedRect: line, xRadius: 1, yRadius: 1), angle: 0)
     }
 }
 
-/// 帯の上の入力欄の編集部品。変換中の文字の下線を白にする（日本語入力が付ける線の太さはそのまま、色だけ変える）
+/// 入力欄の編集部品。変換中の文字の下線を藍にする（日本語入力が付ける線の太さはそのまま、色だけ変える）
 final class BandFieldEditor: NSTextView {
     override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
         let m: NSMutableAttributedString
@@ -92,7 +86,7 @@ final class BandFieldEditor: NSTextView {
             var hasLine = false
             m.enumerateAttribute(.underlineStyle, in: all) { v, _, _ in if v != nil { hasLine = true } }
             if !hasLine { m.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: all) }
-            m.addAttribute(.underlineColor, value: PanelStyle.onBand, range: all)
+            m.addAttribute(.underlineColor, value: PanelStyle.caret, range: all)
         }
         super.setMarkedText(m, selectedRange: selectedRange, replacementRange: replacementRange)
     }
@@ -207,7 +201,7 @@ final class LabelLine: NSView {
     init(_ text: String, symbol name: String, detail: String? = nil, big: Bool = false) {
         super.init(frame: .zero)
         let glyph = NSImageView(image: symbol(name, size: big ? 15 : 10, weight: .semibold) ?? NSImage())
-        glyph.contentTintColor = big ? PanelStyle.subText : PanelStyle.goldDeep
+        glyph.contentTintColor = big ? PanelStyle.subText : PanelStyle.indigoLabel
         let label = NSTextField(labelWithString: text)
         label.font = big ? .systemFont(ofSize: 14, weight: .semibold) : .systemFont(ofSize: 11, weight: .semibold)
         label.textColor = big ? PanelStyle.text : PanelStyle.indigoLabel
@@ -373,7 +367,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     private var heightConstraint: NSLayoutConstraint!
     private var glassView: NSView?
     private var veilView: VeilView?
-    private var bandView: BandView?
+    private var glowLine: GlowLineView?
     /// 入力欄の左の稲妻（# を打ったら光らせる）
     private var boltView: NSImageView?
     /// 前に見た入力欄の # の数（増えたら光らせる）
@@ -457,27 +451,24 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
 
         let glyph = NSImageView(image: symbol("bolt.fill", size: 20, weight: .semibold) ?? NSImage())
         boltView = glyph
-        glyph.contentTintColor = PanelStyle.onBand
+        glyph.contentTintColor = PanelStyle.indigo
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none
         field.font = .systemFont(ofSize: 24, weight: .regular)
-        field.textColor = PanelStyle.onBand
+        field.textColor = PanelStyle.text
         // 入力欄が空のときの案内文: 「Raiden 検索」は薄いグレー、「filter: #」は # の使い方の手がかりとしてさらに薄く小さく
         field.placeholderAttributedString = Self.defaultPlaceholder
         field.delegate = self
         field.cell?.usesSingleLineMode = true
-        // 帯が透けても文字が沈まないよう、帯の上の物に濃い藍の薄い影を付ける（帯の色は変えない）
-        for v in [field, glyph, status, statusIcon] as [NSView] {
-            v.wantsLayer = true
-            v.layer?.shadowColor = NSColor(srgbRed: 0.10, green: 0.08, blue: 0.40, alpha: 1).cgColor
-            v.layer?.shadowOpacity = 0.45
-            v.layer?.shadowRadius = 2
-            v.layer?.shadowOffset = CGSize(width: 0, height: -0.5)
-        }
-        statusIcon.contentTintColor = PanelStyle.onBandFaint
+        // 稲妻の光（# を打ったとき）に使う影。ふだんは見えない
+        glyph.wantsLayer = true
+        glyph.layer?.shadowColor = PanelStyle.indigo.cgColor
+        glyph.layer?.shadowOpacity = 0
+        glyph.layer?.shadowOffset = .zero
+        statusIcon.contentTintColor = PanelStyle.faint
         status.font = .systemFont(ofSize: 12)
-        status.textColor = PanelStyle.onBandFaint
+        status.textColor = PanelStyle.subText
         status.alignment = .right
         let sep = HairlineView()
         for st in [stack, topStack] {
@@ -491,9 +482,9 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     /// 入力欄が空のときの案内文: 「Raiden 検索」は薄いグレー、「filter: #」は # の使い方の手がかりとしてさらに薄く小さく
     static var defaultPlaceholder: NSAttributedString {
         let ph = NSMutableAttributedString(string: "Raiden 検索", attributes: [
-            .foregroundColor: PanelStyle.onBandFaint, .font: NSFont.systemFont(ofSize: 24, weight: .medium)])
+            .foregroundColor: PanelStyle.faint, .font: NSFont.systemFont(ofSize: 24)])
         ph.append(NSAttributedString(string: "   filter: #", attributes: [
-            .foregroundColor: PanelStyle.onBandFainter, .font: NSFont.systemFont(ofSize: 15, weight: .medium),
+            .foregroundColor: NSColor(white: 0.70, alpha: 1), .font: NSFont.systemFont(ofSize: 15),
             .baselineOffset: 2]))
         return ph
     }
@@ -502,7 +493,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     func setPlaceholder(_ text: String?) {
         guard let text else { field.placeholderAttributedString = Self.defaultPlaceholder; return }
         field.placeholderAttributedString = NSAttributedString(string: text, attributes: [
-            .foregroundColor: PanelStyle.onBandFaint, .font: NSFont.systemFont(ofSize: 24)])
+            .foregroundColor: PanelStyle.faint, .font: NSFont.systemFont(ofSize: 24)])
     }
 
     private func setupList(sep: HairlineView, glyph: NSImageView) {
@@ -532,10 +523,10 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         NotificationCenter.default.addObserver(self, selector: #selector(listScrolled(_:)),
                                                name: NSView.boundsDidChangeNotification, object: scroll.contentView)
 
-        let band = BandView()
-        bandView = band
-        sep.isHidden = true   // 帯の下端が区切りになる
-        for v in [veil, band, glyph, field, statusIcon, status, sep, topStack, scroll] as [NSView] {
+        let glow = GlowLineView()
+        glowLine = glow
+        sep.isHidden = true   // 区切りは光る線
+        for v in [veil, glow, glyph, field, statusIcon, status, sep, topStack, scroll] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(v)
         }
@@ -544,8 +535,8 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         NSLayoutConstraint.activate([
             veil.topAnchor.constraint(equalTo: content.topAnchor), veil.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             veil.leadingAnchor.constraint(equalTo: content.leadingAnchor), veil.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            band.topAnchor.constraint(equalTo: content.topAnchor), band.heightAnchor.constraint(equalToConstant: Self.fieldHeight),
-            band.leadingAnchor.constraint(equalTo: content.leadingAnchor), band.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            glow.centerYAnchor.constraint(equalTo: content.topAnchor, constant: Self.fieldHeight), glow.heightAnchor.constraint(equalToConstant: 14),
+            glow.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18), glow.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
             glyph.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 22),
             glyph.centerYAnchor.constraint(equalTo: content.topAnchor, constant: Self.fieldHeight / 2),
             field.leadingAnchor.constraint(equalTo: glyph.trailingAnchor, constant: 12),
@@ -602,7 +593,6 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         }
         effectView?.material = t >= 0.5 ? .underWindowBackground : .popover
         veilView?.needsDisplay = true
-        bandView?.needsDisplay = true
     }
 
     /// クリップボードの履歴の状態で出す（専用のキー）。出ていれば履歴の状態に切り替える
@@ -1030,18 +1020,18 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         lastHashCount = field.stringValue.reduce(0) { $0 + ($1 == "#" || $1 == "＃" ? 1 : 0) }
     }
 
-    /// 稲妻をピカッと光らせる（0.9 秒）。稲妻の白い光が広がって消え、印が大きくなって戻る。
+    /// 稲妻をピカッと光らせる（0.9 秒）。稲妻のまわりに藍の光が広がって消え、印が大きくなって戻る。
     /// 「視差効果を減らす」がオンなら大きさは変えず光だけ
     func flashBolt() {
         guard let v = boltView, let l = v.layer else { return }
         let dur = 0.9
         let glow = CAAnimationGroup()
         let color = CABasicAnimation(keyPath: "shadowColor")
-        color.fromValue = NSColor.white.cgColor; color.toValue = NSColor.white.cgColor
+        color.fromValue = PanelStyle.indigo.cgColor; color.toValue = PanelStyle.indigo.cgColor
         let radius = CAKeyframeAnimation(keyPath: "shadowRadius")
         radius.values = [2, 20, 16, 4]; radius.keyTimes = [0, 0.15, 0.45, 1]
         let opacity = CAKeyframeAnimation(keyPath: "shadowOpacity")
-        opacity.values = [0.45, 1, 1, 0]; opacity.keyTimes = [0, 0.12, 0.45, 1]
+        opacity.values = [0, 0.9, 0.9, 0]; opacity.keyTimes = [0, 0.12, 0.45, 1]
         var parts: [CAAnimation] = [color, radius, opacity]
         if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             // 層の基準点は左下なので、真ん中を中心に大きくする
@@ -1089,14 +1079,13 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
 
     func windowDidResignKey(_ notification: Notification) { hide() }
 
-    /// 入力欄の編集部品。帯の上なのでカーソルは白、選んだ文字は白く透かす
+    /// 入力欄の編集部品。カーソルと変換中の下線は藍
     private lazy var bandEditor: NSTextView = {
         let tv = BandFieldEditor()
         tv.isFieldEditor = true
-        tv.insertionPointColor = PanelStyle.onBand
-        tv.selectedTextAttributes = [.backgroundColor: NSColor(white: 1, alpha: 0.28), .foregroundColor: PanelStyle.onBand]
-        tv.markedTextAttributes = [.underlineStyle: NSUnderlineStyle.single.rawValue, .underlineColor: PanelStyle.onBand,
-                                   .foregroundColor: PanelStyle.onBand]
+        tv.insertionPointColor = PanelStyle.caret
+        tv.selectedTextAttributes = [.backgroundColor: NSColor(srgbRed: 0.231, green: 0.204, blue: 0.839, alpha: 0.18)]
+        tv.markedTextAttributes = [.underlineStyle: NSUnderlineStyle.single.rawValue, .underlineColor: PanelStyle.caret]
         return tv
     }()
 

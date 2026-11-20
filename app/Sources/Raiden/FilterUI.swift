@@ -44,7 +44,7 @@ final class FilterInput {
         self.panel = panel
         self.field = field
         ghostLabel.font = field.font
-        ghostLabel.textColor = NSColor(white: 1, alpha: 0.58)   // 打った文字（白）と見分けられる薄さ
+        ghostLabel.textColor = NSColor(white: 0.62, alpha: 1)
         ghostLabel.lineBreakMode = .byClipping
         ghostLabel.isHidden = true
         content.addSubview(ghostLabel)
