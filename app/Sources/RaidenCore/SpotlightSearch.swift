@@ -10,7 +10,8 @@ import Foundation
 ///   #kind       kMDItemContentTypeTree（種類ごとの UTI）か、kMDItemFSName の末尾（拡張子）
 ///   #ext        kMDItemFSName の末尾（"*.pdf"c）
 ///   #type       kMDItemContentType == public.folder か、その否定
-///   #date       kMDItemLastUsedDate・kMDItemContentModificationDate・kMDItemDateAdded・kMDItemContentCreationDate のどれかが範囲に入る
+///   #date       kMDItemLastUsedDate・kMDItemContentModificationDate・kMDItemDateAdded・kMDItemContentCreationDate のどれかが範囲に入る物を問い合わせ、
+///               結果は一番新しい日が範囲に入る物だけ残す（QueryFilters.dateHit。昨日作って今日上書きした物は「今日」）
 ///   #modified   kMDItemContentModificationDate、#created は kMDItemContentCreationDate
 ///   #path       「~/」「/」で始まればそこを検索の範囲（searchScopes）に。名前なら、名前にそれを含むフォルダを Spotlight で引いて範囲にする
 ///   #with X     X の kMDItemLastUsedDate の前後 withWindow 秒に使った物。Raiden から開いた記録の co_used の線の重みで加点し、X 自身は外す
@@ -474,10 +475,7 @@ public final class SpotlightSearch: @unchecked Sendable {
             // 名前と種類は上で見たので外す（Spotlight の表示名でも当たりにする・UTI の種類も当たりにするため）
             if !f.without(.name).without(.kind).matches(e) { return false }
         } else {
-            for (c, rg) in req.dates {
-                let ts: [Int] = c == .modified ? [e.mtime] : c == .created ? [e.created] : [e.lastUsed, e.mtime, e.added, e.created]
-                if !ts.contains(where: { $0 > 0 && rg.contains($0) }) { return false }
-            }
+            for (c, rg) in req.dates where !QueryFilters.dateHit(c, e, rg) { return false }
             for pn in req.pathNames where !QueryFilters.isUnder(e.path, pn) { return false }
         }
         return true

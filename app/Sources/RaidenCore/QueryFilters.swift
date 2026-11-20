@@ -413,6 +413,18 @@ public struct QueryFilters: Sendable {
 
     /// ファイル・フォルダが条件に当てはまるか（候補の絞り込みも、値の候補の件数も、この関数で数える）。
     /// #with・#near は見ない（手元の一覧では決められない。土台の側で絞る）
+    /// 期間に当たるか。#modified は変更日、#created は作成日。#date は最後に触った日（使った日・変更日・追加日・作成日の一番新しい物）。
+    /// 「どれか 1 つ」にすると、昨日作って今日上書きした物が「昨日」にも出てしまう
+    public static func dateHit(_ cmd: Command, _ e: FileEntry, _ r: ClosedRange<Int>) -> Bool {
+        let t: Int
+        switch cmd {
+        case .modified: t = e.mtime
+        case .created: t = e.created
+        default: t = max(e.lastUsed, e.mtime, e.added, e.created)
+        }
+        return t > 0 && r.contains(t)
+    }
+
     public func matches(_ e: FileEntry, keys k0: FileKeys? = nil) -> Bool {
         if !types.isEmpty && !types.contains(e.isDir ? "d" : "f") { return false }
         let k = k0 ?? FileKeys(e)
@@ -422,15 +434,7 @@ public struct QueryFilters: Sendable {
             } else if kinds.isDisjoint(with: e.families) && !kindExts.contains(k.ext) { return false }
         }
         if !exts.isEmpty && (e.isDir || !exts.contains(k.ext)) { return false }
-        for (cmd, d) in dates {
-            let ts: [Int]
-            switch cmd {
-            case .modified: ts = [e.mtime]
-            case .created: ts = [e.created]
-            default: ts = [e.lastUsed, e.mtime, e.added, e.created]   // 使った日・変更日・追加日・作成日のどれか
-            }
-            if !ts.contains(where: { $0 > 0 && d.range.contains($0) }) { return false }
-        }
+        for (cmd, d) in dates where !Self.dateHit(cmd, e, d.range) { return false }
         if !paths.isEmpty && !paths.contains(where: { Self.isUnder(e.path, $0, parentKey: k.parent) }) { return false }
         if !names.isEmpty && !names.contains(where: { k.name.contains($0) }) { return false }
         return true
