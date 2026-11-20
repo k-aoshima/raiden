@@ -170,11 +170,13 @@ final class LabelLine: NSView {
 enum Candidate {
     case app(SearchResult)
     case file(FileResult)
+    case clip(ClipItem)
 
     var path: String {
         switch self {
         case .app(let r): return r.app.path
         case .file(let r): return r.file.path
+        case .clip: return ""
         }
     }
 }
@@ -204,7 +206,40 @@ struct RowItem {
             sub = RowItem.shortParent(r.file.path)
             hint = r.file.isDir ? RowItem.folderHint : RowItem.fileHint
             preview = .file(r.file.path)
+        case .clip(let c):
+            title = c.oneLine
+            sub = RowItem.clipSub(c)
+            iconPath = RowItem.appPath(c.source.bundleID)
+            hint = RowItem.clipHint
+            preview = .clip(c)
         }
+    }
+
+    /// 「Safari（窓の名前）· 3分前  → メモ、Slack」
+    static func clipSub(_ c: ClipItem) -> String {
+        var s = c.source.app.isEmpty ? "不明なアプリ" : c.source.app
+        if !c.source.title.isEmpty { s += "「\(c.source.title)」" }
+        s += " · " + ago(c.source.at)
+        var dest: [String] = []
+        for p in c.pastes where !p.app.isEmpty && !dest.contains(p.app) { dest.append(p.app) }
+        if !dest.isEmpty { s += "  → " + dest.prefix(3).joined(separator: "、") }
+        return s
+    }
+
+    static func appPath(_ bundleID: String) -> String? {
+        guard !bundleID.isEmpty else { return nil }
+        return NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)?.path
+    }
+
+    /// 「たった今」「3分前」「2時間前」「昨日」「11/14」
+    static func ago(_ d: Date, now: Date = Date()) -> String {
+        let s = Int(now.timeIntervalSince(d))
+        if s < 60 { return "たった今" }
+        if s < 3600 { return "\(s / 60)分前" }
+        if Calendar.current.isDateInToday(d) { return "\(s / 3600)時間前" }
+        if Calendar.current.isDateInYesterday(d) { return "昨日" }
+        let f = DateFormatter(); f.locale = Locale(identifier: "ja_JP"); f.dateFormat = "M/d"
+        return f.string(from: d)
     }
 
     init(title: String, sub: String, iconPath: String? = nil, iconImage: NSImage? = nil, hint: String, preview: PreviewTarget? = nil) {
@@ -213,10 +248,12 @@ struct RowItem {
     }
 
     var isFile: Bool { if case .file = preview { return true } else { return false } }
+    var isClip: Bool { if case .clip = preview { return true } else { return false } }
 
     static let appHint = "↩ 開く　⌘↩ Finder"
     static let fileHint = "↩ 開く　⌘↩ Finder に表示"
     static let folderHint = "↩ Finder で開く　⌘↩ 場所を表示"
+    static let clipHint = "↩ 貼り付け　⌘↩ コピーだけ"
 
     /// 親フォルダまでのパスを ~ で短くする（~/Documents/仕事）
     static func shortParent(_ path: String) -> String {
@@ -282,6 +319,8 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     /// (入力, 候補, ⌘ を押していたか)。⌘Enter は Finder に表示
     var onOpen: ((String, Candidate, Bool) -> Void)?
     var onHide: (() -> Void)?
+    /// 入力欄を出す直前に前面にあったアプリ（履歴から貼るときに戻す先）
+    private(set) var previousApp: NSRunningApplication?
 
     override init() {
         panel = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: Self.width, height: Self.fieldHeight),
@@ -475,10 +514,17 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         veilView?.needsDisplay = true
     }
 
+    /// クリップボードの履歴の状態で出す（専用のキー）。出ていれば履歴の状態に切り替える
+    func showClipboard() {
+        if !panel.isVisible || hiding { show() }
+        filterInput.beginClip()
+    }
+
     func show() {
         field.stringValue = ""
         filterInput.reset()
         setResults([], query: "")
+        if let f = NSWorkspace.shared.frontmostApplication, f.bundleIdentifier != Bundle.main.bundleIdentifier { previousApp = f }
         NSApp.activate(ignoringOtherApps: true)
         hiding = false
         // Spotlight のように、少し小さく薄い状態から 0.18 秒でふわっと出す。
@@ -800,7 +846,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     /// 今の候補で広げたいか（ファイルの行がある・絞り込みの一覧ではない・設定がオン・画面が広い）
     private var wantsWide: Bool {
         // 選んでいる行がファイル・フォルダの時だけ（アプリの行ではプレビューを出さない）
-        Self.previewEnabled && !paletteRows && Self.screenFitsPreview && results.indices.contains(selected) && results[selected].isFile
+        Self.previewEnabled && !paletteRows && Self.screenFitsPreview && results.indices.contains(selected) && (results[selected].isFile || results[selected].isClip)
     }
 
     private func updatePreview() {

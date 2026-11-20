@@ -31,10 +31,19 @@ protocol SettingsHost: AnyObject {
     func previewTransparency(_ t: Double)
     /// 検索の記録から数えた「#」のよく使う組み合わせ（学習タブに出す）
     func filterCombos() -> [FilterMemory.Combo]
+    /// クリップボードの履歴を開くキー
+    var clipHotKeyLabel: String { get }
+    func applyClipHotKey(_ hk: RaidenSettings.HotKeySetting?) -> String?
+    func clipCount() -> Int
+    func clearClips()
 }
 
 extension SettingsHost {
     func filterCombos() -> [FilterMemory.Combo] { [] }
+    var clipHotKeyLabel: String { "⌥V" }
+    func applyClipHotKey(_ hk: RaidenSettings.HotKeySetting?) -> String? { nil }
+    func clipCount() -> Int { 0 }
+    func clearClips() {}
 }
 
 /// 左の一覧の 1 行（アイコン＋名前）。選択中は面の色だけ
@@ -97,6 +106,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
     /// 学習タブの辞書・保存した絞り込みの編集中の値（SettingsLearning.swift）
     let learningState = LearningPaneState()
     private var hotKeyMessage: String?
+    private var clipKeyMessage: String?
     private var rebuildPending = false
 
     init(host: SettingsHost) {
@@ -492,6 +502,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
                     trailing: [sSwitch(s.showPreview) { [weak self] on in self?.host?.updateSettings { $0.showPreview = on } }]),
         ]))
         out.append(spacer(4))
+        out += clipboardSection(s)
+        out.append(spacer(4))
         out.append(sectionTitle("動作", symbol: "gearshape.2"))
         out.append(card([
             formRow("power", "ログイン時に起動", trailing: [login]),
@@ -601,6 +613,68 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
         let l = sLabel(s, size: 10, weight: .semibold, color: SettingsStyle.warn)
         let v = BannerTag(label: l)
         return v
+    }
+
+    /// クリップボードの履歴（オンオフ・開くキー・残す件数・全部消す）
+    private func clipboardSection(_ s: RaidenSettings) -> [NSView] {
+        guard let host else { return [] }
+        let rec = HotKeyRecorder(label: host.clipHotKeyLabel)
+        rec.onBegin = { [weak self] in self?.host?.suspendHotKey(true) }
+        rec.onEnd = { [weak self] in self?.host?.suspendHotKey(false) }
+        rec.onRecord = { [weak self] hk in
+            guard let self, let host = self.host else { return }
+            if HotKeyInfo.conflictsWithSystem(keyCode: hk.keyCode, modifiers: hk.modifiers) {
+                self.clipKeyMessage = "\(hk.label) はシステムのショートカットと重なっています。別のキーにしてください"
+            } else if hk.keyCode == HotKeyInfo.currentMain(host).keyCode && hk.modifiers == HotKeyInfo.currentMain(host).modifiers {
+                self.clipKeyMessage = "\(hk.label) は入力欄を開くキーと同じです。別のキーにしてください"
+            } else {
+                self.clipKeyMessage = host.applyClipHotKey(hk)
+            }
+            self.reload()
+        }
+        let reset = sButton("初期値に戻す", symbol: "arrow.uturn.backward", small: true) { [weak self] in
+            self?.clipKeyMessage = self?.host?.applyClipHotKey(nil)
+            self?.reload()
+        }
+        let keeps = [100, 300, 500, 1000, 3000]
+        let keep = sPopup(keeps.map { "\($0) 件" }, selected: keeps.firstIndex(of: s.clipKeep) ?? 2) { [weak self] i in
+            self?.host?.updateSettings { $0.clipKeep = keeps[i] }
+        }
+        var rows: [NSView] = [
+            formRow("doc.on.clipboard", "コピーした文字を覚える",
+                    detail: "どのアプリ・窓でコピーしたか、どこに貼ったかも残します。パスワード管理アプリの物は覚えません",
+                    trailing: [sSwitch(s.clipboard) { [weak self] on in self?.host?.updateSettings { $0.clipboard = on } }]),
+            formRow("keyboard", "履歴を開くキー", detail: "↩ で前のアプリに貼り付け、⌘↩ でコピーだけ。入力欄で #clip と打っても開けます",
+                    trailing: [rec, reset], height: 56),
+        ]
+        if let m = clipKeyMessage {
+            let b = BannerView()
+            b.label.stringValue = m
+            let wrap = NSView()
+            wrap.translatesAutoresizingMaskIntoConstraints = false
+            wrap.addSubview(b)
+            NSLayoutConstraint.activate([
+                b.topAnchor.constraint(equalTo: wrap.topAnchor, constant: 2), b.bottomAnchor.constraint(equalTo: wrap.bottomAnchor, constant: -8),
+                b.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: 12), b.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -12),
+            ])
+            rows.append(wrap)
+        }
+        rows.append(formRow("archivebox", "残す件数", detail: "これより古い物は自動で消します", trailing: [keep]))
+        rows.append(formRow("trash", "履歴を全部消す", detail: "今 \(Self.num(host.clipCount())) 件",
+                            trailing: [sButton("全部消す", symbol: "trash", small: true) { [weak self] in self?.confirmClearClips() }]))
+        return [sectionTitle("クリップボード", symbol: "doc.on.clipboard"), card(rows)]
+    }
+
+    private func confirmClearClips() {
+        let a = NSAlert()
+        a.messageText = "クリップボードの履歴を全部消しますか？"
+        a.informativeText = "覚えた文字とコピー元・貼った先の記録が消え、元に戻せません。"
+        a.addButton(withTitle: "全部消す")
+        a.addButton(withTitle: "やめる")
+        a.alertStyle = .warning
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        host?.clearClips()
+        reload()
     }
 
     private func confirmClearLog() {

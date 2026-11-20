@@ -272,5 +272,48 @@ func runFilterLearningTests(ctx: FilterContext) -> (Int, Int) {
     }
     expect(FilterCompletion.extractCommitted("#alias 黒い画面 ", now: testNow) == nil, "#alias の言い方はチップにしない")
     PhraseDictionary.set([])
+
+    print("== クリップボードの履歴（#clip）")
+    expect(QueryFilters.clipText("#clip ") == "" && QueryFilters.clipText("#cb 請求 書") == "請求 書" && QueryFilters.clipText("＃コピー x") == "x",
+           "#clip・#cb・＃コピー の後ろの言葉")
+    expect(QueryFilters.clipText("#clipboard") == nil && QueryFilters.clipText("clip") == nil && QueryFilters.clipText("#ext pdf") == nil, "ほかは nil")
+    let cp = p("#clip 請求")
+    expect(cp.notes.isEmpty && !cp.isActive, "#clip は使えないと知らせず、絞り込みにもしない \(cp.notes)")
+    expect(p("#cl").notes.isEmpty, "打ちかけ（#cl）は知らせない")
+    if let pa = pal("#cl"), let it = pa.items.first(where: { $0.title == "#clip" }) {
+        expect(FilterCompletion.accept(it, palette: pa, text: "#cl").text == "#clip ", "一覧から #clip を選ぶと「#clip 」")
+    } else { expect(false, "#cl の一覧に #clip") }
+    expect(FilterCompletion.extractCommitted("#clip 請求 ", now: testNow) == nil, "#clip の言葉はチップにしない")
+    let ctmp = FileManager.default.temporaryDirectory.appendingPathComponent("raiden-clip-test-\(getpid()).sqlite")
+    if let st = try? Store(url: ctmp) {
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        func src(_ app: String, _ title: String, _ dt: TimeInterval) -> ClipItem.Place {
+            .init(bundleID: "com.example.\(app)", app: app, title: title, at: t0.addingTimeInterval(dt))
+        }
+        let a = st.addClip("請求書 No.123", source: src("Safari", "見積もり", 0), keep: 3)
+        _ = st.addClip("ねこ", source: src("メモ", "", 10), keep: 3)
+        _ = st.addClip("   \n ", source: src("メモ", "", 11), keep: 3)
+        _ = st.addClip(String(repeating: "x", count: Store.clipMaxBytes + 1), source: src("メモ", "", 12), keep: 3)
+        expect(st.clipCount() == 2, "空白だけ・長すぎる物は覚えない \(st.clipCount())")
+        let a2 = st.addClip("請求書 No.123", source: src("Slack", "経理", 20), keep: 3)
+        let all = st.clips(matching: "")
+        expect(a == a2 && all.map(\.text) == ["請求書 No.123", "ねこ"] && all.first?.count == 2 && all.first?.source.app == "Slack",
+               "同じ文字は一番上に上げてコピー元を新しく \(all.map(\.text)) \(all.first?.source.app ?? "")")
+        if let a {
+            st.recordPaste(clip: a, to: src("メール", "返信", 30))
+            st.recordPaste(clip: a, to: src("Numbers", "", 40))
+        }
+        let hit = st.clips(matching: "せいきゅう 123")
+        expect(hit.isEmpty, "読みでは当てない（文字の一致だけ）")
+        let h2 = st.clips(matching: "請求 123")
+        expect(h2.count == 1 && h2.first?.pastes.map(\.app) == ["Numbers", "メール"], "言葉を全部含む物・貼った先は新しい順 \(h2.first?.pastes.map(\.app) ?? [])")
+        expect(st.clips(matching: "slack").count == 1, "コピー元のアプリの名前でも当たる")
+        _ = st.addClip("1", source: src("A", "", 50), keep: 3)
+        _ = st.addClip("2", source: src("A", "", 60), keep: 3)
+        expect(st.clips(matching: "").map(\.text) == ["2", "1", "請求書 No.123"], "keep 件を超えた古い物を消す")
+        st.clearClips()
+        expect(st.clipCount() == 0 && st.clips(matching: "").isEmpty, "全部消す")
+    } else { expect(false, "一時の Store を作れない") }
+    for suf in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: ctmp.path + suf) }
     return (checks, failures)
 }

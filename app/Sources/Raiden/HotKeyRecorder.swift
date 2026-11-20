@@ -7,6 +7,12 @@ enum HotKeyInfo {
     static let defaultKey = RaidenSettings.HotKeySetting(keyCode: UInt32(kVK_Space), modifiers: UInt32(optionKey), label: "⌥Space")
     static let fallbackKey = RaidenSettings.HotKeySetting(keyCode: UInt32(kVK_Space),
                                                           modifiers: UInt32(controlKey | optionKey | cmdKey), label: "⌃⌥⌘Space")
+    /// クリップボードの履歴を開くキー（⌥V。取れなければ ⌃⌥V）
+    static let clipDefaultKey = RaidenSettings.HotKeySetting(keyCode: UInt32(kVK_ANSI_V), modifiers: UInt32(optionKey), label: "⌥V")
+    static let clipFallbackKey = RaidenSettings.HotKeySetting(keyCode: UInt32(kVK_ANSI_V), modifiers: UInt32(controlKey | optionKey), label: "⌃⌥V")
+
+    /// 今の入力欄を開くキー（設定が無ければ初期値）
+    static func currentMain(_ host: SettingsHost) -> RaidenSettings.HotKeySetting { host.settings.hotKey ?? defaultKey }
 
     static func carbonModifiers(_ f: NSEvent.ModifierFlags) -> UInt32 {
         var m: UInt32 = 0

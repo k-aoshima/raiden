@@ -9,6 +9,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private let panel = SearchPanelController()
     private var hotKey: HotKey?
+    /// クリップボードの履歴を開くキー
+    private var clipHotKey: HotKey?
+    private(set) var clipHotKeyLabel = ""
+    private var clipWatcher: ClipboardWatcher?
     private(set) var hotKeyLabel = ""
     private var engine: Engine?
     /// 値の候補の件数と最近使った物（Spotlight で裏で数える）
@@ -98,6 +102,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if old.savedFilters != s.savedFilters { SavedFilters.set(s.savedFilters) }
         if old.dictionary != s.dictionary { PhraseDictionary.set(s.dictionary) }
         if old.logDays != s.logDays { pruneSearchLog() }
+        if old.clipboard != s.clipboard {
+            if s.clipboard { clipWatcher?.start() } else { clipWatcher?.stop() }
+            rlog("クリップボードの履歴を\(s.clipboard ? "オン" : "オフ")")
+        }
         if old.excludeFolders != s.excludeFolders || old.excludeNames != s.excludeNames {
             rlog("除外を変更 フォルダ \(s.excludeFolders) 名前 \(s.excludeNames)")
         }
@@ -143,6 +151,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self?.rescan()
                 }
                 self.pruneSearchLog()
+                self.clipWatcher = ClipboardWatcher(store: store) { [weak self] in self?.settings.clipKeep ?? 500 }
+                if self.settings.clipboard { self.clipWatcher?.start() }
             }
         } catch {
             rlogError("起動に失敗 \(error)")
@@ -165,7 +175,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func setupHotKey() {
         registerHotKey()
-        rlog("ホットキー \(hotKeyLabel)")
+        registerClipHotKey()
+        rlog("ホットキー \(hotKeyLabel)  クリップボード \(clipHotKeyLabel)")
+    }
+
+    /// クリップボードの履歴を開くキー。設定が無ければ ⌥V、取れなければ ⌃⌥V
+    @discardableResult
+    private func registerClipHotKey() -> Bool {
+        clipHotKey = nil
+        let candidates = settings.clipHotKey.map { [$0] } ?? [HotKeyInfo.clipDefaultKey, HotKeyInfo.clipFallbackKey]
+        for c in candidates {
+            if let hk = HotKey(keyCode: c.keyCode, modifiers: c.modifiers, action: { [weak self] in self?.toggleClipboard() }) {
+                clipHotKey = hk
+                clipHotKeyLabel = c.label
+                return true
+            }
+        }
+        if settings.clipHotKey != nil {
+            rlogError("クリップボードのキー \(settings.clipHotKey!.label) を登録できなかったので初期値に戻す")
+            settings.clipHotKey = nil
+            return registerClipHotKey()
+        }
+        clipHotKeyLabel = ""
+        return false
+    }
+
+    func applyClipHotKey(_ hk: RaidenSettings.HotKeySetting?) -> String? {
+        let before = settings.clipHotKey
+        updateSettings { $0.clipHotKey = hk }
+        if registerClipHotKey() && (hk == nil || clipHotKeyLabel == hk!.label) {
+            rlog("クリップボードのキーを変更 \(clipHotKeyLabel)")
+            return nil
+        }
+        updateSettings { $0.clipHotKey = before }
+        registerClipHotKey()
+        return "\(hk?.label ?? "") はほかのアプリが使っていて登録できませんでした。別のキーにしてください"
+    }
+
+    /// クリップボードの履歴の状態で入力欄を出す。履歴を出している時にもう一度押したら閉じる
+    private func toggleClipboard() {
+        if panel.isVisible && panel.filterInput.clipMode { panel.hide(); return }
+        let wasVisible = panel.isVisible
+        clipWatcher?.startKeyMonitor()
+        panel.showClipboard()
+        if !wasVisible { session = Session() }
     }
 
     /// 設定のホットキーを登録する。設定が無ければ ⌥Space、取れなければ ⌃⌥⌘Space に逃げる。
@@ -213,13 +266,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// キーを押して登録している間は、今のホットキーを外す（同じキーを押しても入力欄が開かないように）
     func suspendHotKey(_ on: Bool) {
-        if on { hotKey = nil } else if hotKey == nil { registerHotKey() }
+        if on { hotKey = nil; clipHotKey = nil } else {
+            if hotKey == nil { registerHotKey() }
+            if clipHotKey == nil { registerClipHotKey() }
+        }
     }
 
     private func toggle() {
         if panel.isVisible { panel.hide(); return }
         panel.show()
         session = Session()
+        clipWatcher?.startKeyMonitor()
         filterSource?.refreshRecent()
     }
 
@@ -239,6 +296,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             session = s
         }
         if q.isEmpty { panel.setResults([], query: q); return }
+        if let words = QueryFilters.clipText(q) { queryClips(words, q: q, generation: g); return }
         let order = settings.sectionOrder
         let item = DispatchWorkItem { [weak self] in
             self?.work.async {
@@ -266,6 +324,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         pendingQuery = item
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.debounce, execute: item)
+    }
+
+    /// クリップボードの履歴（新しい順。言葉があれば文字とコピー元のアプリの名前で絞る）
+    private func queryClips(_ words: String, q: String, generation g: Int) {
+        guard let store else { return }
+        let on = settings.clipboard
+        work.async { [weak self] in
+            let items = store.clips(matching: words)
+            DispatchQueue.main.async {
+                guard let self, g == self.generation else { return }
+                var sec = ResultSection(title: "クリップボード", symbol: "doc.on.clipboard", items: items.map { RowItem(.clip($0)) })
+                if items.isEmpty {
+                    sec.items = [RowItem(title: on ? (words.isEmpty ? "まだ履歴がありません" : "見つかりません") : "クリップボードの履歴はオフです",
+                                         sub: on ? "文字をコピーするとここに出ます" : "設定 → 一般 でオンにできます",
+                                         iconImage: NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: nil), hint: "")]
+                }
+                self.panel.setResults([sec], query: q)
+            }
+        }
     }
 
     struct Sections {
@@ -330,6 +407,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         finishSession(chosen: c)
         let ws = NSWorkspace.shared
         switch c {
+        case .clip(let item):
+            // ↩ は前のアプリに戻して貼る、⌘↩ はコピーだけ
+            clipWatcher?.use(item, paste: !reveal, target: panel.previousApp)
         case .app(let r):
             if reveal {
                 ws.selectFile(r.app.path, inFileViewerRootedAtPath: "")
@@ -375,11 +455,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func finishSession(chosen: Candidate?) {
         guard let s = session else { return }
         session = nil
-        guard settings.logSearches, !s.query.isEmpty, let store else { return }
+        // クリップボードの履歴は中身が残るので検索の記録に書かない
+        guard settings.logSearches, !s.query.isEmpty, QueryFilters.clipText(s.query) == nil, let store else { return }
         func info(_ c: Candidate) -> (String, String, String, Float) {
             switch c {
             case .app(let r): return ("app", r.app.key, r.app.jp, r.score)
             case .file(let r): return (r.file.isDir ? "folder" : "file", r.file.path, r.file.name, r.score)
+            case .clip(let c): return ("clip", String(c.id), "", 0)
             }
         }
         let cands = s.shown.map { c, sec -> SearchLogEntry.Candidate in
@@ -533,6 +615,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 // MARK: - 設定窓の口
 
 extension AppDelegate: SettingsHost {
+    func clipCount() -> Int { store?.clipCount() ?? 0 }
+    func clearClips() { store?.clearClips(); rlog("クリップボードの履歴を全部消した") }
+
     var loginOn: Bool { LoginItem.isOn }
 
     func setLogin(_ on: Bool) {

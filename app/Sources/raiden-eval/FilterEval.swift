@@ -103,8 +103,8 @@ func runFilterTests() {
     func pal(_ t: String, committed: [String] = [], ctx: FilterContext? = nil) -> FilterCompletion.Palette? {
         FilterCompletion.palette(for: t, committed: committed, context: ctx, now: testNow)
     }
-    expect(pal("#")?.mode == .commands && pal("#")?.items.filter { $0.commits.isEmpty && $0.title != "#alias" }.count == FilterCompletion.commandItems.count
-           && pal("#")?.items.last?.title == "#alias", "「#」で全部の一覧（最後に #alias）")
+    expect(pal("#")?.mode == .commands && pal("#")?.items.filter { $0.commits.isEmpty && $0.title != "#alias" && $0.title != "#clip" }.count == FilterCompletion.commandItems.count
+           && pal("#")?.items.last?.title == "#alias", "「#」で全部の一覧（#clip と、最後に #alias）")
     expect(pal("請求書 #")?.mode == .commands, "空白の直後の「#」")
     expect(pal("＃")?.mode == .commands && pal("＃da")?.items.map(\.title) == ["#date"], "全角の「＃」でも一覧")
     expect(pal("C#") == nil && pal("#1") == nil, "「C#」「#1」は一覧を出さない")

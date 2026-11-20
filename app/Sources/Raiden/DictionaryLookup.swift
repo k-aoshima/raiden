@@ -27,8 +27,10 @@ enum DictionaryLookup {
         return out
     }
 
-    static func entry(phrase: String, _ c: Candidate) -> DictEntry {
+    /// 辞書の行き先にできない候補（クリップボードの履歴）なら nil
+    static func entry(phrase: String, _ c: Candidate) -> DictEntry? {
         switch c {
+        case .clip: return nil
         case .app(let r): return DictEntry(phrase: phrase, target: .app, key: r.app.path, name: r.app.jp)
         case .file(let r): return DictEntry(phrase: phrase, target: .file, key: r.file.path, name: r.file.name)
         }

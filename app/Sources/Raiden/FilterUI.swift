@@ -37,6 +37,8 @@ final class FilterInput {
     var now: () -> Date = { Date() }
 
     var isPickingAlias: Bool { aliasPhrase != nil }
+    /// クリップボードの履歴を出している間（専用のキーか #clip）。入力欄の文字で履歴を絞る
+    private(set) var clipMode = false
 
     func attach(_ panel: SearchPanelController, field: NSTextField, content: NSView) {
         self.panel = panel
@@ -57,6 +59,7 @@ final class FilterInput {
         notice = nil
         aliasPhrase = nil
         aliasBackup = nil
+        clipMode = false
         ghostLabel.isHidden = true
         panel?.setPlaceholder(nil)
     }
@@ -66,6 +69,7 @@ final class FilterInput {
     /// #alias の行き先を選んでいる間は入力欄の文字（空なら言い方そのもの）で探す
     var currentQuery: String {
         let text = field?.stringValue ?? ""
+        if clipMode { return "#clip " + text.trimmingCharacters(in: .whitespacesAndNewlines) }
         if let a = aliasPhrase {
             let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
             return t.isEmpty ? a : t
@@ -82,7 +86,7 @@ final class FilterInput {
     func textDidChange() {
         guard let field else { return }
         notice = nil
-        if aliasPhrase == nil, let ex = FilterCompletion.extractCommitted(field.stringValue, now: now()) {
+        if aliasPhrase == nil, !clipMode, let ex = FilterCompletion.extractCommitted(field.stringValue, now: now()) {
             committed += ex.commands
             field.stringValue = ex.text
             moveCaretToEnd()
@@ -93,7 +97,13 @@ final class FilterInput {
     /// 一覧を出し直し、出さないときは検索する
     func refresh() {
         guard let field, let panel else { return }
-        if aliasPhrase != nil {
+        // 「#clip 」「#cb 」まで打ったら履歴の状態に切り替える（後ろの言葉はそのまま入力欄に残す）
+        if !clipMode, aliasPhrase == nil, let rest = QueryFilters.clipText(field.stringValue),
+           !rest.isEmpty || field.stringValue.last?.isWhitespace == true {
+            beginClip(rest)
+            return
+        }
+        if aliasPhrase != nil || clipMode {
             palette = nil; ghost = nil; suggestions = []
             updateGhost()
             panel.onQuery?(currentQuery)
@@ -126,6 +136,19 @@ final class FilterInput {
     func handle(_ sel: Selector) -> Bool {
         guard let field, let panel else { return false }
         let atEnd = (field.currentEditor()?.selectedRange.location ?? 0) >= (field.stringValue as NSString).length
+        if clipMode {
+            switch sel {
+            case #selector(NSResponder.cancelOperation(_:)):
+                // 打った言葉があれば消す、無ければ閉じる
+                if field.stringValue.isEmpty { return false }
+                field.stringValue = ""; refresh(); return true
+            case #selector(NSResponder.insertTab(_:)): return true
+            case #selector(NSResponder.deleteBackward(_:)):
+                guard field.stringValue.isEmpty else { return false }
+                endClip(); return true
+            default: return false   // ↑↓ は一覧、Enter は SearchPanelController.openSelected
+            }
+        }
         if aliasPhrase != nil {
             switch sel {
             case #selector(NSResponder.cancelOperation(_:)): cancelAlias(); return true
@@ -247,6 +270,32 @@ final class FilterInput {
         moveCaretToEnd()
     }
 
+    // MARK: クリップボード（専用のキー・#clip）
+
+    /// 履歴の状態にする。チップは外し、入力欄の文字で履歴を絞る
+    func beginClip(_ text: String = "") {
+        guard let field else { return }
+        clipMode = true
+        aliasPhrase = nil; aliasBackup = nil
+        committed = []
+        palette = nil
+        field.stringValue = text
+        notice = nil
+        panel?.setPlaceholder("クリップボードの履歴")
+        refresh()
+        moveCaretToEnd()
+        panel?.focusField()
+    }
+
+    /// 履歴の状態をやめて、ふつうの入力欄に戻る（入力欄が空の Backspace）
+    func endClip() {
+        clipMode = false
+        field?.stringValue = ""
+        panel?.setPlaceholder(nil)
+        refresh()
+        panel?.focusField()
+    }
+
     // MARK: 辞書（#alias）
 
     /// 言い方を決めて、行き先を選ぶ状態にする。入力欄は空にして、打てば名前で絞れる（最初は言い方そのもので探す）
@@ -264,8 +313,7 @@ final class FilterInput {
 
     /// 行き先を選んだとき（SearchPanelController.openSelected から）。辞書に足して元の入力欄に戻る
     func pickAlias(_ c: Candidate) {
-        guard let phrase = aliasPhrase else { return }
-        let e = DictionaryLookup.entry(phrase: phrase, c)
+        guard let phrase = aliasPhrase, let e = DictionaryLookup.entry(phrase: phrase, c) else { return }
         let replaced = onAddDictionary?(e) ?? false
         endAlias()
         notice = DictionaryLookup.message(e, replaced: replaced)
@@ -291,8 +339,7 @@ final class FilterInput {
     @discardableResult
     func addToDictionary(_ c: Candidate) -> String? {
         let phrase = QueryFilters.parse(currentQuery).text.trimmingCharacters(in: .whitespaces)
-        guard !phrase.isEmpty, aliasPhrase == nil else { return nil }
-        let e = DictionaryLookup.entry(phrase: phrase, c)
+        guard !phrase.isEmpty, aliasPhrase == nil, !clipMode, let e = DictionaryLookup.entry(phrase: phrase, c) else { return nil }
         let replaced = onAddDictionary?(e) ?? false
         return DictionaryLookup.message(e, replaced: replaced)
     }
@@ -839,6 +886,33 @@ enum FocusTest {
             expect(!c.wide && c.panel.frame.width == SearchPanelController.width, "設定を切ると広げない")
             SearchPanelController.previewEnabled = true
         }
+
+        // 14) クリップボードの履歴: 「#clip 」で切り替え、打った言葉で絞る、空の ⌫ で戻る、Esc は言葉を消してから閉じる
+        c = make()
+        var asked: [String] = []
+        c.onQuery = { asked.append($0) }
+        type(c, "#cl")
+        expect(c.filterInput.palette?.items.contains { $0.title == "#clip" } == true && !c.filterInput.clipMode, "「#cl」で一覧に #clip")
+        type(c, "ip ")
+        expect(c.filterInput.clipMode && c.queryText.isEmpty && c.filterInput.palette == nil, "「#clip 」で履歴の状態「\(c.queryText)」")
+        type(c, "請求")
+        expect(c.filterInput.currentQuery == "#clip 請求" && asked.last == "#clip 請求" && focused(c), "打った言葉で履歴を探す \(asked.last ?? "")")
+        let clip = ClipItem(id: 1, text: "請求書\nNo.123", source: .init(bundleID: "com.apple.Safari", app: "Safari", title: "見積もり", at: Date()),
+                            count: 1, pastes: [.init(bundleID: "com.apple.mail", app: "メール", title: "", at: Date())])
+        c.setResults([ResultSection(title: "クリップボード", symbol: "doc.on.clipboard", items: [RowItem(.clip(clip))])], query: c.filterInput.currentQuery)
+        expect(c.resultCount == 1, "履歴の行")
+        let row = RowItem(.clip(clip))
+        expect(row.title == "請求書 No.123" && row.sub.contains("Safari「見積もり」") && row.sub.contains("→ メール"),
+               "行にコピー元と貼った先「\(row.sub)」")
+        if SearchPanelController.screenFitsPreview { expect(c.wide, "履歴の行は右に全文を出す") }
+        expect(c.filterInput.addToDictionary(.clip(clip)) == nil, "履歴の行は辞書に足さない")
+        key(c, #selector(NSResponder.cancelOperation(_:)))
+        expect(c.filterInput.clipMode && c.queryText.isEmpty, "Esc はまず言葉を消す")
+        key(c, #selector(NSResponder.deleteBackward(_:)))
+        expect(!c.filterInput.clipMode && c.queryText.isEmpty && focused(c), "空の ⌫ でふつうの入力欄に戻る")
+        c = make()
+        c.filterInput.beginClip()
+        expect(c.filterInput.clipMode && c.filterInput.currentQuery == "#clip " && focused(c), "専用のキーの入口（beginClip）")
 
         print("確かめ \(checks - fails)/\(checks)")
         return fails == 0

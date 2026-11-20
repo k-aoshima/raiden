@@ -239,11 +239,13 @@ public struct QueryFilters: Sendable {
             if saveWords.contains(name) { f.pending = "save"; f.saving = toks[(i + 1)...].joined(separator: " "); break }
             // #alias 言い方: 後ろは全部、辞書に足す言い方
             if aliasWords.contains(name) { f.pending = "alias"; f.aliasing = toks[(i + 1)...].joined(separator: " "); break }
+            // #clip: クリップボードの履歴（入力欄が受け取る。後ろは全部、履歴を探す言葉）
+            if clipWords.contains(name) { f.pending = "clip"; break }
             guard let cmd = command(named: name) else {
                 // 打ちかけ（「#da」）は知らせない。空白を打った後や途中にあれば知らせる
                 if isLast && !trailingSpace && (aliases.contains(where: { Describe.normalize($0.0).hasPrefix(Describe.normalize(name)) })
                                                 || isShorthandPrefix(name) || SavedFilters.hasPrefix(name)
-                                                || (saveWords + aliasWords).contains(where: { $0.hasPrefix(name) })) {
+                                                || (saveWords + aliasWords + clipWords).contains(where: { $0.hasPrefix(name) })) {
                     f.pending = name
                 } else {
                     f.notes.append("#\(name) は使えません")

@@ -4,7 +4,8 @@ import Foundation
 /// Carbon の RegisterEventHotKey でグローバルなホットキーを登録する（アクセシビリティの許可は要らない）。
 final class HotKey {
     private var ref: EventHotKeyRef?
-    private var handler: EventHandlerRef?
+    /// イベントの受け口はアプリで 1 つ（キーごとに付けると、キーが 2 つの時に 1 回押して 2 回動く）
+    private static var handler: EventHandlerRef?
     private let action: () -> Void
     private static var all: [UInt32: HotKey] = [:]
     private static var nextID: UInt32 = 1
@@ -15,14 +16,16 @@ final class HotKey {
         self.action = action
         id = HotKey.nextID
         HotKey.nextID += 1
-        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(GetApplicationEventTarget(), { _, event, _ -> OSStatus in
-            var hk = EventHotKeyID()
-            GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
-                              nil, MemoryLayout<EventHotKeyID>.size, nil, &hk)
-            if let k = HotKey.all[hk.id] { DispatchQueue.main.async { k.action() } }
-            return noErr
-        }, 1, &spec, nil, &handler)
+        if HotKey.handler == nil {
+            var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+            InstallEventHandler(GetApplicationEventTarget(), { _, event, _ -> OSStatus in
+                var hk = EventHotKeyID()
+                GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                                  nil, MemoryLayout<EventHotKeyID>.size, nil, &hk)
+                if let k = HotKey.all[hk.id] { DispatchQueue.main.async { k.action() } }
+                return noErr
+            }, 1, &spec, nil, &HotKey.handler)
+        }
         let hkID = EventHotKeyID(signature: OSType(0x5244_4E31), id: id)  // 'RDN1'
         let st = RegisterEventHotKey(keyCode, modifiers, hkID, GetApplicationEventTarget(), 0, &ref)
         if st != noErr || ref == nil { return nil }
@@ -31,7 +34,6 @@ final class HotKey {
 
     deinit {
         if let ref { UnregisterEventHotKey(ref) }
-        if let handler { RemoveEventHandler(handler) }
         HotKey.all[id] = nil
     }
 }

@@ -91,6 +91,10 @@ public struct RaidenSettings: Codable, Equatable, Sendable {
     public var sectionOrder: SectionOrder = .auto
     public var transparency = RaidenSettings.defaultTransparency  // 入力欄と設定窓の透け具合（0 = 白い、0.9 = いちばん透ける）
     public var showPreview = true              // ファイルの行を選んだらパネルの右にプレビューを出す
+    // クリップボード
+    public var clipboard = true                // コピーした文字を覚える
+    public var clipHotKey: HotKeySetting?      // nil = 既定（⌥V）
+    public var clipKeep = 500                  // 覚えておく件数
     // 学習
     public var learn = true                    // 選んだ結果を覚える
     public var dictionary: [DictEntry] = []       // 辞書（言い方 → アプリ / ファイル・フォルダ / 「#」の条件）
@@ -124,7 +128,7 @@ public struct RaidenSettings: Codable, Equatable, Sendable {
 
     // 項目ごとに読めなければ初期値（古い版・壊れた値で全部が初期値に戻らないように）
     enum CodingKeys: String, CodingKey {
-        case version, excludeFolders, excludeNames, knownExcludeDefaults, knownExcludeFolderDefaults, hotKey, maxRows, sectionOrder, transparency, showPreview, learn, dictionary, savedFilters, logSearches, logDays
+        case version, excludeFolders, excludeNames, knownExcludeDefaults, knownExcludeFolderDefaults, hotKey, maxRows, sectionOrder, transparency, showPreview, clipboard, clipHotKey, clipKeep, learn, dictionary, savedFilters, logSearches, logDays
     }
 
     public init(from d: Decoder) throws {
@@ -146,6 +150,9 @@ public struct RaidenSettings: Codable, Equatable, Sendable {
         sectionOrder = get(.sectionOrder, def.sectionOrder)
         transparency = min(max(get(.transparency, def.transparency), Self.transparencyRange.lowerBound), Self.transparencyRange.upperBound)
         showPreview = get(.showPreview, def.showPreview)
+        clipboard = get(.clipboard, def.clipboard)
+        clipHotKey = (try? c.decodeIfPresent(HotKeySetting.self, forKey: .clipHotKey)) ?? nil
+        clipKeep = min(max(get(.clipKeep, def.clipKeep), 50), 5000)
         learn = get(.learn, def.learn)
         dictionary = get(.dictionary, def.dictionary).filter { !$0.phrase.isEmpty && !$0.key.isEmpty }
         savedFilters = get(.savedFilters, def.savedFilters).filter { !$0.name.isEmpty && !$0.commands.isEmpty }

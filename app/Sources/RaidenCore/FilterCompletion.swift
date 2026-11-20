@@ -229,6 +229,10 @@ public enum FilterCompletion {
                 items.append(Item(title: "#保存", detail: "今の条件に名前を付けて保存  例: #保存 仕事のPDF（⌘S）", symbol: "bookmark",
                                   insert: "#保存", alias: "#save"))
             }
+            if hit(name, QueryFilters.clipWords) {
+                items.append(Item(title: "#clip", detail: "クリップボードの履歴  専用のキー（初期値 ⌥V）でもすぐ開けます", symbol: "doc.on.clipboard",
+                                  insert: "#clip", alias: "#cb #コピー"))
+            }
             if hit(name, QueryFilters.aliasWords) {
                 items.append(Item(title: "#alias", detail: "言い方を辞書に足す  例: #alias 黒い画面 → ↩ で行き先を選ぶ", symbol: "book",
                                   insert: "#alias", alias: "#dict #辞書"))
@@ -501,6 +505,9 @@ public enum FilterCompletion {
             }
             if QueryFilters.commandName(item.insert).map({ QueryFilters.aliasWords.contains($0) }) == true {
                 return (head + "#alias ", nil, [])
+            }
+            if QueryFilters.commandName(item.insert).map({ QueryFilters.clipWords.contains($0) }) == true {
+                return (head + "#clip ", nil, [])
             }
             guard let cmd = QueryFilters.command(named: String(item.insert.dropFirst())) else { return (text, nil, []) }
             return (head + cmd.name + " ", nil, [])

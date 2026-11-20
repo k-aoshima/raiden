@@ -1,11 +1,13 @@
 import AppKit
 import QuickLookThumbnailing
+import RaidenCore
 import UniformTypeIdentifiers
 
 /// 右のプレビューに出す物。ファイル・フォルダは中身、アプリは簡素に（アイコンと名前だけ）
 enum PreviewTarget: Equatable {
     case file(String)
     case app(title: String, path: String)
+    case clip(ClipItem)
 }
 
 /// 候補の右に出すプレビュー（Quick Look のサムネイル＋名前・種類・大きさ・変更日・場所）。
@@ -19,6 +21,8 @@ final class FilePreviewPane: NSView {
     private let box = NSView()
     private let image = NSImageView()
     private let children = NSStackView()
+    /// クリップボードの文字（履歴の行のとき）
+    private let body = NSTextField(wrappingLabelWithString: "")
     private let name = NSTextField(wrappingLabelWithString: "")
     private let info = NSStackView()
     private var target: PreviewTarget?
@@ -40,6 +44,11 @@ final class FilePreviewPane: NSView {
         children.orientation = .vertical
         children.alignment = .leading
         children.spacing = 2
+        body.font = .systemFont(ofSize: 12)
+        body.textColor = PanelStyle.text
+        body.lineBreakMode = .byCharWrapping
+        body.cell?.truncatesLastVisibleLine = true
+        body.isHidden = true
         name.font = .systemFont(ofSize: 14, weight: .semibold)
         name.textColor = PanelStyle.text
         name.maximumNumberOfLines = 2
@@ -52,7 +61,7 @@ final class FilePreviewPane: NSView {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
-        for v in [image, children] as [NSView] {
+        for v in [image, children, body] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             box.addSubview(v)
         }
@@ -65,6 +74,10 @@ final class FilePreviewPane: NSView {
             image.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -6),
             image.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 6),
             image.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -6),
+            body.topAnchor.constraint(equalTo: box.topAnchor, constant: 10),
+            body.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 12),
+            body.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -12),
+            body.bottomAnchor.constraint(lessThanOrEqualTo: box.bottomAnchor, constant: -10),
             children.topAnchor.constraint(equalTo: box.topAnchor, constant: 10),
             children.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 12),
             children.trailingAnchor.constraint(lessThanOrEqualTo: box.trailingAnchor, constant: -12),
@@ -83,6 +96,8 @@ final class FilePreviewPane: NSView {
         info.setHuggingPriority(.required, for: .vertical)
         info.setContentHuggingPriority(.required, for: .vertical)
         children.setHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
+        body.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .vertical)
+        body.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -96,6 +111,7 @@ final class FilePreviewPane: NSView {
         if let r = request { QLThumbnailGenerator.shared.cancel(r); request = nil }
         children.arrangedSubviews.forEach { $0.removeFromSuperview() }
         children.isHidden = true
+        body.isHidden = true
         image.isHidden = false
         guard let t else {
             image.image = nil; name.stringValue = ""; setInfo([]); loadedToken = token
@@ -108,6 +124,28 @@ final class FilePreviewPane: NSView {
         switch t {
         case .app(_, let path):
             setInfo([("種類", "アプリ"), ("場所", RowItem.shortParent(path))])
+            loadedToken = token
+        case .clip(let c):
+            image.isHidden = true
+            body.isHidden = false
+            body.stringValue = c.text.count > 4000 ? String(c.text.prefix(4000)) + "…" : c.text
+            box.layer?.backgroundColor = NSColor(white: 1, alpha: 0.35).cgColor
+            let lines = c.text.split(separator: "\n", omittingEmptySubsequences: false).count
+            name.stringValue = "\(c.text.count) 文字" + (lines > 1 ? "・\(lines) 行" : "")
+            func place(_ p: ClipItem.Place) -> String {
+                (p.app.isEmpty ? "不明" : p.app) + (p.title.isEmpty ? "" : "「\(p.title)」")
+            }
+            var rows: [(String, String)] = [("コピー元", place(c.source)),
+                                            ("日時", Self.dateFormat.string(from: c.source.at) + (c.count > 1 ? "（\(c.count) 回目）" : ""))]
+            if c.pastes.isEmpty {
+                rows.append(("貼った先", "まだ貼っていません"))
+            } else {
+                for (i, p) in c.pastes.prefix(4).enumerated() {
+                    rows.append((i == 0 ? "貼った先" : "", place(p) + "  " + RowItem.ago(p.at)))
+                }
+                if c.pastes.count > 4 { rows.append(("", "ほか \(c.pastes.count - 4) 回")) }
+            }
+            setInfo(rows)
             loadedToken = token
         case .file(let path):
             setInfo([("場所", RowItem.shortParent(path))])
@@ -194,7 +232,7 @@ final class FilePreviewPane: NSView {
             let kl = NSTextField(labelWithString: k)
             kl.font = .systemFont(ofSize: 11)
             kl.textColor = PanelStyle.faint
-            kl.widthAnchor.constraint(equalToConstant: 44).isActive = true
+            kl.widthAnchor.constraint(equalToConstant: 52).isActive = true
             let vl = NSTextField(labelWithString: v)
             vl.font = .systemFont(ofSize: 11)
             vl.textColor = PanelStyle.subText
