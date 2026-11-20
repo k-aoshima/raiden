@@ -291,8 +291,8 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         panel.level = .modalPanel
         panel.backgroundColor = .clear
         panel.isOpaque = false
-        // 影はシステムに任せない（ガラスの部品の枠なし窓では影が四角く作られ、角の外に四角い線が出る。ガラス自体が縁の光と影を持つ）
-        panel.hasShadow = false
+        // 影はシステムに付けてもらう。ガラスの部品と中身を丸い角で切り抜いて、影が四角く作られないようにする（下の glass と content）
+        panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         panel.isMovableByWindowBackground = true
@@ -307,6 +307,11 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             glass.cornerRadius = PanelStyle.radius
             glass.tintColor = PanelStyle.glassTint
             glass.contentView = content
+            // ガラスの部品も丸い角で切り抜く（切り抜かないと四角いまま描かれ、窓の影が四角く作られて角の外に線が出る）
+            glass.wantsLayer = true
+            glass.layer?.cornerRadius = PanelStyle.radius
+            glass.layer?.cornerCurve = .continuous
+            glass.layer?.masksToBounds = true
             panel.contentView = glass
             glassView = glass
         } else {
