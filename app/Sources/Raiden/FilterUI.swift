@@ -733,6 +733,17 @@ enum FilterSnapshots {
             .init(label: "Downloads", symbol: "folder", command: "#path ~/Downloads", count: 92)])
         ak3.setResults([ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: akRows)], query: ak3.filterInput.currentQuery, split: akSplit3)
         Snapshot.capture(ak3, dir + "/recall-ask-wrap.png")
+        // ⌘→: 選んでいるファイルを基準に #with / #near を選ぶ
+        let bw = panel("見積")
+        let bwRows = ["見積書_サンプル.pdf", "見積依頼_サンプル.md"].map {
+            RowItem(.file(FileResult(file: FileEntry(path: home + "/Documents/サンプル/" + $0, mtime: t("2026-11-18 15:00")), score: 1)))
+        }
+        bw.setResults([ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: bwRows)], query: bw.filterInput.currentQuery)
+        bw.askAboutSelected()
+        Snapshot.capture(bw, dir + "/recall-base.png")
+        bw.pickAsk(0)
+        print(bw.filterInput.committed == ["#with ~/Documents/サンプル/見積書_サンプル.pdf"] && bw.queryText.isEmpty
+              ? "  ok  ⌘→ → ⌘1 で #with のチップだけになる" : "  NG  ⌘→ → ⌘1: \(bw.filterInput.committed) 「\(bw.queryText)」")
         // 見つからないときの「探し方を変える」（件数は見本）
         let nf = panel("見積", committed: ["#date 先月", "#kind pdf"])
         let nfSplit = RecallSplit(title: "探し方を変える", total: 0, options: [
@@ -1108,7 +1119,7 @@ enum FocusTest {
         var asked: [String] = []
         c.onQuery = { asked.append($0) }
         type(c, "#cl")
-        expect(c.filterInput.palette?.items.contains { $0.title == "#clip" } == true && !c.filterInput.clipMode, "「#cl」で一覧に #clip")
+        expect(c.filterInput.palette?.items.contains { $0.insert == "#clip" } == true && !c.filterInput.clipMode, "「#cl」で一覧に #clip")
         type(c, "ip ")
         expect(c.filterInput.clipMode && c.queryText.isEmpty && c.filterInput.palette == nil, "「#clip 」で履歴の状態「\(c.queryText)」")
         type(c, "請求")

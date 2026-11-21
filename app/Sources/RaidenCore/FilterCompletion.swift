@@ -142,12 +142,11 @@ public enum FilterCompletion {
     }
 
     /// 「#」の一覧。覚えていることの言い方（時期・種類・入手元…）を見出しにし、コマンドは右に添える。並びは思い出しやすい順
+    /// #with・#near は一覧に出さない（基準のファイルが要るので、絞り込んで見つけた行から ⌘→ で選ぶ。打てば今までどおり効く）
     public static let commandItems: [(QueryFilters.Command, String, String, String, String)] = [
         (.date, "clock", "時期", "先月、先月ごろ、11月、7d", ""),
         (.kind, "doc", "種類", "PDF、画像、表計算、スライド", ""),
         (.src, "arrow.down.circle", "入手元", "ダウンロード、メール添付、自分で作成", ""),
-        (.near, "point.3.connected.trianglepath.dotted", "プロジェクト", "そのファイルと同じプロジェクトの物", ""),
-        (.with, "link", "一緒に使ったもの", "そのファイルと同じころに使っていた物", ""),
         (.name, "textformat", "名前", "名前の一部（ふだんの検索と同じ）", ""),
         (.text, "text.magnifyingglass", "本文", "「見積金額」のような本文の言葉", ""),
         (.path, "folder", "場所", "Desktop、~/Documents/仕事", ""),

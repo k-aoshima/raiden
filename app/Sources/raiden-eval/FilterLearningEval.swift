@@ -209,7 +209,7 @@ func runFilterLearningTests(ctx: FilterContext) -> (Int, Int) {
     let wv2 = pal("#near 見積", ctx: nc, memory: mem)?.items.map(\.title) ?? []
     expect(wv2 == ["見積書.pdf", "見積書_サンプル.pdf"], "名前の一部で絞る \(wv2)")
     expect(pal("#with ", memory: mem)?.items.first?.insert == "~/Downloads/請求書.pdf", "決めると ~/ のパスが入る")
-    expect(FilterCompletion.commands(matching: "").contains { $0.insert == "#with" } && FilterCompletion.commands(matching: "ne").first?.insert == "#near", "一覧に #with・#near")
+    expect(!FilterCompletion.commands(matching: "").contains { $0.insert == "#with" || $0.insert == "#near" } && FilterCompletion.commands(matching: "ne").isEmpty, "一覧に #with・#near は出さない（行から ⌘→）")
 
     print("== 辞書")
     let dict = [

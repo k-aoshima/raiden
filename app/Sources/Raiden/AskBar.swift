@@ -21,8 +21,9 @@ final class AskBar: NSView {
         icon.contentTintColor = PanelStyle.indigo
         var pills: [NSView] = []
         for (i, o) in split.options.enumerated() {
-            let n = o.count >= 1000 && o.replaces ? "1000以上" : FilterCompletion.countText(o.count)
-            let p = ChipBar.pill("⌘\(i + 1)  \(o.label)  \(n)", symbol: o.symbol, filled: false)
+            // count が負なら件数を出さない（⌘→ の「基準に探す」）
+            let n = o.count < 0 ? "" : "  " + (o.count >= 1000 && o.replaces ? "1000以上" : FilterCompletion.countText(o.count))
+            let p = ChipBar.pill("⌘\(i + 1)  \(o.label)\(n)", symbol: o.symbol, filled: false)
             p.onTap = { onPick(i) }
             p.toolTip = "\(o.command)（⌘\(i + 1)）"
             pills.append(p)

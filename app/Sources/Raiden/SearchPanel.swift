@@ -402,8 +402,8 @@ struct RowItem {
     var isClip: Bool { if case .clip = preview { return true } else { return false } }
 
     static let appHint = "↩ 開く　⌘↩ Finder"
-    static let fileHint = "↩ 開く　⌘↩ Finder に表示"
-    static let folderHint = "↩ Finder で開く　⌘↩ 場所を表示"
+    static let fileHint = "↩ 開く　⌘↩ Finder に表示　⌘→ 基準に"
+    static let folderHint = "↩ Finder で開く　⌘↩ 場所を表示　⌘→ 基準に"
     static let clipHint = "↩ 貼り付け　⌘↩ コピーだけ"
 
     /// 親フォルダまでのパスを ~ で短くする（~/Documents/仕事）
@@ -683,6 +683,8 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
                 return ev
             }
             if ev.keyCode == 1 && mods == .command { self.filterInput.beginSave(); return nil }   // ⌘S
+            // ⌘→: 選んでいるファイル・フォルダを基準に #with / #near を選ぶ（入力欄のカーソル移動より先に取る）
+            if ev.keyCode == 124, mods.subtracting([.function, .numericPad]) == .command, self.askAboutSelected() { return nil }
             // ⌘1〜⌘4: 一覧の上の絞り込みの問いに答える
             if mods == .command, let i = [18, 19, 20, 21].firstIndex(of: Int(ev.keyCode)), let sp = self.askSplit, sp.options.indices.contains(i) {
                 self.pickAsk(i); return nil
@@ -839,21 +841,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
                     extra: [(NSView, CGFloat)] = [], palette: Bool = false, split: RecallSplit? = nil) {
         guard query == filterInput.currentQuery, palette || filterInput.palette == nil else { return }
         // 一覧の上の絞り込みの問い（一覧・見つからない・辞書の行き先を選ぶ間は出さない）
-        footer.subviews.forEach { $0.removeFromSuperview() }
-        askSplit = palette || (notFound && split?.total != 0) || filterInput.isPickingAlias ? nil : split
-        filterInput.asking = askSplit != nil
-        if let sp = askSplit {
-            let bar = AskBar(sp, width: Self.width) { [weak self] i in self?.pickAsk(i) }
-            bar.translatesAutoresizingMaskIntoConstraints = false
-            footer.addSubview(bar)
-            NSLayoutConstraint.activate([
-                bar.topAnchor.constraint(equalTo: footer.topAnchor), bar.bottomAnchor.constraint(equalTo: footer.bottomAnchor),
-                bar.leadingAnchor.constraint(equalTo: footer.leadingAnchor), bar.trailingAnchor.constraint(equalTo: footer.trailingAnchor),
-            ])
-            footerH = bar.preferredHeight
-        } else {
-            footerH = 0
-        }
+        installAsk(palette || (notFound && split?.total != 0) || filterInput.isPickingAlias ? nil : split)
         var secs = sections.filter { !$0.items.isEmpty }
         var notFound = notFound
         if !palette && filterInput.isPickingAlias {
@@ -964,6 +952,39 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     func showRecent() {
         guard field.stringValue.isEmpty, filterInput.committed.isEmpty, filterInput.palette == nil, filterInput.currentQuery.isEmpty else { return }
         setResults(recentSections?() ?? [], query: "")
+    }
+
+    /// 一覧の上に問いを出す（nil なら消す）。高さは footerH に入れ、並べ直しは呼ぶ側
+    private func installAsk(_ sp: RecallSplit?) {
+        footer.subviews.forEach { $0.removeFromSuperview() }
+        askSplit = sp
+        filterInput.asking = sp != nil
+        guard let sp else { footerH = 0; return }
+        let bar = AskBar(sp, width: Self.width) { [weak self] i in self?.pickAsk(i) }
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        footer.addSubview(bar)
+        NSLayoutConstraint.activate([
+            bar.topAnchor.constraint(equalTo: footer.topAnchor), bar.bottomAnchor.constraint(equalTo: footer.bottomAnchor),
+            bar.leadingAnchor.constraint(equalTo: footer.leadingAnchor), bar.trailingAnchor.constraint(equalTo: footer.trailingAnchor),
+        ])
+        footerH = bar.preferredHeight
+    }
+
+    /// 選んでいるファイル・フォルダを基準にする問い（⌘→）。「一緒に使ったもの」（#with）か「同じプロジェクト」（#near）を
+    /// ⌘1・⌘2 か押して選ぶと、入力を書き換えてそのチップだけにする（打っていた言葉は外す。名前で絞られないように）
+    @discardableResult
+    func askAboutSelected() -> Bool {
+        guard !paletteRows, results.indices.contains(selected), case .file(let r)? = results[selected].candidate else { return false }
+        let short = (r.file.path as NSString).abbreviatingWithTildeInPath
+        let v = short.contains(where: \.isWhitespace) ? "\"\(short)\"" : short
+        let name = (r.file.path as NSString).lastPathComponent
+        let sp = RecallSplit(title: "「\(name)」を基準に探す", total: 0, options: [
+            .init(label: "一緒に使ったもの", symbol: "link", command: "#with " + v, count: -1, replaces: true),
+            .init(label: "同じプロジェクト", symbol: "point.3.connected.trianglepath.dotted", command: "#near " + v, count: -1, replaces: true),
+        ])
+        installAsk(sp)
+        layoutPanel(top: lastLayout.top, list: lastLayout.list)
+        return true
     }
 
     /// 絞り込みの問いの i 番目を選ぶ（打ったときと同じチップにする）
