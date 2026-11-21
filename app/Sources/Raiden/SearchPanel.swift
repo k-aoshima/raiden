@@ -111,7 +111,7 @@ final class ResultRow: NSView {
     let tagLabel = NSTextField(labelWithString: "")
     var onClick: (() -> Void)?
     var selected = false {
-        didSet { needsDisplay = true; hint.isHidden = !selected; title.textColor = selected ? PanelStyle.indigoDeep : PanelStyle.text }
+        didSet { needsDisplay = true; hint.isHidden = !selected || card; title.textColor = selected ? PanelStyle.indigoDeep : PanelStyle.text }
     }
 
     /// 操作の手がかり。キー（↩ ⌘↩ など）は藍、言葉は薄いグレー
@@ -129,6 +129,47 @@ final class ResultRow: NSView {
             }
         }
         hint.attributedStringValue = out
+    }
+
+    /// カードの形（2 列の「入口」）: 枠線の角丸、薄い藍の角丸の下地にアイコン、右端にコマンド
+    private(set) var card = false
+    private let iconBack = NSView()
+
+    convenience init(card: Bool) {
+        self.init(frame: .zero)
+        guard card else { return }
+        self.card = true
+        NSLayoutConstraint.deactivate(constraints)
+        for v in [icon, title, sub, hint, tagLabel] as [NSView] { v.removeFromSuperview() }
+        iconBack.wantsLayer = true
+        iconBack.layer?.cornerRadius = 8
+        iconBack.layer?.backgroundColor = PanelStyle.indigo.withAlphaComponent(0.10).cgColor
+        icon.contentTintColor = PanelStyle.indigo
+        title.font = .systemFont(ofSize: 14, weight: .semibold)
+        sub.lineBreakMode = .byTruncatingTail
+        for v in [iconBack, icon, title, sub, tagLabel] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(v)
+        }
+        tagLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        tagLabel.setContentHuggingPriority(.required, for: .horizontal)
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        sub.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        NSLayoutConstraint.activate([
+            iconBack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            iconBack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            iconBack.widthAnchor.constraint(equalToConstant: 32), iconBack.heightAnchor.constraint(equalToConstant: 32),
+            icon.centerXAnchor.constraint(equalTo: iconBack.centerXAnchor), icon.centerYAnchor.constraint(equalTo: iconBack.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 17), icon.heightAnchor.constraint(equalToConstant: 17),
+            title.leadingAnchor.constraint(equalTo: iconBack.trailingAnchor, constant: 10),
+            title.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: tagLabel.leadingAnchor, constant: -8),
+            sub.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            sub.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 1),
+            sub.trailingAnchor.constraint(lessThanOrEqualTo: tagLabel.leadingAnchor, constant: -8),
+            tagLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            tagLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
     }
 
     override init(frame: NSRect) {
@@ -173,6 +214,13 @@ final class ResultRow: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     override func draw(_ dirtyRect: NSRect) {
+        if card {
+            let p = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 12, yRadius: 12)
+            if selected { PanelStyle.selection.setFill(); p.fill() } else {
+                PanelStyle.text.withAlphaComponent(0.10).setStroke(); p.lineWidth = 1; p.stroke()
+            }
+            return
+        }
         guard selected else { return }
         PanelStyle.selection.setFill()
         NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 1), xRadius: 10, yRadius: 10).fill()
@@ -266,6 +314,8 @@ struct RowItem {
     var hint: String
     /// 見出しの右に小さく添える文字（「#」の一覧のコマンド名）
     var tag = ""
+    /// 2 列のカードで出す（「#」の一覧のコマンド。HTML の画面案の「入口」）
+    var card = false
     /// 右のプレビューに出す物（nil は出さない）
     var preview: PreviewTarget?
 
@@ -387,10 +437,13 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     private let listView = FlippedView()
     /// 作った行（results の先頭から。数が多いときは見える分から少しずつ作る）
     private var rows: [ResultRow] = []
+    /// 2 列のカードで並べている（↑↓ で 2 つ、←→ で 1 つ動く）
+    private var grid = false
+    static let cardHeight: CGFloat = 54, cardGap: CGFloat = 6
     private var lines: [NSView] = []
     private var results: [RowItem] = []
     /// 並べる順の中身（節の見出しか、results の番号）。entries[..<built] まで作った
-    private enum Entry { case header(String, String, String?); case row(Int) }
+    private enum Entry { case header(String, String, String?); case row(Int); case pair(Int, Int?) }
     private var entries: [Entry] = []
     private var built = 0
     private var rowAlpha: [CGFloat] = []
@@ -853,6 +906,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
                    Self.messageHeight)
         }
         var listH: CGFloat = 0
+        grid = !secs.isEmpty && secs.allSatisfy { $0.items.allSatisfy(\.card) }
         for sec in secs {
             // 全体が見つからないときは上に大きく出しているので、節の見出しには添えない
             let fadeNote = sec.faded && !notFound ? "見つかりません" : nil
@@ -860,6 +914,17 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
                 let title = filtered ? "\(sec.title)  \(sec.items.count)件" : sec.title
                 entries.append(.header(title, sec.symbol, fadeNote))
                 listH += Self.headerHeight
+            }
+            if sec.items.allSatisfy(\.card) {
+                var k = 0
+                while k < sec.items.count {
+                    let i = results.count
+                    for item in sec.items[k..<min(k + 2, sec.items.count)] { results.append(item); rowAlpha.append(1) }
+                    entries.append(.pair(i, k + 1 < sec.items.count ? i + 1 : nil))
+                    listH += Self.cardHeight + Self.cardGap
+                    k += 2
+                }
+                continue
             }
             for item in sec.items {
                 entries.append(.row(results.count))
@@ -923,24 +988,48 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
                 v.heightAnchor.constraint(equalToConstant: Self.headerHeight).isActive = true
                 lines.append(v)
             case .row(let i):
-                let item = results[i]
-                let row = ResultRow()
-                row.translatesAutoresizingMaskIntoConstraints = false
-                row.title.stringValue = item.title
-                row.sub.stringValue = item.sub
-                row.tagLabel.stringValue = item.tag
-                row.setHint(item.hint)
-                row.icon.image = item.iconImage ?? item.iconPath.map(icon)
-                row.alphaValue = rowAlpha[i]
-                row.onClick = { [weak self] in self?.clickRow(i) }
-                row.onHover = { [weak self] in self?.hoverRow(i) }
+                let row = makeRow(i)
                 stack.addArrangedSubview(row)
                 row.widthAnchor.constraint(equalToConstant: Self.width).isActive = true
                 row.heightAnchor.constraint(equalToConstant: Self.rowHeight).isActive = true
                 rows.append(row)
+            case .pair(let i, let j):
+                // 2 列のカード 1 段。左右の余白は 16、間は cardGap
+                let line = NSView()
+                line.translatesAutoresizingMaskIntoConstraints = false
+                stack.addArrangedSubview(line)
+                line.widthAnchor.constraint(equalToConstant: Self.width).isActive = true
+                line.heightAnchor.constraint(equalToConstant: Self.cardHeight + Self.cardGap).isActive = true
+                let w = (Self.width - 32 - Self.cardGap) / 2
+                for (n, k) in [i, j].compactMap({ $0 }).enumerated() {
+                    let c = makeRow(k)
+                    line.addSubview(c)
+                    NSLayoutConstraint.activate([
+                        c.leadingAnchor.constraint(equalTo: line.leadingAnchor, constant: 16 + CGFloat(n) * (w + Self.cardGap)),
+                        c.topAnchor.constraint(equalTo: line.topAnchor),
+                        c.widthAnchor.constraint(equalToConstant: w), c.heightAnchor.constraint(equalToConstant: Self.cardHeight),
+                    ])
+                    rows.append(c)
+                }
+                lines.append(line)
             }
             built += 1
         }
+    }
+
+    private func makeRow(_ i: Int) -> ResultRow {
+        let item = results[i]
+        let row = ResultRow(card: item.card)
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.title.stringValue = item.title
+        row.sub.stringValue = item.sub
+        row.tagLabel.stringValue = item.tag
+        row.setHint(item.hint)
+        row.icon.image = item.iconImage ?? item.iconPath.map(icon)
+        row.alphaValue = rowAlpha[i]
+        row.onClick = { [weak self] in self?.clickRow(i) }
+        row.onHover = { [weak self] in self?.hoverRow(i) }
+        return row
     }
 
     /// 下の端に近づいたら次の行を作る
@@ -1174,10 +1263,17 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         if filterInput.handle(sel) { return true }
         switch sel {
         case #selector(NSResponder.moveDown(_:)):
-            moveSelection(1)
+            moveSelection(grid ? 2 : 1)
             return true
         case #selector(NSResponder.moveUp(_:)):
+            moveSelection(grid ? -2 : -1)
+            return true
+        // 2 列のカードの間は ←→ で左右に動く（入力欄のカーソルが末尾にあるときだけ）
+        case #selector(NSResponder.moveLeft(_:)) where grid && textView.selectedRange().location == (textView.string as NSString).length:
             moveSelection(-1)
+            return true
+        case #selector(NSResponder.moveRight(_:)) where grid && textView.selectedRange().location == (textView.string as NSString).length:
+            moveSelection(1)
             return true
         case #selector(NSResponder.insertNewline(_:)):
             // 日本語入力の変換中の Enter は確定に使う（ここには来ない）

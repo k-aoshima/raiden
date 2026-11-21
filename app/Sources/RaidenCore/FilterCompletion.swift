@@ -143,18 +143,18 @@ public enum FilterCompletion {
 
     /// 「#」の一覧。覚えていることの言い方（時期・種類・入手元…）を見出しにし、コマンドは右に添える。並びは思い出しやすい順
     public static let commandItems: [(QueryFilters.Command, String, String, String, String)] = [
-        (.date, "clock", "時期", "使った日・変更日・作成日のうち新しい日", "例: 先月, 7d, 11月, 11-1..11-14"),
-        (.kind, "doc", "種類", "", "例: pdf, 画像, スクショ, pdf,doc"),
-        (.src, "arrow.down.circle", "入手元", "ダウンロード・メール添付・自分で作成", "例: dl, mail, mine"),
-        (.near, "point.3.connected.trianglepath.dotted", "プロジェクト", "そのファイルと同じプロジェクトのもの", "例: ~/Project/raiden/README.md"),
-        (.with, "link", "一緒に使ったもの", "そのファイルと同じころ使ったもの", "例: ~/Documents/見積書.pdf"),
-        (.name, "textformat", "名前", "名前に含む文字", "例: 請求書"),
-        (.text, "text.magnifyingglass", "本文", "ファイルの中身に含む言葉", "例: 見積金額"),
-        (.path, "folder", "場所", "フォルダ（パスの一部）", "例: Desktop, ~/Documents/仕事"),
-        (.ext, "tag", "拡張子", "", "例: pdf, docx, pdf,docx"),
-        (.type, "square.grid.2x2", "ファイル・フォルダ・アプリ", "", "例: f, d, app"),
-        (.modified, "pencil", "変更日", "", "例: 7d, 先月"),
-        (.created, "calendar", "作成日", "", "例: 2026-11"),
+        (.date, "clock", "時期", "先月、先月ごろ、11月、7d", ""),
+        (.kind, "doc", "種類", "PDF、画像、表計算、スライド", ""),
+        (.src, "arrow.down.circle", "入手元", "ダウンロード、メール添付、自分で作成", ""),
+        (.near, "point.3.connected.trianglepath.dotted", "プロジェクト", "そのファイルと同じプロジェクトの物", ""),
+        (.with, "link", "一緒に使ったもの", "そのファイルと同じころに使っていた物", ""),
+        (.name, "textformat", "名前", "名前の一部（ふだんの検索と同じ）", ""),
+        (.text, "text.magnifyingglass", "本文", "「見積金額」のような本文の言葉", ""),
+        (.path, "folder", "場所", "Desktop、~/Documents/仕事", ""),
+        (.ext, "tag", "拡張子", "pdf、docx", ""),
+        (.type, "square.grid.2x2", "ファイル・フォルダ・アプリ", "ファイルだけ、フォルダだけ、アプリだけ", ""),
+        (.modified, "pencil", "変更日", "7d、先月", ""),
+        (.created, "calendar", "作成日", "2026-11、去年", ""),
     ]
 
     static let dateValues: [(String, String)] = [
@@ -258,11 +258,11 @@ public enum FilterCompletion {
                                   insert: "#保存", alias: "#保存 #save"))
             }
             if hit(name, QueryFilters.clipWords) {
-                items.append(Item(title: "クリップボードの履歴", detail: "専用のキー（初期値 ⌥V）でもすぐ開けます", symbol: "doc.on.clipboard",
+                items.append(Item(title: "クリップボードの履歴", detail: "コピーした物（⌥V でも開く）", symbol: "doc.on.clipboard",
                                   insert: "#clip", alias: "#clip #cb"))
             }
             if hit(name, QueryFilters.aliasWords) {
-                items.append(Item(title: "辞書に足す", detail: "言い方を辞書に足す　例: #alias 黒い画面 → ↩ で行き先を選ぶ", symbol: "book",
+                items.append(Item(title: "辞書に足す", detail: "「黒い画面」→ ターミナルのような言い方", symbol: "book",
                                   insert: "#alias", alias: "#alias #dict"))
             }
             return items.isEmpty ? nil : Palette(mode: .commands, items: items, start: s, partial: name)
@@ -362,7 +362,7 @@ public enum FilterCompletion {
             // 右に添えるのはコマンドと短い別名だけ（日本語の別名は見出しと同じなので出さない。打てば当たる）
             let sh = c.0 == .type ? QueryFilters.typeShorthands.map { QueryFilters.mark + $0.0 } : []
             let alias2 = ([c.0.name] + [c.0.short].compactMap { $0 } + (c.0 == .path ? ["#in"] : []) + sh).joined(separator: " ")
-            return Item(title: c.2, detail: c.3.isEmpty ? c.4 : c.3 + "　" + c.4, symbol: c.1, insert: c.0.name, alias: alias2)
+            return Item(title: c.2, detail: c.4.isEmpty ? c.3 : c.3 + "　" + c.4, symbol: c.1, insert: c.0.name, alias: alias2)
         }
     }
 

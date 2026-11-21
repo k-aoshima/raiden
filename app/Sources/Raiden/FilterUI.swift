@@ -433,7 +433,12 @@ final class FilterInput {
                 : NSWorkspace.shared.urlForApplication(withBundleIdentifier: it.bundleID).map { NSWorkspace.shared.icon(forFile: $0.path) }
             var row = RowItem(title: title, sub: it.detail, iconImage: appIcon ?? symbol(it.symbol, size: 18, weight: .regular),
                               hint: it.badge.isEmpty ? hint : it.badge + "　" + hint)
-            if tagged { row.tag = it.alias }
+            if tagged {
+                // カードの右端はコマンドの名前だけ（#date）。短い別名は打てば当たる
+                row.tag = it.alias.split(separator: " ").first.map(String.init) ?? it.alias
+                row.card = true
+                row.iconImage = symbol(it.symbol, size: 15, weight: .medium)
+            }
             return row
         }
         return [ResultSection(title: "候補", symbol: "list.bullet", items: rows)]
@@ -450,7 +455,7 @@ final class FilterInput {
     private func paletteHeader(_ p: FilterCompletion.Palette) -> (NSView, CGFloat) {
         let title: String, sym: String
         switch p.mode {
-        case .commands: title = "何を覚えていますか"; sym = "line.3.horizontal.decrease"
+        case .commands: title = "何を覚えていますか"; sym = "square.stack.3d.up"
         case .values(let c) where [.date, .modified, .created].contains(c):
             // 日付の書き方は一覧に出ないので見出しで見せる
             title = "\(c.name) の値　11-14・11月・11-1..11-14 とも打てる"; sym = "calendar"
@@ -463,7 +468,8 @@ final class FilterInput {
         case .save: title = "今の条件に名前を付けて保存"; sym = "bookmark"
         case .alias: title = "辞書に足す言い方"; sym = "book"
         }
-        return (LabelLine(title, symbol: sym, detail: "↑↓ で選んで ↩ / Tab　Esc で閉じる"), SearchPanelController.headerHeight)
+        let keys = p.mode == .commands ? "↑↓ ←→ で選んで ↩ / Tab　Esc で閉じる" : "↑↓ で選んで ↩ / Tab　Esc で閉じる"
+        return (LabelLine(title, symbol: sym, detail: keys), SearchPanelController.headerHeight)
     }
 
     /// 入力欄の下に出す行（一言・行き先を選ぶ案内・チップ・知らせ・次に付けそうなコマンド・言葉からの候補・「条件に合う物はありません」）。
