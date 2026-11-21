@@ -64,6 +64,8 @@ Mac 全体を Spotlight（MDQuery、同期で問い合わせて別の列で待�
 | `#path` | `~/` `/` で始まればそこを範囲（searchScopes）に。名前なら、名前にそれを含むフォルダを Spotlight で引いて範囲にする |
 | `#with X` | X の `kMDItemLastUsedDate` の前後 30 分（`withWindow`）に使った物。Raiden から開いた記録の co_used の線（30 分以内に続けて開いた物どうし、重みは回数。`Store.recordOpenedTogether`）の重みで +0.3 まで加点し、線の先は Spotlight の結果に無くても入れる。X 自身は外す |
 | `#near X` | X から親をさかのぼり、.git・package.json・Package.swift・*.xcodeproj・*.xcworkspace・Cargo.toml・pyproject.toml・Unity の Assets と ProjectSettings の両方、のどれかがある最初のフォルダ（`projectRoot`）を範囲にする。見つからなければ X の親。~ か / で止まる |
+| `#src` | dl は `kMDItemWhereFroms == "*"`、mail は `"message:*"`、mine は `!= *`。細かい所（~/Downloads の中・Mail Downloads の中）は手元でふるう |
+| `#text` | `kMDItemTextContent == "*言葉*"cd`（本文）。値どうしは「かつ」。手元の `matches` では見ない |
 | 「#」の無い言い方 | `QueryIntent` の時間・種類の言葉を `#date`・`#kind` と同じ条件に、「〜フォルダ」は `#type d`、「ダウンロードした」は `kMDItemWhereFroms`、「A と同じ日の B」は `#with A`、「A の中の B」は `#path A` |
 
 X は `~/` `/` で始まればそのパス、そうでなければ名前が一致する物（同じ名前 → 名前に含む物、その中は使った日の新しい順）。違うコマンドどうしは「かつ」（`#near X #ext swift` など）。
@@ -144,13 +146,15 @@ macOS 26 以降は Liquid Glass（`NSGlassEffectView`、白寄りの tint）、�
 | `#kind` | `#k` `#種類` | pdf, image, screenshot / ss, movie / video, music / audio, document / doc, spreadsheet / xls, presentation / ppt, md, text, code, archive / zip, 3d, folder, app（種類の名前でなければ拡張子） | 種類 |
 | `#type` | `#t`（別名 `#app` = `#type app`、`#folder` = `#type d`、`#file` = `#type f`。`#t #app` も `#type app`） | f（ファイル）, d（フォルダ）, app（アプリ） | 対象 |
 | `#ext` | `#e` `#拡張子` | pdf, docx, pdf,docx | 拡張子 |
-| `#date` | `#日付` | today, yesterday, 7d, 2w, 3m, 1y, 2026, 2026-11, 2026-11-14, 11-14, 11-14..11-16, 今日・昨日・今週・先週・今月・先月・今年・去年（thisweek, lastweek, thismonth, lastmonth, thisyear, lastyear も） | 使った日・変更日・追加日・作成日のどれかが入る |
+| `#date` | `#日付` | 「先月ごろ」「11月頃」のように「ごろ・頃・くらい」を付けると前後に期間の 1/4（少なくとも 2 日）広げる。today, yesterday, 7d, 2w, 3m, 1y, 2026, 2026-11, 2026-11-14, 11-14, 11-14..11-16, 今日・昨日・今週・先週・今月・先月・今年・去年（thisweek, lastweek, thismonth, lastmonth, thisyear, lastyear も） | 使った日・変更日・追加日・作成日のどれかが入る |
 | `#modified` | `#m` `#変更日` | 同上 | 変更日だけ |
 | `#created` | `#c` `#作成日` | 同上 | 作成日だけ |
 | `#path` | `#p` `#in` `#場所` | Desktop, ~/Documents/仕事, "Obsidian Vault" | その下だけ（`~/` `/` で始まればその下、名前なら親フォルダの名前の一部、`a/b` ならパスの一部） |
 | `#name` | `#n` `#名前` | 請求 | 名前にその文字を含む物だけ（文字の一致） |
 | `#with` | `#w` `#一緒` | ~/Documents/見積書.pdf（ファイル 1 つ） | そのファイルと同じころに使った物 |
 | `#near` | `#nr` `#近く` | ~/Project/raiden/README.md（ファイルかフォルダ 1 つ） | そのファイルと同じプロジェクトの物 |
+| `#src` | `#source` `#入手元` | dl（ダウンロード）, mail（メール添付）, mine（自分で作成）。カンマで「または」 | 入手元 |
+| `#text` | `#content` `#本文` `#中身` | 見積金額 | 本文にその言葉を含む物（Spotlight の本文の索引） |
 | `#保存` | `#save` | 名前 | 今のチップに名前を付けて保存（絞り込みには使わない） |
 | `#alias` | `#dict` `#辞書` | 言い方 | 辞書に足す（絞り込みには使わない。下の「辞書」） |
 | `#<保存した名前>` | | | 保存した中身のコマンドに広げる（`#仕事のPDF` → `#ext pdf #path ~/Documents/仕事`） |
@@ -169,6 +173,12 @@ macOS 26 以降は Liquid Glass（`NSGlassEffectView`、白寄りの tint）、�
 - 保存した名前（`#仕事のPDF`）は `parse` の中で中身に広がる（`SavedFilters` の置き場を引く）。Engine には広げた後と同じ結果が渡る。
 
 #### 入力欄の動き
+
+- 「#」の一覧は覚えていることの言い方（時期・種類・入手元・プロジェクト・一緒に使ったもの・名前・本文・場所…）を見出しにし、コマンドを右に藍で添える。
+- 何も打っていないときは、最近の作業のまとまり（`Recall.sessions`。最後に使った時刻の順に、45 分あいたら別のまとまり。「今日 10:32–11:03 · raiden」、3 まとまり・9 行まで）。↑↓ で選び直すまでプレビューは出さない。
+- 候補が 15 件以上あるときは、窓の下の端に絞り込みの問い（`Recall.split`。「86 件 · 時期で絞り込む  ⌘1 今週 3 …」）。時期・種類・入手元・場所（プロジェクトの根）のうち、選び先の件数の 2 乗の和 / 全体² ＋ 取りこぼしの割合が一番小さい切り口を選ぶ（0.75 以上なら出さない）。⌘1〜⌘4 か押して決めると、打ったときと同じチップになる。候補を押し下げないよう一覧の下に置く。
+- 0 件のときは同じ場所に「探し方を変える」（`Recall.alternatives`。「先月ごろ」に広げる・本文から探す・条件を 1 つ外す。Spotlight で数えて見つかる案だけ）。ふつうの入力はアプリもファイルも見つからないときだけ。
+- 候補の行には「いつ・どこから」（今日 開いた・10/12 ダウンロード · example.co.jp・メール添付）。絞り込みで長い一覧になるときはファイルを時期の棚（今日・昨日・今週・先週・今月・M月・YYYY年）に分ける。プレビューに入手元・入手日・最後に開いた日・開いた日数。
 
 - 「#」: 先頭に保存した名前（`#仕事のPDF`、最大 4）とよく使う組み合わせ（`#ext pdf #path Downloads`、最大 3）、続けてコマンドの一覧（チップがあれば最後に `#保存`、いつも `#alias`）。組み合わせ・保存した名前を Enter で決めると、中身をまとめてチップにする（今のチップを含む組み合わせは残りだけ）。
 - 「#date 」で値の候補（件数つき。ほかの条件の中で数え、0 件は下に回す）。↑↓ で選んで Enter / Tab、Esc で一覧だけ閉じる。打ちかけの値はゴーストテキストで補い → / Tab で決める。
