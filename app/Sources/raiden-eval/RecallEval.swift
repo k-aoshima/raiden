@@ -72,7 +72,14 @@ func runRecallTests() -> (Int, Int) {
     // #text
     let tf = QueryFilters.parse("#text 見積金額 #kind pdf", now: now)
     expect(tf.contents == ["見積金額"] && tf.chips.contains { $0.label == "本文: 「見積金額」" } && tf.isActive, "#text のチップ \(tf.chips.map(\.label))")
-    expect(SpotlightSearch.queryString(SpotlightSearch.request(tf, now: now)).contains("kMDItemTextContent == \"*見積金額*\"cd"), "#text は本文で引く")
+    let tq = SpotlightSearch.queryString(SpotlightSearch.request(tf, now: now))
+    expect(tq.contains("kMDItemTextContent == \"見積*\"cdw") && tq.contains("kMDItemTextContent == \"金額*\"cdw"), "#text は本文を単語ごとに引く: \(tq)")
+    expect(SpotlightSearch.contentWords("東京海上日動あんしん生命保険") == ["東京", "海上", "日動", "あんしん", "生命", "保険"], "長い社名を単語に分ける")
+    expect(SpotlightSearch.contentWords("妊活保険の候補") == ["妊活", "保険", "候補"], "ひらがな 1 文字の語は捨てる")
+    expect(SpotlightSearch.contentWords("retrieval cues") == ["retrieval", "cues"], "英語は空白で分ける")
+    expect(SpotlightSearch.contentWords("の") == ["の"], "全部捨てたら元の言葉で引く")
+    expect(SpotlightSearch.contentWords("見積金額") == ["見積", "金額"], "1 文字ずつ割れた漢字はつなぐ: \(SpotlightSearch.contentWords("見積金額"))")
+    expect(SpotlightSearch.contentWords("あんしん生命の保険料").first == "あんしん", "ひらがなの語は残す: \(SpotlightSearch.contentWords("あんしん生命の保険料"))")
     expect(QueryFilters.parse("#本文 請求", now: now).contents == ["請求"], "#本文")
     // 見つからないときの探し方（数える口は見本: 本文から 5、先月ごろ 2、ほかは 0）
     let alt = Recall.alternatives("#date 先月 #kind pdf 見積", now: now) { q in

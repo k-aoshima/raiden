@@ -1,5 +1,6 @@
 import CoreServices
 import Foundation
+import NaturalLanguage
 
 /// ファイル・フォルダの検索は Spotlight（MDQuery）に問い合わせる（Raiden は自前の一覧もベクトルも持たない）。
 ///
@@ -209,6 +210,32 @@ public final class SpotlightSearch: @unchecked Sendable {
     }
 
     /// Spotlight の問い合わせの文（条件が 1 つも無ければ全部の物）。withTime は #with の X を使った時刻
+    /// #text の値を単語に分ける（NLTokenizer）。単語ごとに Spotlight の単語索引（"語*"cdw）を「かつ」で引く。
+    /// 文字列まるごとの部分一致（"*…*"cd）より速く（0.3 秒 → 0.01 秒）、「東京海上日動あんしん生命保険」のような
+    /// 長い言葉も、本文の書き方が少し違っていても当たる。ひらがな 1 文字（の・を）と記号だけの語は捨てる。
+    /// 「見積金額」→ 見 / 積 / 金額 のように漢字・カタカナが 1 文字ずつ割れた所はつなぐ（見積）。
+    /// 1 文字のまま "積*"cdw で引くと、本文の「見積」が当たらない
+    public static func contentWords(_ s: String) -> [String] {
+        let t = NLTokenizer(unit: .word)
+        t.string = s
+        func hira(_ w: Substring) -> Bool { w.unicodeScalars.allSatisfy { (0x3041...0x309F).contains($0.value) } }
+        var parts: [(Range<String.Index>, Bool)] = []   // 範囲と、1 文字の漢字・カタカナから始まった塊か
+        for r in t.tokens(for: s.startIndex..<s.endIndex) {
+            let one = s[r].count == 1 && !hira(s[r])
+            if one, let (last, open) = parts.last, open, last.upperBound == r.lowerBound {
+                parts[parts.count - 1] = (last.lowerBound..<r.upperBound, true)
+            } else {
+                parts.append((r, one))
+            }
+        }
+        let ws = parts.map { String(s[$0.0]) }.filter { w in
+            guard w.unicodeScalars.contains(where: { CharacterSet.alphanumerics.contains($0) }) else { return false }
+            return !(w.count == 1 && hira(Substring(w)))
+        }
+        let trimmed = s.trimmingCharacters(in: .whitespaces)
+        return ws.isEmpty ? (trimmed.isEmpty ? [] : [trimmed]) : ws
+    }
+
     public static func queryString(_ r: Request, withTime: Int? = nil) -> String {
         var cs: [String] = []
         if !r.words.isEmpty { cs.append(or(r.words.map(nameClause))) }
@@ -234,7 +261,7 @@ public final class SpotlightSearch: @unchecked Sendable {
         if r.sources == ["dl"] { cs.append("kMDItemWhereFroms == \"*\"") }
         if r.sources == ["mail"] { cs.append("kMDItemWhereFroms == \"message:*\"") }
         if r.sources == ["mine"] { cs.append("kMDItemWhereFroms != *") }
-        for w in r.contents { cs.append("kMDItemTextContent == \"*\(esc(w))*\"cd") }
+        for w in r.contents { cs += contentWords(w).map { "kMDItemTextContent == \"\(esc($0))*\"cdw" } }
         if cs.isEmpty { return "kMDItemContentTypeTree == \"public.item\"" }
         return cs.joined(separator: " && ")
     }
