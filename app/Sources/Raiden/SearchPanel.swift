@@ -439,6 +439,8 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     private var rows: [ResultRow] = []
     /// 2 列のカードで並べている（↑↓ で 2 つ、←→ で 1 つ動く）
     private var grid = false
+    /// カードの始まりの添字（その前は 1 列の行。カードは 1 かたまりで最後まで続く）
+    private var cardStart: Int?
     static let cardHeight: CGFloat = 54, cardGap: CGFloat = 6
     private var lines: [NSView] = []
     private var results: [RowItem] = []
@@ -906,7 +908,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
                    Self.messageHeight)
         }
         var listH: CGFloat = 0
-        grid = !secs.isEmpty && secs.allSatisfy { $0.items.allSatisfy(\.card) }
+        cardStart = nil
         for sec in secs {
             // 全体が見つからないときは上に大きく出しているので、節の見出しには添えない
             let fadeNote = sec.faded && !notFound ? "見つかりません" : nil
@@ -915,27 +917,31 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
                 entries.append(.header(title, sec.symbol, fadeNote))
                 listH += Self.headerHeight
             }
-            if sec.items.allSatisfy(\.card) {
-                var k = 0
-                while k < sec.items.count {
-                    let i = results.count
-                    for item in sec.items[k..<min(k + 2, sec.items.count)] { results.append(item); rowAlpha.append(1) }
-                    entries.append(.pair(i, k + 1 < sec.items.count ? i + 1 : nil))
+            // カードは 2 つずつ 1 段に、それ以外（保存した条件・よく使う組み合わせ）は 1 行ずつ
+            var k = 0
+            let items = sec.items
+            while k < items.count {
+                let i = results.count
+                if items[k].card {
+                    if cardStart == nil { cardStart = i }
+                    let two = k + 1 < items.count && items[k + 1].card
+                    for item in items[k..<(k + (two ? 2 : 1))] { results.append(item); rowAlpha.append(1) }
+                    entries.append(.pair(i, two ? i + 1 : nil))
                     listH += Self.cardHeight + Self.cardGap
-                    k += 2
+                    k += two ? 2 : 1
+                } else {
+                    entries.append(.row(i))
+                    results.append(items[k])
+                    rowAlpha.append(notFound || sec.faded ? 0.5 : 1)
+                    listH += Self.rowHeight
+                    k += 1
                 }
-                continue
-            }
-            for item in sec.items {
-                entries.append(.row(results.count))
-                results.append(item)
-                rowAlpha.append(notFound || sec.faded ? 0.5 : 1)
-                listH += Self.rowHeight
             }
         }
         if keep, !results.isEmpty {
             selected = results.firstIndex { Self.key($0) == keepKey } ?? min(keepIndex, results.count - 1)
         }
+        grid = cardStart != nil
         buildRows(upTo: max(Self.rowBatch - 1, selected + 20))
         lastLayout = (topH, listH)
         updateWide()
@@ -1073,6 +1079,20 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     var firstResultPath: String? { results.first?.candidate?.path }
     var builtRowCount: Int { rows.count }
     var scrollOffset: CGFloat { scroll.contentView.bounds.minY }
+
+    private var onCard: Bool { cardStart.map { selected >= $0 } ?? false }
+
+    /// ↑↓ で動く数。カードの間は 1 段（2 つ）、1 列の行からカードへ・カードから 1 列の行へは隣へ
+    private func verticalStep(_ d: Int) -> Int {
+        guard let cs = cardStart, selected >= cs else { return d }
+        let n = selected + 2 * d
+        if d < 0 && n < cs { return cs > 0 ? (cs - 1) - selected : d }   // 一番上の段から上: 1 列の最後の行へ
+        if d > 0 && n >= results.count {
+            // 最後の段の 1 つ上で、右の列には下が無い: 最後のカードへ。最後の段からは一番上へ回る
+            return (selected - cs) / 2 < (results.count - 1 - cs) / 2 ? (results.count - 1) - selected : -selected
+        }
+        return 2 * d
+    }
 
     private func moveSelection(_ d: Int) {
         guard !results.isEmpty else { return }
@@ -1263,16 +1283,16 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         if filterInput.handle(sel) { return true }
         switch sel {
         case #selector(NSResponder.moveDown(_:)):
-            moveSelection(grid ? 2 : 1)
+            moveSelection(verticalStep(1))
             return true
         case #selector(NSResponder.moveUp(_:)):
-            moveSelection(grid ? -2 : -1)
+            moveSelection(verticalStep(-1))
             return true
-        // 2 列のカードの間は ←→ で左右に動く（入力欄のカーソルが末尾にあるときだけ）
-        case #selector(NSResponder.moveLeft(_:)) where grid && textView.selectedRange().location == (textView.string as NSString).length:
+        // 2 列のカードの間は ←→ で左右に動く（カードを選んでいて、入力欄のカーソルが末尾にあるときだけ）
+        case #selector(NSResponder.moveLeft(_:)) where onCard && textView.selectedRange().location == (textView.string as NSString).length:
             moveSelection(-1)
             return true
-        case #selector(NSResponder.moveRight(_:)) where grid && textView.selectedRange().location == (textView.string as NSString).length:
+        case #selector(NSResponder.moveRight(_:)) where onCard && textView.selectedRange().location == (textView.string as NSString).length:
             moveSelection(1)
             return true
         case #selector(NSResponder.insertNewline(_:)):
