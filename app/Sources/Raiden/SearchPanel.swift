@@ -400,7 +400,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     private var userMoved = false
     private var shownQuery: String?
     private var topHeightConstraint: NSLayoutConstraint!
-    /// 一覧の下の端の行（絞り込みの問い。AskBar）
+    /// 一覧の上の行（絞り込みの問い。AskBar）
     private let footer = NSView()
     private var footerHeightConstraint: NSLayoutConstraint!
     private var footerH: CGFloat = 0
@@ -602,11 +602,12 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             topStack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             topStack.widthAnchor.constraint(equalToConstant: Self.width),
             topHeightConstraint,
-            scroll.topAnchor.constraint(equalTo: topStack.bottomAnchor),
+            // 絞り込みの問い（footer の名前のまま。今はチップの下・一覧の上）
+            footer.topAnchor.constraint(equalTo: topStack.bottomAnchor),
+            scroll.topAnchor.constraint(equalTo: footer.bottomAnchor),
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             scroll.widthAnchor.constraint(equalToConstant: Self.width),
             heightConstraint,
-            footer.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 2),
             footer.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             footer.widthAnchor.constraint(equalToConstant: Self.width),
             footerHeightConstraint,
@@ -627,7 +628,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
                 return ev
             }
             if ev.keyCode == 1 && mods == .command { self.filterInput.beginSave(); return nil }   // ⌘S
-            // ⌘1〜⌘4: 下の端の絞り込みの問いに答える
+            // ⌘1〜⌘4: 一覧の上の絞り込みの問いに答える
             if mods == .command, let i = [18, 19, 20, 21].firstIndex(of: Int(ev.keyCode)), let sp = self.askSplit, sp.options.indices.contains(i) {
                 self.pickAsk(i); return nil
             }
@@ -746,7 +747,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         let listH = min(list, maxList)
         heightConstraint.constant = listH
         footerHeightConstraint.constant = footerH
-        var inner = top + listH + (footerH > 0 ? footerH + 2 : 0)
+        var inner = top + listH + footerH
         // プレビューを出している間は、プレビューが読める高さを取る
         if wide { inner = max(inner, min(Self.previewMinHeight, Self.maxPanelHeight - Self.fieldHeight - 16)) }
         let h = Self.fieldHeight + (inner > 0 ? inner + 16 : 0)
@@ -782,19 +783,19 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     func setResults(_ sections: [ResultSection], query: String, notFound: Bool = false,
                     extra: [(NSView, CGFloat)] = [], palette: Bool = false, split: RecallSplit? = nil) {
         guard query == filterInput.currentQuery, palette || filterInput.palette == nil else { return }
-        // 下の端の絞り込みの問い（一覧・見つからない・辞書の行き先を選ぶ間は出さない）
+        // 一覧の上の絞り込みの問い（一覧・見つからない・辞書の行き先を選ぶ間は出さない）
         footer.subviews.forEach { $0.removeFromSuperview() }
         askSplit = palette || (notFound && split?.total != 0) || filterInput.isPickingAlias ? nil : split
         filterInput.asking = askSplit != nil
         if let sp = askSplit {
-            let bar = AskBar(sp) { [weak self] i in self?.pickAsk(i) }
+            let bar = AskBar(sp, width: Self.width) { [weak self] i in self?.pickAsk(i) }
             bar.translatesAutoresizingMaskIntoConstraints = false
             footer.addSubview(bar)
             NSLayoutConstraint.activate([
                 bar.topAnchor.constraint(equalTo: footer.topAnchor), bar.bottomAnchor.constraint(equalTo: footer.bottomAnchor),
                 bar.leadingAnchor.constraint(equalTo: footer.leadingAnchor), bar.trailingAnchor.constraint(equalTo: footer.trailingAnchor),
             ])
-            footerH = AskBar.height
+            footerH = bar.preferredHeight
         } else {
             footerH = 0
         }

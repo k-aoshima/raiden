@@ -40,7 +40,7 @@ final class FilterInput {
     var clips: () -> [ClipItem] = { [] }
 
     var isPickingAlias: Bool { aliasPhrase != nil }
-    /// 下の端に絞り込みの問いを出している（出している間は「続けて」の候補を出さない）
+    /// 一覧の上に絞り込みの問いを出している（出している間は「続けて」の候補を出さない）
     var asking = false
     /// クリップボードの履歴を出している間（専用のキーか #clip）。入力欄の文字で履歴を絞る
     private(set) var clipMode = false
@@ -699,7 +699,7 @@ enum FilterSnapshots {
         c.setResults([ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: Array(rows))], query: q)
         Snapshot.capture(c, dir + "/option-chips.png")
 
-        // 候補が多いときの絞り込みの問い（下の端）。候補と件数は見本
+        // 候補が多いときの絞り込みの問い（一覧の上）。候補と件数は見本
         let ak = panel("見積")
         let akRows = [("見積書_サンプル.xlsx", "~/Documents/サンプル", UTType.spreadsheet), ("estimate_sample.pdf", "~/Downloads", UTType.pdf),
                       ("見積依頼_サンプル.md", "~/Documents/サンプル/メモ", UTType.plainText)].map {
@@ -718,6 +718,15 @@ enum FilterSnapshots {
             .init(label: "メール添付", symbol: "envelope", command: "#src mail", count: 8)])
         ak2.setResults([ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: Array(akRows.prefix(2)))], query: ak2.filterInput.currentQuery, split: akSplit2)
         Snapshot.capture(ak2, dir + "/recall-ask2.png")
+        // 長い場所の名前で 1 行に入りきらないときは折り返す
+        let ak3 = panel("docx")
+        let akSplit3 = RecallSplit(title: "場所で絞り込む", total: 2018, options: [
+            .init(label: "sample-studio", symbol: "folder", command: "#path ~/Project/sample-studio", count: 724),
+            .init(label: "sample-studio-wt-fonts", symbol: "folder", command: "#path ~/Project/sample-studio-wt-fonts", count: 274),
+            .init(label: "sample-docs-archive", symbol: "folder", command: "#path ~/Documents/sample-docs-archive", count: 160),
+            .init(label: "Downloads", symbol: "folder", command: "#path ~/Downloads", count: 92)])
+        ak3.setResults([ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: akRows)], query: ak3.filterInput.currentQuery, split: akSplit3)
+        Snapshot.capture(ak3, dir + "/recall-ask-wrap.png")
         // 見つからないときの「探し方を変える」（件数は見本）
         let nf = panel("見積", committed: ["#date 先月", "#kind pdf"])
         let nfSplit = RecallSplit(title: "探し方を変える", total: 0, options: [
