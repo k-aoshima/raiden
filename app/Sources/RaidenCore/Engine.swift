@@ -225,6 +225,7 @@ public final class Engine {
         if let a = r.files.first { s.top1 = a.score; s.top2 = r.files.count > 1 ? r.files[1].score : a.score - 1 }
         var j = Judged(results: r.files, noMatch: !r.cancelled && r.files.isEmpty, signals: s)
         if f.hasSyntax { j.filters = f }
+        j.split = r.split; j.total = r.total
         return j
     }
 

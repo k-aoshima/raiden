@@ -87,6 +87,15 @@ if args.contains("--boot-bench") { try runBootBench(); exit(0) }
 if args.contains("--files") { try runFileEval(); exit(0) }
 // --settings-test --store <path>: 設定の読み書き・除外・DB の片付け・記録・動作の記録（SettingsTest.swift）
 if args.contains("--settings-test") { try runSettingsTest(); exit(0) }
+// --recall <入力>: Spotlight に実際に問い合わせて、件数と絞り込みの問いを見る（読むだけ）
+if let q = opt("--recall") {
+    let sp = SpotlightSearch()
+    let f = QueryFilters.parse(q)
+    let r = sp.search(q, filters: f.hasSyntax ? f : nil, limit: 9)
+    print("\(q): \(r.total) 件  \(String(format: "%.0f", r.ms))ms（問い \(String(format: "%.0f", r.splitMs))ms）")
+    if let s = r.split { print("  \(s.title): " + s.options.map { "\($0.label) \($0.count)（\($0.command)）" }.joined(separator: " / ")) } else { print("  問いなし") }
+    exit(0)
+}
 
 let fpStart = physFootprintMB()
 let tCollect = Date()

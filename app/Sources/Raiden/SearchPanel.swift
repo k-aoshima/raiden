@@ -107,6 +107,8 @@ final class ResultRow: NSView {
     let title = NSTextField(labelWithString: "")
     let sub = NSTextField(labelWithString: "")
     let hint = NSTextField(labelWithString: "")
+    /// 見出しの右に小さく添える文字（「#」の一覧のコマンド名 #date #k）。藍・等幅
+    let tagLabel = NSTextField(labelWithString: "")
     var onClick: (() -> Void)?
     var selected = false {
         didSet { needsDisplay = true; hint.isHidden = !selected; title.textColor = selected ? PanelStyle.indigoDeep : PanelStyle.text }
@@ -141,10 +143,14 @@ final class ResultRow: NSView {
         hint.font = .systemFont(ofSize: 11, weight: .medium)
         hint.textColor = PanelStyle.faint
         hint.isHidden = true
-        for v in [icon, title, sub, hint] as [NSView] {
+        tagLabel.font = .monospacedSystemFont(ofSize: 11.5, weight: .medium)
+        tagLabel.textColor = PanelStyle.indigo
+        tagLabel.lineBreakMode = .byTruncatingTail
+        for v in [icon, title, sub, hint, tagLabel] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
+        tagLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         hint.setContentCompressionResistancePriority(.required, for: .horizontal)
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
@@ -153,6 +159,9 @@ final class ResultRow: NSView {
             title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 12),
             title.topAnchor.constraint(equalTo: topAnchor, constant: 6),
             title.trailingAnchor.constraint(lessThanOrEqualTo: hint.leadingAnchor, constant: -10),
+            tagLabel.leadingAnchor.constraint(equalTo: title.trailingAnchor, constant: 10),
+            tagLabel.firstBaselineAnchor.constraint(equalTo: title.firstBaselineAnchor),
+            tagLabel.trailingAnchor.constraint(lessThanOrEqualTo: hint.leadingAnchor, constant: -10),
             sub.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             sub.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 1),
             sub.trailingAnchor.constraint(lessThanOrEqualTo: hint.leadingAnchor, constant: -10),
@@ -255,6 +264,8 @@ struct RowItem {
     var iconPath: String?
     var iconImage: NSImage?
     var hint: String
+    /// 見出しの右に小さく添える文字（「#」の一覧のコマンド名）
+    var tag = ""
     /// 右のプレビューに出す物（nil は出さない）
     var preview: PreviewTarget?
 
@@ -365,6 +376,11 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     private var userMoved = false
     private var shownQuery: String?
     private var topHeightConstraint: NSLayoutConstraint!
+    /// 一覧の下の端の行（絞り込みの問い。AskBar）
+    private let footer = NSView()
+    private var footerHeightConstraint: NSLayoutConstraint!
+    private var footerH: CGFloat = 0
+    private(set) var askSplit: RecallSplit?
     /// 行を一度に作る数（数千件でも最初はこれだけ作り、スクロールで足す）
     static let rowBatch = 200
     private var iconCache: [String: NSImage] = [:]
@@ -530,12 +546,13 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         let glow = GlowLineView()
         glowLine = glow
         sep.isHidden = true   // 区切りは光る線
-        for v in [veil, glow, glyph, field, statusIcon, status, sep, topStack, scroll] as [NSView] {
+        for v in [veil, glow, glyph, field, statusIcon, status, sep, topStack, scroll, footer] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(v)
         }
         heightConstraint = scroll.heightAnchor.constraint(equalToConstant: 0)
         topHeightConstraint = topStack.heightAnchor.constraint(equalToConstant: 0)
+        footerHeightConstraint = footer.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
             veil.topAnchor.constraint(equalTo: content.topAnchor), veil.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             veil.leadingAnchor.constraint(equalTo: content.leadingAnchor), veil.trailingAnchor.constraint(equalTo: content.trailingAnchor),
@@ -563,6 +580,10 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             scroll.widthAnchor.constraint(equalToConstant: Self.width),
             heightConstraint,
+            footer.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 2),
+            footer.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            footer.widthAnchor.constraint(equalToConstant: Self.width),
+            footerHeightConstraint,
         ])
         status.setContentCompressionResistancePriority(.required, for: .horizontal)
         statusIcon.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -580,6 +601,10 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
                 return ev
             }
             if ev.keyCode == 1 && mods == .command { self.filterInput.beginSave(); return nil }   // ⌘S
+            // ⌘1〜⌘4: 下の端の絞り込みの問いに答える
+            if mods == .command, let i = [18, 19, 20, 21].firstIndex(of: Int(ev.keyCode)), let sp = self.askSplit, sp.options.indices.contains(i) {
+                self.pickAsk(i); return nil
+            }
             return ev
         }
         filterInput.attach(self, field: field, content: content)
@@ -691,10 +716,11 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     private func layoutPanel(top: CGFloat, list: CGFloat) {
         lastLayout = (top, list)
         topHeightConstraint.constant = top
-        let maxList = max(Self.rowHeight * 3, Self.maxPanelHeight - Self.fieldHeight - 16 - top)
+        let maxList = max(Self.rowHeight * 3, Self.maxPanelHeight - Self.fieldHeight - 16 - top - footerH)
         let listH = min(list, maxList)
         heightConstraint.constant = listH
-        var inner = top + listH
+        footerHeightConstraint.constant = footerH
+        var inner = top + listH + (footerH > 0 ? footerH + 2 : 0)
         // プレビューを出している間は、プレビューが読める高さを取る
         if wide { inner = max(inner, min(Self.previewMinHeight, Self.maxPanelHeight - Self.fieldHeight - 16)) }
         let h = Self.fieldHeight + (inner > 0 ? inner + 16 : 0)
@@ -728,8 +754,24 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     /// 節ごとの印（ResultSection.faded）は、その節の候補だけ薄くして見出しに「見つかりません」を添える
     /// extra: 一番上に足す行（絞り込みの一覧の見出し）。palette: 絞り込みの一覧（出ている間は検索の結果で上書きしない）
     func setResults(_ sections: [ResultSection], query: String, notFound: Bool = false,
-                    extra: [(NSView, CGFloat)] = [], palette: Bool = false) {
+                    extra: [(NSView, CGFloat)] = [], palette: Bool = false, split: RecallSplit? = nil) {
         guard query == filterInput.currentQuery, palette || filterInput.palette == nil else { return }
+        // 下の端の絞り込みの問い（一覧・見つからない・辞書の行き先を選ぶ間は出さない）
+        footer.subviews.forEach { $0.removeFromSuperview() }
+        askSplit = palette || notFound || filterInput.isPickingAlias ? nil : split
+        filterInput.asking = askSplit != nil
+        if let sp = askSplit {
+            let bar = AskBar(sp) { [weak self] i in self?.pickAsk(i) }
+            bar.translatesAutoresizingMaskIntoConstraints = false
+            footer.addSubview(bar)
+            NSLayoutConstraint.activate([
+                bar.topAnchor.constraint(equalTo: footer.topAnchor), bar.bottomAnchor.constraint(equalTo: footer.bottomAnchor),
+                bar.leadingAnchor.constraint(equalTo: footer.leadingAnchor), bar.trailingAnchor.constraint(equalTo: footer.trailingAnchor),
+            ])
+            footerH = AskBar.height
+        } else {
+            footerH = 0
+        }
         var secs = sections.filter { !$0.items.isEmpty }
         var notFound = notFound
         if !palette && filterInput.isPickingAlias {
@@ -820,6 +862,12 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         if panel.isVisible { focusField(caretToEnd: false) }
     }
 
+    /// 絞り込みの問いの i 番目を選ぶ（打ったときと同じチップにする）
+    func pickAsk(_ i: Int) {
+        guard let sp = askSplit, sp.options.indices.contains(i) else { return }
+        filterInput.acceptNext(sp.options[i].command)
+    }
+
     /// 結果が届き直したときに同じ物か見分ける鍵
     private static func key(_ r: RowItem) -> String {
         switch r.candidate {
@@ -846,6 +894,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
                 row.translatesAutoresizingMaskIntoConstraints = false
                 row.title.stringValue = item.title
                 row.sub.stringValue = item.sub
+                row.tagLabel.stringValue = item.tag
                 row.setHint(item.hint)
                 row.icon.image = item.iconImage ?? item.iconPath.map(icon)
                 row.alphaValue = rowAlpha[i]

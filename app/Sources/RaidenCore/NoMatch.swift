@@ -26,6 +26,9 @@ public struct Judged<R: Sendable>: Sendable {
     public let signals: MatchSignals
     /// 入力欄のコマンドの読み取り結果（コマンドが無い入力では nil）。検索の記録（SearchLog）に残す用
     public var filters: QueryFilters? = nil
+    /// 候補が多いときの絞り込みの問い（ファイルの検索だけ）と、条件に合った件数
+    public var split: RecallSplit? = nil
+    public var total = 0
     public init(results: [R], noMatch: Bool, signals: MatchSignals, filters: QueryFilters? = nil) {
         self.results = results; self.noMatch = noMatch; self.signals = signals; self.filters = filters
     }

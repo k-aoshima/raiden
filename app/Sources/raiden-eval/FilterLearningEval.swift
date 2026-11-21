@@ -110,7 +110,7 @@ func runFilterLearningTests(ctx: FilterContext) -> (Int, Int) {
     let rest = pal("#", committed: ["#ext pdf"], memory: mem)?.items.first
     expect(rest?.commits == ["#path Downloads"], "チップを含む組み合わせは残りだけ \(rest?.title ?? "nil")")
     expect(pal("#", committed: ["#kind ss"], memory: mem)?.items.first?.badge != "よく使う", "チップを含まない組み合わせは出さない")
-    expect(pal("#ex", memory: mem)?.items.first?.title == "#ext", "打ちかけ（#ex）では組み合わせを出さずコマンド")
+    expect(pal("#ex", memory: mem)?.items.first?.insert == "#ext", "打ちかけ（#ex）では組み合わせを出さずコマンド")
     let nx = FilterCompletion.next(p("#ext pdf"), context: ctx, memory: mem, now: testNow)
     expect(nx.first?.commits == ["#path Downloads"], "#ext pdf の後に組み合わせの続き \(nx.map(\.title))")
     let up = pal("#ext ", ctx: ctx, memory: mem)?.items.first?.insert
@@ -148,8 +148,8 @@ func runFilterLearningTests(ctx: FilterContext) -> (Int, Int) {
     expect(pal("#保存 仕事のPDF", committed: ["#ext md"])?.items.first?.title.contains("上書き") == true, "同じ名前は上書きと出す")
     let sp = p("#保存 週報")
     expect(sp.notes.isEmpty && sp.saving == "週報" && !sp.isActive && sp.text.isEmpty, "#保存 は絞り込みにしない")
-    expect(pal("#", committed: ["#ext md"])?.items.contains { $0.title == "#保存" } == true, "チップがあれば一覧に #保存")
-    expect(pal("#")?.items.contains { $0.title == "#保存" } == false, "チップが無ければ #保存 は出さない")
+    expect(pal("#", committed: ["#ext md"])?.items.contains { $0.insert == "#保存" } == true, "チップがあれば一覧に #保存")
+    expect(pal("#")?.items.contains { $0.insert == "#保存" } == false, "チップが無ければ #保存 は出さない")
     expect(FilterCompletion.extractCommitted("#保存 週報 ", now: testNow) == nil, "#保存 の名前はチップにしない")
     if let pa = save, let it = pa.items.first {
         expect(FilterCompletion.accept(it, palette: pa, text: "#保存 週報").text == "", "保存したら入力欄から外す")
@@ -209,7 +209,7 @@ func runFilterLearningTests(ctx: FilterContext) -> (Int, Int) {
     let wv2 = pal("#near 見積", ctx: nc, memory: mem)?.items.map(\.title) ?? []
     expect(wv2 == ["見積書.pdf", "見積書_サンプル.pdf"], "名前の一部で絞る \(wv2)")
     expect(pal("#with ", memory: mem)?.items.first?.insert == "~/Downloads/請求書.pdf", "決めると ~/ のパスが入る")
-    expect(FilterCompletion.commands(matching: "").contains { $0.title == "#with" } && FilterCompletion.commands(matching: "ne").first?.title == "#near", "一覧に #with・#near")
+    expect(FilterCompletion.commands(matching: "").contains { $0.insert == "#with" } && FilterCompletion.commands(matching: "ne").first?.insert == "#near", "一覧に #with・#near")
 
     print("== 辞書")
     let dict = [
@@ -266,8 +266,8 @@ func runFilterLearningTests(ctx: FilterContext) -> (Int, Int) {
         let r = FilterCompletion.accept(it, palette: pa, text: "#alias ねこ")
         expect(r.text == "" && r.commit == nil && r.commits.isEmpty, "決めると入力欄から外す（行き先を選ぶ状態は入力欄の側）")
     }
-    expect(pal("#a")?.items.contains { $0.title == "#alias" } == true, "#a の一覧に #alias")
-    if let pa = pal("#ali"), let it = pa.items.first(where: { $0.title == "#alias" }) {
+    expect(pal("#a")?.items.contains { $0.insert == "#alias" } == true, "#a の一覧に #alias")
+    if let pa = pal("#ali"), let it = pa.items.first(where: { $0.insert == "#alias" }) {
         expect(FilterCompletion.accept(it, palette: pa, text: "#ali").text == "#alias ", "一覧から #alias を選ぶと「#alias 」")
     }
     expect(FilterCompletion.extractCommitted("#alias 黒い画面 ", now: testNow) == nil, "#alias の言い方はチップにしない")
@@ -280,7 +280,7 @@ func runFilterLearningTests(ctx: FilterContext) -> (Int, Int) {
     let cp = p("#clip 請求")
     expect(cp.notes.isEmpty && !cp.isActive, "#clip は使えないと知らせず、絞り込みにもしない \(cp.notes)")
     expect(p("#cl").notes.isEmpty, "打ちかけ（#cl）は知らせない")
-    if let pa = pal("#cl"), let it = pa.items.first(where: { $0.title == "#clip" }) {
+    if let pa = pal("#cl"), let it = pa.items.first(where: { $0.insert == "#clip" }) {
         expect(FilterCompletion.accept(it, palette: pa, text: "#cl").text == "#clip ", "一覧から #clip を選ぶと「#clip 」")
     } else { expect(false, "#cl の一覧に #clip") }
     expect(FilterCompletion.extractCommitted("#clip 請求 ", now: testNow) == nil, "#clip の言葉はチップにしない")

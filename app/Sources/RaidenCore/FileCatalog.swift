@@ -16,13 +16,20 @@ public struct FileEntry: Sendable, Equatable {
     public let lastUsed: Int       // kMDItemLastUsedDate（無ければ 0）
     public let usedDays: [Int]     // kMDItemUsedDates（その土地の日付の通し番号）
     public let downloaded: Bool    // kMDItemWhereFroms があるか ~/Downloads の中
+    public let fromMail: Bool      // メールの添付を保存した物（kMDItemWhereFroms が message: か Mail Downloads の中）
+    public let origin: String      // 入手元の URL のホスト（example.co.jp）。無ければ空
 
     public init(path: String, name: String, parentName: String, isDir: Bool, kind: String, families: [String], size: Int,
-                mtime: Int, created: Int, added: Int, lastUsed: Int, usedDays: [Int], downloaded: Bool) {
+                mtime: Int, created: Int, added: Int, lastUsed: Int, usedDays: [Int], downloaded: Bool,
+                fromMail: Bool = false, origin: String = "") {
         self.path = path; self.name = name; self.parentName = parentName; self.isDir = isDir; self.kind = kind
         self.families = families; self.size = size; self.mtime = mtime; self.created = created; self.added = added
         self.lastUsed = lastUsed; self.usedDays = usedDays; self.downloaded = downloaded
+        self.fromMail = fromMail; self.origin = origin
     }
+
+    /// 入手元（#src の値）: mail（メール添付）・dl（ダウンロード）・mine（自分で作成）
+    public var source: String { fromMail ? "mail" : downloaded ? "dl" : "mine" }
 
     /// 拡張子を除いた名前（フォルダはそのまま）
     public var stem: String { isDir ? name : (name as NSString).deletingPathExtension }

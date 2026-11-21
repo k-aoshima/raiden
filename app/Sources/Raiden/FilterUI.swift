@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 import RaidenCore
 
 /// 入力欄の絞り込みコマンド（#kind ss #date 7d …）の画面側。SearchPanelController からは数か所だけ呼ぶ。
@@ -39,6 +40,8 @@ final class FilterInput {
     var clips: () -> [ClipItem] = { [] }
 
     var isPickingAlias: Bool { aliasPhrase != nil }
+    /// 下の端に絞り込みの問いを出している（出している間は「続けて」の候補を出さない）
+    var asking = false
     /// クリップボードの履歴を出している間（専用のキーか #clip）。入力欄の文字で履歴を絞る
     private(set) var clipMode = false
 
@@ -405,14 +408,18 @@ final class FilterInput {
     private func paletteSections(_ p: FilterCompletion.Palette) -> [ResultSection] {
         let rows = displayed(p).map { it -> RowItem in
             var title = it.title
-            if !it.alias.isEmpty { title += "    " + it.alias }
+            // コマンドの一覧は、見出し（時期）の右にコマンド（#date）を藍で添える。ほかは今までどおり見出しに続ける
+            let tagged = p.mode == .commands && !it.title.hasPrefix("#")
+            if !it.alias.isEmpty && !tagged { title += "    " + it.alias }
             if let c = it.count { title += "  ·  \(FilterCompletion.countText(c)) 件" }
             let hint = p.mode == .save || p.mode == .alias ? "↩ 決める" : "↩ 選ぶ　Tab"
             // アプリの行（#from・#to）はそのアプリのアイコン
             let appIcon = it.bundleID.isEmpty ? nil
                 : NSWorkspace.shared.urlForApplication(withBundleIdentifier: it.bundleID).map { NSWorkspace.shared.icon(forFile: $0.path) }
-            return RowItem(title: title, sub: it.detail, iconImage: appIcon ?? symbol(it.symbol, size: 18, weight: .regular),
-                           hint: it.badge.isEmpty ? hint : it.badge + "　" + hint)
+            var row = RowItem(title: title, sub: it.detail, iconImage: appIcon ?? symbol(it.symbol, size: 18, weight: .regular),
+                              hint: it.badge.isEmpty ? hint : it.badge + "　" + hint)
+            if tagged { row.tag = it.alias }
+            return row
         }
         return [ResultSection(title: "候補", symbol: "list.bullet", items: rows)]
     }
@@ -428,7 +435,7 @@ final class FilterInput {
     private func paletteHeader(_ p: FilterCompletion.Palette) -> (NSView, CGFloat) {
         let title: String, sym: String
         switch p.mode {
-        case .commands: title = "絞り込みのコマンド"; sym = "line.3.horizontal.decrease"
+        case .commands: title = "何を覚えていますか"; sym = "line.3.horizontal.decrease"
         case .values(let c) where [.date, .modified, .created].contains(c):
             // 日付の書き方は一覧に出ないので見出しで見せる
             title = "\(c.name) の値　11-14・11月・11-1..11-14 とも打てる"; sym = "calendar"
@@ -459,7 +466,7 @@ final class FilterInput {
         if clipMode { return out }   // 履歴の絞り込みは入力欄の文字のまま（チップにしない）
         let f = QueryFilters.parse(query, now: now())
         if f.hasSyntax {
-            let next = (field?.stringValue.trimmingCharacters(in: .whitespaces).isEmpty ?? false)
+            let next = !asking && (field?.stringValue.trimmingCharacters(in: .whitespaces).isEmpty ?? false)
                 ? FilterCompletion.next(f, context: context?(), memory: memory(), now: now()) : []
             if !f.chips.isEmpty || !f.notes.isEmpty || !next.isEmpty {
                 out.append((ChipBar(chips: f.chips, notes: f.notes, next: next,
@@ -666,6 +673,18 @@ enum FilterSnapshots {
         let q = c.filterInput.currentQuery
         c.setResults([ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: Array(rows))], query: q)
         Snapshot.capture(c, dir + "/option-chips.png")
+
+        // 候補が多いときの絞り込みの問い（下の端）。候補と件数は見本
+        let ak = panel("見積")
+        let akRows = [("見積書_サンプル.xlsx", "~/Documents/サンプル", UTType.spreadsheet), ("estimate_sample.pdf", "~/Downloads", UTType.pdf),
+                      ("見積依頼_サンプル.md", "~/Documents/サンプル/メモ", UTType.plainText)].map {
+            RowItem(title: $0.0, sub: $0.1, iconImage: NSWorkspace.shared.icon(for: $0.2), hint: RowItem.fileHint)
+        }
+        let akSplit = RecallSplit(title: "時期で絞り込む", total: 86, options: [
+            .init(label: "今週", symbol: "clock", command: "#date 今週", count: 3), .init(label: "先月", symbol: "clock", command: "#date 先月", count: 41),
+            .init(label: "今年", symbol: "clock", command: "#date 今年", count: 74), .init(label: "去年", symbol: "clock", command: "#date 去年", count: 12)])
+        ak.setResults([ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: akRows)], query: ak.filterInput.currentQuery, split: akSplit)
+        Snapshot.capture(ak, dir + "/recall-ask.png")
 
         // #type app で全部出してスクロールした状態。アプリは OS 付属のもの（私的な名前は使わない）
         let appDirs = ["/System/Applications", "/System/Applications/Utilities"]

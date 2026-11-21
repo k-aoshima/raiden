@@ -311,7 +311,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let ms = Date().timeIntervalSince(t0) * 1000
                 DispatchQueue.main.async {
                     guard g == self.generation else { return }
-                    self.panel.setResults(r.sections, query: q, notFound: r.notFound)
+                    self.panel.setResults(r.sections, query: q, notFound: r.notFound, split: r.split)
                     if var s = self.session, s.query == q {
                         s.shown = r.sections.filter { !$0.items.isEmpty }.flatMap { sec in
                             sec.items.compactMap { $0.candidate.map { ($0, sec.symbol == "app.badge" ? "app" : "file") } }
@@ -351,6 +351,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var notFound: Bool
         var appsNoMatch: Bool
         var filesNoMatch: Bool
+        var split: RecallSplit? = nil
     }
 
     /// アプリとファイルを節に分けて並べる（合計 maxRows 件）。
@@ -392,7 +393,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if filtered {
             let shown = [first, second].filter { !$0.items.isEmpty }
             let notFound = !shown.isEmpty && shown.allSatisfy(\.faded)
-            return Sections(sections: [first, second], notFound: notFound, appsNoMatch: aj.noMatch, filesNoMatch: filesNoMatch)
+            return Sections(sections: [first, second], notFound: notFound, appsNoMatch: aj.noMatch, filesNoMatch: filesNoMatch,
+                            split: fj0.split)
         }
         let firstMax = 4
         let nSecond = min(second.items.count, total - min(first.items.count, firstMax))
@@ -401,7 +403,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         second.items = Array(second.items.prefix(nSecond))
         let shown = [first, second].filter { !$0.items.isEmpty }
         let notFound = !shown.isEmpty && shown.allSatisfy(\.faded)
-        return Sections(sections: [first, second], notFound: notFound, appsNoMatch: aj.noMatch, filesNoMatch: filesNoMatch)
+        return Sections(sections: [first, second], notFound: notFound, appsNoMatch: aj.noMatch, filesNoMatch: filesNoMatch,
+                        split: notFound ? nil : fj0.split)
     }
 
     private func open(_ q: String, _ c: Candidate, reveal: Bool) {

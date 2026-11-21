@@ -117,18 +117,18 @@ func runFilterTests() {
     func pal(_ t: String, committed: [String] = [], ctx: FilterContext? = nil) -> FilterCompletion.Palette? {
         FilterCompletion.palette(for: t, committed: committed, context: ctx, now: testNow)
     }
-    expect(pal("#")?.mode == .commands && pal("#")?.items.filter { $0.commits.isEmpty && $0.title != "#alias" && $0.title != "#clip" }.count == FilterCompletion.commandItems.count
-           && pal("#")?.items.last?.title == "#alias", "「#」で全部の一覧（#clip と、最後に #alias）")
+    expect(pal("#")?.mode == .commands && pal("#")?.items.filter { $0.commits.isEmpty && $0.insert != "#alias" && $0.insert != "#clip" }.count == FilterCompletion.commandItems.count
+           && pal("#")?.items.last?.insert == "#alias", "「#」で全部の一覧（#clip と、最後に #alias）")
     expect(pal("請求書 #")?.mode == .commands, "空白の直後の「#」")
-    expect(pal("＃")?.mode == .commands && pal("＃da")?.items.map(\.title) == ["#date"], "全角の「＃」でも一覧")
+    expect(pal("＃")?.mode == .commands && pal("＃da")?.items.map(\.insert) == ["#date"], "全角の「＃」でも一覧")
     expect(pal("C#") == nil && pal("#1") == nil, "「C#」「#1」は一覧を出さない")
     for t in ["kobako-", "2026-", "請求書-", "-1", "PDFを見るやつ", "1/2"] { expect(pal(t) == nil, "一覧を出さない「\(t)」") }
-    expect(pal("#da")?.items.map(\.title) == ["#date"], "#da → #date: \(pal("#da")?.items.map(\.title) ?? [])")
-    expect(pal("#k")?.items.map(\.title) == ["#kind"], "#k → #kind")
-    expect(pal("#t")?.items.map(\.title) == ["#type"], "#t → #type: \(pal("#t")?.items.map(\.title) ?? [])")
-    expect(pal("#種")?.items.map(\.title) == ["#kind"], "#種 → #kind")
-    expect(pal("#場")?.items.map(\.title) == ["#path"], "#場 → #path")
-    expect(pal("#in")?.items.map(\.title) == ["#path"], "#in → #path")
+    expect(pal("#da")?.items.map(\.insert) == ["#date"], "#da → #date: \(pal("#da")?.items.map(\.insert) ?? [])")
+    expect(pal("#k")?.items.map(\.insert) == ["#kind"], "#k → #kind")
+    expect(pal("#t")?.items.map(\.insert) == ["#type"], "#t → #type: \(pal("#t")?.items.map(\.insert) ?? [])")
+    expect(pal("#種")?.items.map(\.insert) == ["#kind"], "#種 → #kind")
+    expect(pal("#場")?.items.map(\.insert) == ["#path"], "#場 → #path")
+    expect(pal("#in")?.items.map(\.insert) == ["#path"], "#in → #path")
     expect(pal("#size") == nil, "知らない名前は一覧なし")
     expect(pal("#kind")?.mode == .commands, "「#kind」（空白前）はまだコマンドの一覧")
     expect(pal("#kind ")?.mode == .values(.kind), "「#kind 」で種類の候補")
@@ -166,8 +166,8 @@ func runFilterTests() {
     }
     expect(p("＃kind pdf").kinds == ["pdf"] && p("＃t ＃app").types == ["app"] && p("＃種類 pdf 請求書").text == "請求書", "全角の「＃」")
     expect(p("#t #app sa").text == "sa", "「#t #app sa」の残りは sa")
-    expect(pal("#ap")?.items.first?.title == "#type", "#ap → #type の行")
-    expect(FilterCompletion.commands(matching: "").first { $0.title == "#type" }?.alias.contains("#app") == true, "一覧の #type に別名 #app")
+    expect(pal("#ap")?.items.first?.insert == "#type", "#ap → #type の行")
+    expect(FilterCompletion.commands(matching: "").first { $0.insert == "#type" }?.alias.contains("#app") == true, "一覧の #type に別名 #app")
     expect(pal("#t #ap")?.mode == .values(.type) && pal("#t #ap")?.items.first?.insert == "app", "「#t #ap」は #type の値の候補")
     expect(pal("#t #fol")?.items.first?.insert == "d", "「#t #fol」→ d")
     if let p3 = pal("#t #ap") {
@@ -208,6 +208,8 @@ func runFilterTests() {
 
     let (lc, lf) = runFilterLearningTests(ctx: ctx)
     checks += lc; failures += lf
+    let (rc, rf) = runRecallTests()
+    checks += rc; failures += rf
     print("（うち 覚える・保存・言葉からの候補・#with #near・辞書・#alias の確かめ \(lc - lf)/\(lc)）")
     print("確かめ \(checks - failures)/\(checks)")
 

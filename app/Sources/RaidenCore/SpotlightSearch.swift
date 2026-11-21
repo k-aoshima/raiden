@@ -71,11 +71,12 @@ public final class SpotlightSearch: @unchecked Sendable {
         public var withAnchor: String?
         public var nearAnchor: String?
         public var download = false              // 「ダウンロードした」（~/Downloads か kMDItemWhereFroms）
+        public var sources: Set<String> = []     // #src（dl / mail / mine）。細かい所は post でふるう
         /// 結果をふるう条件（#path の名前・パス・種類の細かい所）。名前の言葉は別に見る
         public var post: QueryFilters?
         public var isEmpty: Bool {
             words.isEmpty && names.isEmpty && families.isEmpty && kindExts.isEmpty && exts.isEmpty && types.isEmpty && dates.isEmpty
-                && scopes.isEmpty && pathNames.isEmpty && withAnchor == nil && nearAnchor == nil && !download
+                && scopes.isEmpty && pathNames.isEmpty && withAnchor == nil && nearAnchor == nil && !download && sources.isEmpty
         }
         public init() {}
     }
@@ -95,6 +96,7 @@ public final class SpotlightSearch: @unchecked Sendable {
         }
         r.withAnchor = f.withPath
         r.nearAnchor = f.nearPath
+        r.sources = f.sources
         r.post = f
         return r
     }
@@ -226,6 +228,10 @@ public final class SpotlightSearch: @unchecked Sendable {
         }
         if let t = withTime { cs.append(rangeClause("kMDItemLastUsedDate", (t - withWindow)...(t + withWindow))) }
         if r.download { cs.append("kMDItemWhereFroms == \"*\"") }
+        // #src: 1 つだけなら Spotlight でも絞る（dl は入手元の記録がある物。~/Downloads の記録の無い物は拾えない）
+        if r.sources == ["dl"] { cs.append("kMDItemWhereFroms == \"*\"") }
+        if r.sources == ["mail"] { cs.append("kMDItemWhereFroms == \"message:*\"") }
+        if r.sources == ["mine"] { cs.append("kMDItemWhereFroms != *") }
         if cs.isEmpty { return "kMDItemContentTypeTree == \"public.item\"" }
         return cs.joined(separator: " && ")
     }
@@ -266,6 +272,9 @@ public final class SpotlightSearch: @unchecked Sendable {
         public var scopes: [String] = []      // 範囲
         public var cancelled = false
         public var note: String?              // #with / #near の X が見つからなかったなど
+        public var total = 0                  // 条件に合った件数（並べて切る前）
+        public var split: RecallSplit?        // 候補が多いときの絞り込みの問い
+        public var splitMs: Double = 0        // 問いを作るのにかかった時間
     }
 
     static let attrs: [CFString] = [kMDItemPath, kMDItemFSName, kMDItemDisplayName, kMDItemContentType, kMDItemContentTypeTree,
@@ -327,7 +336,11 @@ public final class SpotlightSearch: @unchecked Sendable {
         }
         func t(_ k: String) -> Int { Int((d[k] as? Date)?.timeIntervalSince1970 ?? 0) }
         let created = t(kMDItemContentCreationDate as String)
-        let froms = (d[kMDItemWhereFroms as String] as? [String])?.isEmpty == false
+        let fromList = d[kMDItemWhereFroms as String] as? [String] ?? []
+        let froms = !fromList.isEmpty
+        let mail = fromList.contains { $0.hasPrefix("message:") } || path.contains("/Mail Downloads/")
+        // 入手元のホスト（最初に読める URL。ダウンロードの記録は「ファイルの URL, ページの URL」の順）
+        let origin = fromList.lazy.compactMap { URL(string: $0)?.host }.first.map { $0.hasPrefix("www.") ? String($0.dropFirst(4)) : $0 } ?? ""
         return FileEntry(path: path, name: name,
                          parentName: ((path as NSString).deletingLastPathComponent as NSString).lastPathComponent,
                          isDir: isDir, kind: (d[kMDItemKind as String] as? String ?? (isDir ? "フォルダ" : "書類")).precomposedStringWithCanonicalMapping,
@@ -335,7 +348,7 @@ public final class SpotlightSearch: @unchecked Sendable {
                          mtime: t(kMDItemContentModificationDate as String),
                          created: created > 0 ? created : t(kMDItemFSCreationDate as String),
                          added: t("kMDItemDateAdded"), lastUsed: t(kMDItemLastUsedDate as String), usedDays: [],
-                         downloaded: froms || path.hasPrefix(home + "/Downloads/"))
+                         downloaded: froms || path.hasPrefix(home + "/Downloads/"), fromMail: mail, origin: origin)
     }
 
     /// 確かめ用（名前の一致の強さ）
@@ -447,6 +460,10 @@ public final class SpotlightSearch: @unchecked Sendable {
             guard FileManager.default.fileExists(atPath: p), let e = Self.entry(path: p), passes(e, req: req, display: nil) else { continue }
             seen.insert(p); entries.append(e)
         }
+        res.total = entries.count
+        let tSplit = Date()
+        res.split = Recall.split(entries, filters: req.post, hasDate: !req.dates.isEmpty, now: now)
+        res.splitMs = ms(tSplit)
         let maxCo = co.values.max() ?? 0
         let nowT = Int(now.timeIntervalSince1970)
         var scored: [(FileEntry, Float)] = entries.map { e in
