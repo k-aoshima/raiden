@@ -268,6 +268,21 @@ final class FilterInput {
         panel?.focusField()
     }
 
+    /// 入力全体を書き換える（「探し方を変える」の案）。コマンドはチップに、残りは入力欄に
+    func replaceQuery(_ q: String) {
+        guard let field else { return }
+        if let ex = FilterCompletion.extractCommitted(q + " ", now: now()) {
+            committed = ex.commands
+            field.stringValue = ex.text.trimmingCharacters(in: .whitespaces)
+        } else {
+            committed = []
+            field.stringValue = q
+        }
+        stepBack = nil
+        refresh()
+        panel?.focusField()
+    }
+
     /// 言葉からの候補を決める: チップにして、入力からその言葉を外す
     func acceptSuggestion(_ s: FilterSuggest.Suggestion) {
         guard let field else { return }
@@ -703,6 +718,14 @@ enum FilterSnapshots {
             .init(label: "メール添付", symbol: "envelope", command: "#src mail", count: 8)])
         ak2.setResults([ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: Array(akRows.prefix(2)))], query: ak2.filterInput.currentQuery, split: akSplit2)
         Snapshot.capture(ak2, dir + "/recall-ask2.png")
+        // 見つからないときの「探し方を変える」（件数は見本）
+        let nf = panel("見積", committed: ["#date 先月", "#kind pdf"])
+        let nfSplit = RecallSplit(title: "探し方を変える", total: 0, options: [
+            .init(label: "「先月ごろ」に広げる", symbol: "clock", command: "#date 先月ごろ #kind pdf 見積", count: 4, replaces: true),
+            .init(label: "本文から「見積」", symbol: "text.magnifyingglass", command: "#date 先月 #kind pdf #text 見積", count: 9, replaces: true),
+            .init(label: "「PDF」を外す", symbol: "xmark.circle", command: "#date 先月 見積", count: 3, replaces: true)])
+        nf.setResults([], query: nf.filterInput.currentQuery, split: nfSplit)
+        Snapshot.capture(nf, dir + "/recall-notfound.png")
 
         // 絞り込みの長い一覧を時期の棚に分けた状態（行に「いつ・どこから」）。今の時刻からの見本
         let nowT = Int(Date().timeIntervalSince1970)

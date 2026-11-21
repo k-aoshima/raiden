@@ -404,8 +404,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if fileSec.items.count > SearchPanelController.maxRows, let i = secs.firstIndex(where: { $0.symbol == "folder" }) {
                 secs.replaceSubrange(i...i, with: timeShelves(fileSec))
             }
+            // 何も見つからなければ「探し方を変える」の案（時期を広げる・本文から・条件を 1 つ外す）
+            let none = fileSec.items.isEmpty && appSec.items.isEmpty
             return Sections(sections: secs, notFound: notFound, appsNoMatch: aj.noMatch, filesNoMatch: filesNoMatch,
-                            split: fj0.split)
+                            split: none ? e.alternatives(q) : fj0.split)
         }
         let firstMax = 4
         let nSecond = min(second.items.count, total - min(first.items.count, firstMax))
@@ -414,8 +416,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         second.items = Array(second.items.prefix(nSecond))
         let shown = [first, second].filter { !$0.items.isEmpty }
         let notFound = !shown.isEmpty && shown.allSatisfy(\.faded)
+        // アプリもファイルも見つからなければ「本文から探す」などの案（アプリが当たる入力では数えない。打つたびに遅くしないため）
+        let alt = fileResults.isEmpty && aj.noMatch ? e.alternatives(q) : nil
         return Sections(sections: [first, second], notFound: notFound, appsNoMatch: aj.noMatch, filesNoMatch: filesNoMatch,
-                        split: notFound ? nil : fj0.split)
+                        split: alt ?? (notFound ? nil : fj0.split))
     }
 
     /// ファイルの節を時期の棚に分ける。棚は新しい順、棚の中は元の並び（点数の順）。

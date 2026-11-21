@@ -72,11 +72,12 @@ public final class SpotlightSearch: @unchecked Sendable {
         public var nearAnchor: String?
         public var download = false              // 「ダウンロードした」（~/Downloads か kMDItemWhereFroms）
         public var sources: Set<String> = []     // #src（dl / mail / mine）。細かい所は post でふるう
+        public var contents: [String] = []       // #text（本文に含む言葉。かつ）
         /// 結果をふるう条件（#path の名前・パス・種類の細かい所）。名前の言葉は別に見る
         public var post: QueryFilters?
         public var isEmpty: Bool {
             words.isEmpty && names.isEmpty && families.isEmpty && kindExts.isEmpty && exts.isEmpty && types.isEmpty && dates.isEmpty
-                && scopes.isEmpty && pathNames.isEmpty && withAnchor == nil && nearAnchor == nil && !download && sources.isEmpty
+                && scopes.isEmpty && pathNames.isEmpty && withAnchor == nil && nearAnchor == nil && !download && sources.isEmpty && contents.isEmpty
         }
         public init() {}
     }
@@ -97,6 +98,7 @@ public final class SpotlightSearch: @unchecked Sendable {
         r.withAnchor = f.withPath
         r.nearAnchor = f.nearPath
         r.sources = f.sources
+        r.contents = f.contents
         r.post = f
         return r
     }
@@ -232,6 +234,7 @@ public final class SpotlightSearch: @unchecked Sendable {
         if r.sources == ["dl"] { cs.append("kMDItemWhereFroms == \"*\"") }
         if r.sources == ["mail"] { cs.append("kMDItemWhereFroms == \"message:*\"") }
         if r.sources == ["mine"] { cs.append("kMDItemWhereFroms != *") }
+        for w in r.contents { cs.append("kMDItemTextContent == \"*\(esc(w))*\"cd") }
         if cs.isEmpty { return "kMDItemContentTypeTree == \"public.item\"" }
         return cs.joined(separator: " && ")
     }
@@ -320,7 +323,9 @@ public final class SpotlightSearch: @unchecked Sendable {
 
     /// 1 件の属性から FileEntry を作る（種類は名前の拡張子と UTI の両方から）
     static func entry(_ d: [String: Any]) -> FileEntry? {
-        guard let p0 = d[kMDItemPath as String] as? String else { return nil }
+        guard var p0 = d[kMDItemPath as String] as? String else { return nil }
+        // データの巻のファームリンク（/System/Volumes/Data/Users/…）で返ることがあるので、ふだんの書き方（/Users/…）に直す
+        if p0.hasPrefix("/System/Volumes/Data/") { p0 = String(p0.dropFirst("/System/Volumes/Data".count)) }
         let path = p0.precomposedStringWithCanonicalMapping
         let name = (path as NSString).lastPathComponent
         let ct = d[kMDItemContentType as String] as? String ?? ""

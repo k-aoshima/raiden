@@ -13,7 +13,7 @@ import Foundation
 ///   コマンドと読むのは、入力の先頭か空白の直後の「#」「＃」＋文字だけ（「C#」「#1」は普通の文字）。
 public struct QueryFilters: Sendable {
     public enum Command: String, Sendable, CaseIterable {
-        case kind, type, ext, date, modified, created, path, name, with, near, src
+        case kind, type, ext, date, modified, created, path, name, with, near, src, text
         public var takesValue: Bool { true }
         public var name: String { QueryFilters.mark + rawValue }
         /// 短い別名（find / fd と同じ 1 文字）。#date は無し
@@ -28,7 +28,7 @@ public struct QueryFilters: Sendable {
             case .name: return "#n"
             case .with: return "#w"
             case .near: return "#nr"
-            case .date, .src: return nil
+            case .date, .src, .text: return nil
             }
         }
         var isDate: Bool { self == .date || self == .modified || self == .created }
@@ -78,6 +78,8 @@ public struct QueryFilters: Sendable {
     public var nearPath: String?
     /// #src（入手元）: dl（ダウンロード）・mail（メール添付）・mine（自分で作成）。または
     public var sources: Set<String> = []
+    /// #text（本文に含む言葉。かつ）。matches では見ない（中身は Spotlight でしか引けない）
+    public var contents: [String] = []
     var labels: [Command: [String]] = [:]
     /// チップの並び（付けた順。同じコマンドは 1 つにまとめる）
     public private(set) var order: [Command] = []
@@ -85,7 +87,7 @@ public struct QueryFilters: Sendable {
     var hasKind: Bool { !kinds.isEmpty || !kindExts.isEmpty }
     /// 絞り込みが効いているか
     public var isActive: Bool {
-        !types.isEmpty || hasKind || !exts.isEmpty || !dates.isEmpty || !paths.isEmpty || !names.isEmpty || hasRelation || !sources.isEmpty
+        !types.isEmpty || hasKind || !exts.isEmpty || !dates.isEmpty || !paths.isEmpty || !names.isEmpty || hasRelation || !sources.isEmpty || !contents.isEmpty
     }
     /// #with か #near が付いている（手元の matches では絞れず、土台の側で絞る条件）
     public var hasRelation: Bool { withPath != nil || nearPath != nil }
@@ -94,7 +96,7 @@ public struct QueryFilters: Sendable {
     /// アプリを候補に出すか（ファイルにしか効かない条件が付いていれば出さない）
     public var allowsApps: Bool {
         (types.isEmpty || types.contains("app")) && (!hasKind || kinds.contains("app"))
-            && exts.isEmpty && dates.isEmpty && paths.isEmpty && !hasRelation && sources.isEmpty
+            && exts.isEmpty && dates.isEmpty && paths.isEmpty && !hasRelation && sources.isEmpty && contents.isEmpty
     }
     /// ファイル・フォルダを候補に出すか（アプリだけを頼んだときは出さない）
     public var allowsFiles: Bool {
@@ -116,6 +118,7 @@ public struct QueryFilters: Sendable {
         ("with", .with), ("w", .with), ("一緒", .with),
         ("near", .near), ("nr", .near), ("近く", .near),
         ("src", .src), ("source", .src), ("入手元", .src),
+        ("text", .text), ("content", .text), ("本文", .text), ("中身", .text),
     ]
 
     /// #src の値（入手元）→ dl / mail / mine
@@ -303,6 +306,7 @@ public struct QueryFilters: Sendable {
             if f.withPath != nil { others.append("#with") }
             if f.nearPath != nil { others.append("#near") }
             if !f.sources.isEmpty { others.append("#src") }
+            if !f.contents.isEmpty { others.append("#text") }
             if !others.isEmpty { f.notes.append("アプリ（#type app）と \(others.joined(separator: "・")) は一緒に使えません") }
         }
         f.text = f.hasSyntax ? rest.joined(separator: " ") : query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -376,6 +380,12 @@ public struct QueryFilters: Sendable {
             sources.formUnion(ss.map { $0! })
             remember(.src, ls)
             return ls.joined(separator: "・")
+        case .text:
+            let w = v.trimmingCharacters(in: .whitespaces)
+            if w.isEmpty { return nil }
+            if !contents.contains(w) { contents.append(w) }
+            remember(.text, ["「\(w)」"])
+            return "「\(w)」"
         case .with, .near:
             let p = v.trimmingCharacters(in: .whitespaces)
             if p.isEmpty { return nil }
@@ -401,6 +411,7 @@ public struct QueryFilters: Sendable {
         case .with: f.withPath = nil
         case .near: f.nearPath = nil
         case .src: f.sources = []
+        case .text: f.contents = []
         }
         f.labels[c] = nil
         f.order.removeAll { $0 == c }
@@ -504,6 +515,7 @@ public struct QueryFilters: Sendable {
             case .with: return Chip(command: c, symbol: "link", label: "一緒に使った: " + v)
             case .near: return Chip(command: c, symbol: "point.3.connected.trianglepath.dotted", label: "同じプロジェクト: " + v)
             case .src: return Chip(command: c, symbol: "arrow.down.circle", label: "入手元: " + v)
+            case .text: return Chip(command: c, symbol: "text.magnifyingglass", label: "本文: " + v)
             }
         }
     }

@@ -229,6 +229,14 @@ public final class Engine {
         return j
     }
 
+    /// 条件に合う物が 0 件のときの「探し方を変える」の案（各案を Spotlight で数える。1 回 100〜200ms）
+    public func alternatives(_ q: String, now: Date = Date()) -> RecallSplit? {
+        Recall.alternatives(q, now: now) { [spotlight] nq in
+            let f = QueryFilters.parse(nq, now: now)
+            return f.allowsFiles ? spotlight.count(f, max: 1000, now: now) : 0
+        }
+    }
+
     /// 走っているファイルの問い合わせを止める（次の文字が来たとき）
     public func cancelFiles() { spotlight.cancel() }
 }

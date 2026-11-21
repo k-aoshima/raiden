@@ -69,6 +69,23 @@ func runRecallTests() -> (Int, Int) {
     } else { expect(false, "先月ごろ が読めない") }
     expect(QueryFilters.parseDate("11月頃", now: now)?.1 == "11月ごろ", "11月頃")
     expect(QueryFilters.parse("#date 先月ごろ 見積", now: now).chips.first?.label == "期間: 先月ごろ", "チップは「期間: 先月ごろ」")
+    // #text
+    let tf = QueryFilters.parse("#text 見積金額 #kind pdf", now: now)
+    expect(tf.contents == ["見積金額"] && tf.chips.contains { $0.label == "本文: 「見積金額」" } && tf.isActive, "#text のチップ \(tf.chips.map(\.label))")
+    expect(SpotlightSearch.queryString(SpotlightSearch.request(tf, now: now)).contains("kMDItemTextContent == \"*見積金額*\"cd"), "#text は本文で引く")
+    expect(QueryFilters.parse("#本文 請求", now: now).contents == ["請求"], "#本文")
+    // 見つからないときの探し方（数える口は見本: 本文から 5、先月ごろ 2、ほかは 0）
+    let alt = Recall.alternatives("#date 先月 #kind pdf 見積", now: now) { q in
+        q.contains("#text") ? 5 : q.contains("先月ごろ") ? 2 : 0
+    }
+    expect(alt?.title == "探し方を変える" && alt?.total == 0, "探し方を変える")
+    expect(alt?.options.first?.label == "「先月ごろ」に広げる" && alt?.options.first?.command == "#date 先月ごろ #kind pdf 見積" && alt?.options.first?.replaces == true,
+           "時期を広げる案 \(alt?.options.map(\.command) ?? [])")
+    expect(alt?.options.contains { $0.command == "#date 先月 #kind pdf #text 見積" } == true, "本文から探す案")
+    expect(alt?.options.count == 2, "見つからない案（0 件）は出さない")
+    let alt2 = Recall.alternatives("#date 先月 #kind pdf", now: now) { q in q.contains("#kind") ? 0 : 3 }
+    expect(alt2?.options.map(\.label) == ["「PDF」を外す"], "条件を 1 つ外す案 \(alt2?.options.map(\.label) ?? [])")
+    expect(Recall.alternatives("見積", now: now) { _ in 4 }?.options.map(\.command) == ["#text 見積"], "ふつうの入力は本文から探す案だけ")
     // 最近の作業のまとまり: 45 分あいたら分ける、1 まとまり 4 行まで、合計 9 行まで
     func used(_ p: String, minAgo: Int) -> FileEntry {
         FileEntry(path: home + p, name: (p as NSString).lastPathComponent, parentName: "", isDir: false, kind: "", families: [], size: 1,

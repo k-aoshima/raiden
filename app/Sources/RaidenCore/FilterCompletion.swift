@@ -149,6 +149,7 @@ public enum FilterCompletion {
         (.near, "point.3.connected.trianglepath.dotted", "プロジェクト", "そのファイルと同じプロジェクトのもの", "例: ~/Project/raiden/README.md"),
         (.with, "link", "一緒に使ったもの", "そのファイルと同じころ使ったもの", "例: ~/Documents/見積書.pdf"),
         (.name, "textformat", "名前", "名前に含む文字", "例: 請求書"),
+        (.text, "text.magnifyingglass", "本文", "ファイルの中身に含む言葉", "例: 見積金額"),
         (.path, "folder", "場所", "フォルダ（パスの一部）", "例: Desktop, ~/Documents/仕事"),
         (.ext, "tag", "拡張子", "", "例: pdf, docx, pdf,docx"),
         (.type, "square.grid.2x2", "ファイル・フォルダ・アプリ", "", "例: f, d, app"),
@@ -352,8 +353,11 @@ public enum FilterCompletion {
     }
 
     public static func commands(matching name: String) -> [Item] {
-        commandItems.filter { c in
-            hit(name, QueryFilters.aliases.filter { $0.1 == c.0 }.map(\.0) + (c.0 == .type ? QueryFilters.typeShorthands.map(\.0) : []))
+        // 別名をそのまま打ったら（#t）、その 1 つだけ（#text などの打ちかけとしては出さない）
+        let exact = name.isEmpty ? nil : QueryFilters.command(named: name)
+        return commandItems.filter { c in
+            if let exact { return c.0 == exact }
+            return hit(name, QueryFilters.aliases.filter { $0.1 == c.0 }.map(\.0) + (c.0 == .type ? QueryFilters.typeShorthands.map(\.0) : []))
         }.map { c in
             // 右に添えるのはコマンドと短い別名だけ（日本語の別名は見出しと同じなので出さない。打てば当たる）
             let sh = c.0 == .type ? QueryFilters.typeShorthands.map { QueryFilters.mark + $0.0 } : []
@@ -442,7 +446,7 @@ public enum FilterCompletion {
             })
         case .with, .near:
             return fileItems(partial: partial, src: src, memory: memory)
-        case .name:
+        case .name, .text:
             return []
         }
         // 並べ方: よく使う値 → 件数のある値（種類・拡張子は多い順）→ 0 件

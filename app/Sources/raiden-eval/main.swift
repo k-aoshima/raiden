@@ -101,6 +101,7 @@ if let q = opt("--recall") {
     let f = QueryFilters.parse(q)
     let r = sp.search(q, filters: f.hasSyntax ? f : nil, limit: 9)
     print("\(q): \(r.total) 件  \(String(format: "%.0f", r.ms))ms（問い \(String(format: "%.0f", r.splitMs))ms）")
+    if r.total == 0, let a = Engine().alternatives(q) { print("  " + a.title + ": " + a.options.map { "\($0.label) \($0.count)（\($0.command)）" }.joined(separator: " / ")) }
     if let s = r.split { print("  \(s.title): " + s.options.map { "\($0.label) \($0.count)（\($0.command)）" }.joined(separator: " / ")) } else { print("  問いなし") }
     exit(0)
 }

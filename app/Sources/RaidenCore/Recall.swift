@@ -10,8 +10,10 @@ public struct RecallSplit: Sendable, Equatable {
         public let symbol: String    // SF Symbols
         public let command: String   // #date 先月
         public let count: Int
-        public init(label: String, symbol: String, command: String, count: Int) {
-            self.label = label; self.symbol = symbol; self.command = command; self.count = count
+        /// true なら command は入力全体の置き換え（探し方を変えるとき）。false ならチップを 1 つ足す
+        public var replaces = false
+        public init(label: String, symbol: String, command: String, count: Int, replaces: Bool = false) {
+            self.label = label; self.symbol = symbol; self.command = command; self.count = count; self.replaces = replaces
         }
     }
     public let title: String         // 時期で絞り込む
@@ -90,7 +92,8 @@ public enum Recall {
                 let root = sortedRoots.first { dir == $0 || dir.hasPrefix($0 + "/") } ?? dir
                 groups[root, default: []].formUnion(ix)
             }
-            let opts = groups.filter { $0.value.count < total }.map { (root, hit) -> (RecallSplit.Option, Set<Int>) in
+            // ホームや / を選び先にしない（#path ~ では絞れず、件数と食い違う）
+            let opts = groups.filter { $0.value.count < total && $0.key != NSHomeDirectory() && $0.key != "/" }.map { (root, hit) -> (RecallSplit.Option, Set<Int>) in
                 let short = (root as NSString).abbreviatingWithTildeInPath
                 let v = short.contains(where: \.isWhitespace) ? "\"\(short)\"" : short
                 return (RecallSplit.Option(label: placeLabel(root), symbol: "folder", command: "#path \(v)", count: hit.count), hit)
@@ -110,6 +113,46 @@ public enum Recall {
         // どの切り口でも、選んでもほとんど減らない（一番大きい選び先が大半を占める）なら聞かない
         guard let b = best, b.2 < maxScore else { return nil }
         return RecallSplit(title: "\(b.0)で絞り込む", total: total, options: b.1.map(\.0))
+    }
+
+    // MARK: - 見つからないときの探し方
+
+    /// 条件に合う物が 0 件のときの「探し方を変える」の案（入力全体の書き換え）。count は各案で見つかる数を数える口。
+    /// 行き詰まったら探す場所を変えると、また思い出せる（Williams & Hollan 1981）ので、
+    /// 時期を広げる・名前でなく本文から探す・条件を 1 つ外す、を数えて見つかる物だけ出す
+    public static func alternatives(_ q: String, now: Date = Date(), count: (String) -> Int) -> RecallSplit? {
+        let f = QueryFilters.parse(q, now: now)
+        guard f.isActive || !f.text.isEmpty else { return nil }
+        let cmds = f.parsed.filter(\.ok)
+        func join(_ cs: [String], _ text: String) -> String { (cs + (text.isEmpty ? [] : [text])).joined(separator: " ") }
+        func quoted(_ v: String) -> String { v.contains(where: \.isWhitespace) ? "\"\(v)\"" : v }
+        var opts: [RecallSplit.Option] = []
+        // 時期を広げる（「先月」→「先月ごろ」。もう「ごろ」なら外す案に任せる）
+        for (i, c) in cmds.enumerated() where c.command.map({ [.date, .modified, .created].contains($0) }) == true {
+            guard let v = c.value, !Describe.normalize(v).hasSuffix("ごろ"), let cmd = c.command,
+                  QueryFilters.parseDate(v + "ごろ", now: now) != nil else { continue }
+            var cs = cmds.map(\.raw); cs[i] = cmd.name + " " + quoted(v + "ごろ")
+            let nq = join(cs, f.text)
+             opts.append(.init(label: "「\(c.meaning ?? v)ごろ」に広げる", symbol: "clock", command: nq, count: count(nq), replaces: true))
+        }
+        // 名前でなく本文から探す
+        if !f.text.isEmpty && f.contents.isEmpty {
+            let nq = join(cmds.map(\.raw) + ["#text " + quoted(f.text)], "")
+            let shown = f.text.count > 10 ? String(f.text.prefix(10)) + "…" : f.text
+            opts.append(.init(label: "本文から「\(shown)」", symbol: "text.magnifyingglass", command: nq, count: count(nq), replaces: true))
+        }
+        // 条件を 1 つ外す
+        let chips = f.chips
+        for c in chips {
+            let rest = cmds.filter { $0.command != c.command }.map(\.raw)
+            let nq = join(rest, f.text)
+            if nq.trimmingCharacters(in: .whitespaces).isEmpty { continue }
+            let value = c.label.split(separator: ":", maxSplits: 1).last.map { $0.trimmingCharacters(in: .whitespaces) } ?? c.label
+            opts.append(.init(label: "「\(value)」を外す", symbol: "xmark.circle", command: nq, count: count(nq), replaces: true))
+        }
+        let found = opts.filter { $0.count > 0 }
+        guard !found.isEmpty else { return nil }
+        return RecallSplit(title: "探し方を変える", total: 0, options: Array(found.prefix(maxOptions)))
     }
 
     // MARK: - 最近の作業のまとまり
@@ -165,6 +208,7 @@ public enum Recall {
 
     /// 場所の名前。「3.3.10」のような版の番号だけの名前は親と並べ、「@」の後ろ（版・ハッシュ）は落とす
     static func placeLabel(_ root: String) -> String {
+        if root == NSHomeDirectory() { return "ホーム" }
         var name = (root as NSString).lastPathComponent
         if let at = name.firstIndex(of: "@"), at != name.startIndex { name = String(name[..<at]) }
         if !name.contains(where: \.isLetter) {

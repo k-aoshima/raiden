@@ -784,7 +784,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         guard query == filterInput.currentQuery, palette || filterInput.palette == nil else { return }
         // 下の端の絞り込みの問い（一覧・見つからない・辞書の行き先を選ぶ間は出さない）
         footer.subviews.forEach { $0.removeFromSuperview() }
-        askSplit = palette || notFound || filterInput.isPickingAlias ? nil : split
+        askSplit = palette || (notFound && split?.total != 0) || filterInput.isPickingAlias ? nil : split
         filterInput.asking = askSplit != nil
         if let sp = askSplit {
             let bar = AskBar(sp) { [weak self] i in self?.pickAsk(i) }
@@ -897,7 +897,8 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     /// 絞り込みの問いの i 番目を選ぶ（打ったときと同じチップにする）
     func pickAsk(_ i: Int) {
         guard let sp = askSplit, sp.options.indices.contains(i) else { return }
-        filterInput.acceptNext(sp.options[i].command)
+        let o = sp.options[i]
+        if o.replaces { filterInput.replaceQuery(o.command) } else { filterInput.acceptNext(o.command) }
     }
 
     /// 結果が届き直したときに同じ物か見分ける鍵

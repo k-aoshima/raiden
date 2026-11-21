@@ -11,7 +11,7 @@ final class AskBar: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         let stack = ChipBar.row(in: self)
-        let head = NSTextField(labelWithString: "\(FilterCompletion.countText(split.total)) 件 · \(split.title)")
+        let head = NSTextField(labelWithString: split.total > 0 ? "\(FilterCompletion.countText(split.total)) 件 · \(split.title)" : split.title)
         head.font = .systemFont(ofSize: 11.5, weight: .semibold)
         head.textColor = PanelStyle.indigo
         let icon = NSImageView(image: symbol("questionmark.circle", size: 11, weight: .semibold) ?? NSImage())
@@ -20,7 +20,8 @@ final class AskBar: NSView {
         stack.addArrangedSubview(head)
         stack.setCustomSpacing(10, after: head)
         for (i, o) in split.options.enumerated() {
-            let p = ChipBar.pill("⌘\(i + 1)  \(o.label)  \(FilterCompletion.countText(o.count))", symbol: o.symbol, filled: false)
+            let n = o.count >= 1000 && o.replaces ? "1000以上" : FilterCompletion.countText(o.count)
+            let p = ChipBar.pill("⌘\(i + 1)  \(o.label)  \(n)", symbol: o.symbol, filled: false)
             p.onTap = { onPick(i) }
             p.toolTip = "\(o.command)（⌘\(i + 1)）"
             stack.addArrangedSubview(p)
