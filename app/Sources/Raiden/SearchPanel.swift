@@ -256,12 +256,13 @@ final class ResultRow: NSView {
 
 /// アイコンと文字の 1 行（節の見出し・「見つかりません」）。選べない
 final class LabelLine: NSView {
-    init(_ text: String, symbol name: String, detail: String? = nil, big: Bool = false) {
+    /// count: 右の端にそろえて出す件数（「12 件」。時期の棚など）。plain: 大きい一文を太字にしない
+    init(_ text: String, symbol name: String, detail: String? = nil, big: Bool = false, count: String? = nil, plain: Bool = false) {
         super.init(frame: .zero)
         let glyph = NSImageView(image: symbol(name, size: big ? 15 : 10, weight: .semibold) ?? NSImage())
         glyph.contentTintColor = big ? PanelStyle.subText : PanelStyle.indigoLabel
         let label = NSTextField(labelWithString: text)
-        label.font = big ? .systemFont(ofSize: 14, weight: .semibold) : .systemFont(ofSize: 11, weight: .semibold)
+        label.font = big ? .systemFont(ofSize: 14, weight: plain ? .regular : .semibold) : .systemFont(ofSize: 11, weight: .semibold)
         label.textColor = big ? PanelStyle.text : PanelStyle.indigoLabel
         var views: [NSView] = [glyph, label]
         let d = NSTextField(labelWithString: detail ?? "")
@@ -282,6 +283,17 @@ final class LabelLine: NSView {
             NSLayoutConstraint.activate([
                 d.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 10),
                 d.firstBaselineAnchor.constraint(equalTo: label.firstBaselineAnchor),
+            ])
+        }
+        if let count {
+            let c = NSTextField(labelWithString: count)
+            c.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+            c.textColor = PanelStyle.faint
+            c.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(c)
+            NSLayoutConstraint.activate([
+                c.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
+                c.firstBaselineAnchor.constraint(equalTo: label.firstBaselineAnchor),
             ])
         }
     }
@@ -445,7 +457,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     private var lines: [NSView] = []
     private var results: [RowItem] = []
     /// 並べる順の中身（節の見出しか、results の番号）。entries[..<built] まで作った
-    private enum Entry { case header(String, String, String?); case row(Int); case pair(Int, Int?) }
+    private enum Entry { case header(String, String, String?, String?); case row(Int); case pair(Int, Int?) }
     private var entries: [Entry] = []
     private var built = 0
     private var rowAlpha: [CGFloat] = []
@@ -901,8 +913,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             // 全体が見つからないときは上に大きく出しているので、節の見出しには添えない
             let fadeNote = sec.faded && !notFound ? "見つかりません" : nil
             if showHeaders || fadeNote != nil {
-                let title = filtered ? "\(sec.title)  \(sec.items.count)件" : sec.title
-                entries.append(.header(title, sec.symbol, fadeNote))
+                entries.append(.header(sec.title, sec.symbol, fadeNote, filtered ? "\(sec.items.count) 件" : nil))
                 listH += Self.headerHeight
             }
             // カードは 2 つずつ 1 段に、それ以外（保存した条件・よく使う組み合わせ）は 1 行ずつ
@@ -1007,8 +1018,8 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     private func buildRows(upTo index: Int) {
         while built < entries.count && rows.count <= index {
             switch entries[built] {
-            case .header(let title, let sym, let note):
-                let v = LabelLine(title, symbol: sym, detail: note)
+            case .header(let title, let sym, let note, let count):
+                let v = LabelLine(title, symbol: sym, detail: note, count: count)
                 v.translatesAutoresizingMaskIntoConstraints = false
                 stack.addArrangedSubview(v)
                 v.widthAnchor.constraint(equalToConstant: Self.width).isActive = true

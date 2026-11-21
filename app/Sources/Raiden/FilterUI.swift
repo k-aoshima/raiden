@@ -499,8 +499,9 @@ final class FilterInput {
             out.append((SuggestBar(suggestions) { [weak self] s in self?.acceptSuggestion(s) }, ChipBar.height))
         }
         if f.isActive && sections.allSatisfy({ $0.items.isEmpty }) {
-            let msg = preparing && f.allowsFiles ? "ファイル準備中…" : "条件に合う物はありません"
-            out.append((LabelLine(msg, symbol: "line.3.horizontal.decrease.circle", big: true), SearchPanelController.messageHeight))
+            let what = f.allowsFiles ? "ファイル" : "アプリ"
+            let msg = preparing && f.allowsFiles ? "ファイル準備中…" : "この条件に合う\(what)はありません。"
+            out.append((LabelLine(msg, symbol: "line.3.horizontal.decrease.circle", big: true, plain: true), SearchPanelController.messageHeight))
         }
         return out
     }

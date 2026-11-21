@@ -17,13 +17,26 @@ final class AskBar: NSView {
         head.font = .systemFont(ofSize: 11.5, weight: .semibold)
         head.textColor = PanelStyle.indigo
         head.lineBreakMode = .byTruncatingTail
+        // 選ぶと何件になるか（「3〜41 件になります」）を薄い字で添える
+        let counts = split.options.filter { !$0.replaces && $0.count >= 0 }.map(\.count)
+        if split.total > 0, let lo = counts.min(), let hi = counts.max() {
+            let a = NSMutableAttributedString(string: head.stringValue, attributes: [.font: head.font!, .foregroundColor: PanelStyle.indigo])
+            let range = lo == hi ? FilterCompletion.countText(lo) : "\(FilterCompletion.countText(lo))〜\(FilterCompletion.countText(hi))"
+            a.append(NSAttributedString(string: "　\(range) 件になります", attributes: [
+                .font: NSFont.systemFont(ofSize: 11.5), .foregroundColor: PanelStyle.subText]))
+            head.attributedStringValue = a
+        }
         let icon = NSImageView(image: symbol("questionmark.circle", size: 11, weight: .semibold) ?? NSImage())
         icon.contentTintColor = PanelStyle.indigo
         var pills: [NSView] = []
+        // 一番効く案（選ぶと半分くらいに減る案。少なすぎず多すぎない）を藍の枠で強め、コマンドを添える（打ち方を覚えられるように）
+        let half = Double(split.total) / 2
+        let hot = split.total > 0 ? split.options.indices.filter { !split.options[$0].replaces && split.options[$0].count > 0 }
+            .min { abs(Double(split.options[$0].count) - half) < abs(Double(split.options[$1].count) - half) } : nil
         for (i, o) in split.options.enumerated() {
             // count が負なら件数を出さない（⌘→ の「基準に探す」）
-            let n = o.count < 0 ? "" : "  " + (o.count >= 1000 && o.replaces ? "1000以上" : FilterCompletion.countText(o.count))
-            let p = ChipBar.pill("⌘\(i + 1)  \(o.label)\(n)", symbol: o.symbol, filled: false)
+            let n = o.count < 0 ? nil : (o.count >= 1000 && o.replaces ? "1000以上" : FilterCompletion.countText(o.count))
+            let p = AskPill(key: "⌘\(i + 1)", label: o.label, count: n, command: i == hot ? o.command : nil, hot: i == hot)
             p.onTap = { onPick(i) }
             p.toolTip = "\(o.command)（⌘\(i + 1)）"
             pills.append(p)
@@ -58,5 +71,67 @@ final class AskBar: NSView {
         let p = NSBezierPath(roundedRect: r, xRadius: 12, yRadius: 12)
         PanelStyle.indigo.withAlphaComponent(0.08).setFill()
         p.fill()
+    }
+}
+
+/// 問いの選び先 1 つ: 角丸の四角に「⌘1」のキーの枠・名前・件数（hot なら藍の枠とコマンド）
+final class AskPill: TapPill {
+    private let hot: Bool
+
+    init(key: String, label: String, count: String?, command: String?, hot: Bool) {
+        self.hot = hot
+        super.init(frame: .zero)
+        let k = NSTextField(labelWithString: key)
+        k.font = .systemFont(ofSize: 10.5, weight: .medium)
+        k.textColor = PanelStyle.faint
+        let kb = NSView()
+        kb.wantsLayer = true
+        kb.layer?.cornerRadius = 4
+        kb.layer?.borderWidth = 1
+        kb.layer?.borderColor = PanelStyle.text.withAlphaComponent(0.15).cgColor
+        k.translatesAutoresizingMaskIntoConstraints = false
+        kb.addSubview(k)
+        NSLayoutConstraint.activate([
+            k.leadingAnchor.constraint(equalTo: kb.leadingAnchor, constant: 4), k.trailingAnchor.constraint(equalTo: kb.trailingAnchor, constant: -4),
+            k.topAnchor.constraint(equalTo: kb.topAnchor, constant: 0), k.bottomAnchor.constraint(equalTo: kb.bottomAnchor, constant: 0),
+        ])
+        let l = NSTextField(labelWithString: label)
+        l.font = .systemFont(ofSize: 12.5)
+        l.textColor = PanelStyle.text
+        l.lineBreakMode = .byTruncatingMiddle
+        l.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        var views: [NSView] = [kb, l]
+        if let count {
+            let c = NSTextField(labelWithString: count)
+            c.font = .monospacedDigitSystemFont(ofSize: 11.5, weight: .regular)
+            c.textColor = PanelStyle.subText
+            views.append(c)
+        }
+        if let command {
+            let c = NSTextField(labelWithString: command)
+            c.font = .monospacedSystemFont(ofSize: 10.5, weight: .regular)
+            c.textColor = PanelStyle.faint
+            views.append(c)
+        }
+        let st = NSStackView(views: views)
+        st.spacing = 6
+        st.alignment = .centerY
+        st.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(st)
+        NSLayoutConstraint.activate([
+            st.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 9), st.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            st.topAnchor.constraint(equalTo: topAnchor, constant: 5), st.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let p = NSBezierPath(roundedRect: bounds.insetBy(dx: hot ? 1 : 0.5, dy: hot ? 1 : 0.5), xRadius: 10, yRadius: 10)
+        NSColor.white.withAlphaComponent(0.55).setFill()
+        p.fill()
+        (hot ? PanelStyle.indigo : PanelStyle.text.withAlphaComponent(0.12)).setStroke()
+        p.lineWidth = hot ? 2 : 1
+        p.stroke()
     }
 }
