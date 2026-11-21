@@ -233,11 +233,14 @@ final class FilePreviewPane: NSView {
 
     private func setInfo(_ rows: [(String, String)]) {
         info.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        // ラベルの列は一番長いラベルに合わせる（52 固定だと「最後に開いた」が切れた）
+        let font = NSFont.systemFont(ofSize: 11)
+        let keyW = ceil(rows.map { ($0.0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0) + 4
         for (k, v) in rows {
             let kl = NSTextField(labelWithString: k)
             kl.font = .systemFont(ofSize: 11)
             kl.textColor = PanelStyle.faint
-            kl.widthAnchor.constraint(equalToConstant: 52).isActive = true
+            kl.widthAnchor.constraint(equalToConstant: max(52, keyW)).isActive = true
             let vl = NSTextField(labelWithString: v)
             vl.font = .systemFont(ofSize: 11)
             vl.textColor = PanelStyle.subText
