@@ -393,7 +393,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if filtered {
             let shown = [first, second].filter { !$0.items.isEmpty }
             let notFound = !shown.isEmpty && shown.allSatisfy(\.faded)
-            return Sections(sections: [first, second], notFound: notFound, appsNoMatch: aj.noMatch, filesNoMatch: filesNoMatch,
+            // 絞り込みで長い一覧になるときは、ファイルを時期の棚（今日・昨日・今週…）に分けて新しい順に並べる
+            var secs = [first, second]
+            if fileSec.items.count > SearchPanelController.maxRows, let i = secs.firstIndex(where: { $0.symbol == "folder" }) {
+                secs.replaceSubrange(i...i, with: timeShelves(fileSec))
+            }
+            return Sections(sections: secs, notFound: notFound, appsNoMatch: aj.noMatch, filesNoMatch: filesNoMatch,
                             split: fj0.split)
         }
         let firstMax = 4
@@ -405,6 +410,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let notFound = !shown.isEmpty && shown.allSatisfy(\.faded)
         return Sections(sections: [first, second], notFound: notFound, appsNoMatch: aj.noMatch, filesNoMatch: filesNoMatch,
                         split: notFound ? nil : fj0.split)
+    }
+
+    /// ファイルの節を時期の棚に分ける。棚は新しい順、棚の中は元の並び（点数の順）。
+    /// 時期は最後に触った日（使った日・変更日・追加日・作成日の一番新しい日。#date と同じ）
+    static func timeShelves(_ sec: ResultSection, now: Date = Date()) -> [ResultSection] {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: now)
+        let week = cal.dateInterval(of: .weekOfYear, for: now)?.start ?? today
+        let lastWeek = cal.date(byAdding: .day, value: -7, to: week) ?? week
+        let month = cal.dateInterval(of: .month, for: now)?.start ?? today
+        let year = cal.dateInterval(of: .year, for: now)?.start ?? today
+        func shelf(_ e: FileEntry) -> (Int, String) {
+            let t = max(e.lastUsed, e.mtime, e.added, e.created)
+            guard t > 0 else { return (Int.min, "日付なし") }
+            let d = Date(timeIntervalSince1970: TimeInterval(t))
+            if d >= today { return (0, "今日") }
+            if d >= cal.date(byAdding: .day, value: -1, to: today)! { return (1, "昨日") }
+            if d >= week { return (2, "今週") }
+            if d >= lastWeek { return (3, "先週") }
+            if d >= month { return (4, "今月") }
+            let c = cal.dateComponents([.year, .month], from: d)
+            // 今年は月ごと、それより前は年ごと（並びの鍵は新しいほど小さく）
+            if d >= year { return (100 - c.month!, "\(c.month!)月") }
+            return (10_000 - c.year!, "\(c.year!)年")
+        }
+        var order: [(Int, String)] = []
+        var groups: [String: [RowItem]] = [:]
+        for it in sec.items {
+            guard case .file(let r)? = it.candidate else { continue }
+            let s = shelf(r.file)
+            if groups[s.1] == nil { order.append(s) }
+            groups[s.1, default: []].append(it)
+        }
+        if order.count <= 1 { return [sec] }
+        return order.sorted { $0.0 == $1.0 ? false : ($0.0 == Int.min ? false : ($1.0 == Int.min ? true : $0.0 < $1.0)) }.map { s in
+            var x = ResultSection(title: s.1, symbol: "clock", items: groups[s.1] ?? [])
+            x.faded = sec.faded
+            return x
+        }
     }
 
     private func open(_ q: String, _ c: Candidate, reveal: Bool) {

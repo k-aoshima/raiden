@@ -280,7 +280,7 @@ struct RowItem {
             preview = .app(title: title, path: r.app.path)
         case .file(let r):
             title = r.file.name
-            sub = RowItem.shortParent(r.file.path)
+            sub = RowItem.shortParent(r.file.path) + RowItem.fileContext(r.file)
             hint = r.file.isDir ? RowItem.folderHint : RowItem.fileHint
             preview = .file(r.file.path)
         case .clip(let c):
@@ -301,6 +301,30 @@ struct RowItem {
         for p in c.pastes where !p.app.isEmpty && !dest.contains(p.app) { dest.append(p.app) }
         if !dest.isEmpty { s += "  → " + dest.prefix(3).joined(separator: "、") }
         return s
+    }
+
+    /// 行の下に添える「いつ・どこから」（ · 10/12 ダウンロード · example.co.jp / · 昨日 開いた / · 11/3 変更）
+    static func fileContext(_ e: FileEntry, now: Date = Date()) -> String {
+        func day(_ t: Int) -> String { dayText(Date(timeIntervalSince1970: TimeInterval(t)), now: now) }
+        if e.source == "mail" { return e.added > 0 ? "  ·  \(day(e.added)) メール添付" : "  ·  メール添付" }
+        if e.source == "dl" {
+            var s = e.added > 0 ? "  ·  \(day(e.added)) ダウンロード" : "  ·  ダウンロード"
+            if !e.origin.isEmpty { s += "  ·  " + e.origin }
+            return s
+        }
+        if e.lastUsed > 0 && e.lastUsed >= e.mtime { return "  ·  \(day(e.lastUsed)) 開いた" }
+        if e.mtime > 0 { return "  ·  \(day(e.mtime)) 変更" }
+        return ""
+    }
+
+    /// 「今日」「昨日」「11/14」「2025/11/14」（去年より前は年も）
+    static func dayText(_ d: Date, now: Date = Date()) -> String {
+        let cal = Calendar.current
+        if cal.isDate(d, inSameDayAs: now) { return "今日" }
+        if let y = cal.date(byAdding: .day, value: -1, to: now), cal.isDate(d, inSameDayAs: y) { return "昨日" }
+        let f = DateFormatter(); f.locale = Locale(identifier: "ja_JP")
+        f.dateFormat = cal.component(.year, from: d) == cal.component(.year, from: now) ? "M/d" : "yyyy/M/d"
+        return f.string(from: d)
     }
 
     static func appPath(_ bundleID: String) -> String? {

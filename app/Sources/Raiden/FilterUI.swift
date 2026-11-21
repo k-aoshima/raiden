@@ -686,6 +686,27 @@ enum FilterSnapshots {
         ak.setResults([ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: akRows)], query: ak.filterInput.currentQuery, split: akSplit)
         Snapshot.capture(ak, dir + "/recall-ask.png")
 
+        // 絞り込みの長い一覧を時期の棚に分けた状態（行に「いつ・どこから」）。今の時刻からの見本
+        let nowT = Int(Date().timeIntervalSince1970)
+        func ent(_ p: String, hoursAgo: Int, dl: Bool = false, origin: String = "") -> FileEntry {
+            let t = nowT - hoursAgo * 3600
+            return FileEntry(path: home + p, name: (p as NSString).lastPathComponent, parentName: "", isDir: false, kind: "", families: [],
+                             size: 1, mtime: dl ? t - 86400 * 30 : t, created: t, added: dl ? t : 0, lastUsed: dl ? 0 : t, usedDays: [],
+                             downloaded: dl, origin: origin)
+        }
+        let shelfFiles = [
+            ent("/Documents/サンプル/見積書_v3_サンプル.xlsx", hoursAgo: 1), ent("/Downloads/estimate_sample_1.pdf", hoursAgo: 3, dl: true, origin: "example.co.jp"),
+            ent("/Documents/サンプル/見積依頼_サンプル.md", hoursAgo: 30), ent("/Downloads/estimate_sample_2.pdf", hoursAgo: 28, dl: true, origin: "example.com"),
+            ent("/Documents/サンプル/見積_比較_サンプル.numbers", hoursAgo: 24 * 9), ent("/Documents/サンプル/見積_メモ_サンプル.txt", hoursAgo: 24 * 10),
+            ent("/Downloads/quotation_sample.pdf", hoursAgo: 24 * 40, dl: true, origin: "example.org"),
+            ent("/Documents/サンプル/見積_旧_サンプル.docx", hoursAgo: 24 * 70), ent("/Documents/サンプル/見積_下書き_サンプル.pages", hoursAgo: 24 * 75),
+            ent("/Documents/サンプル/見積_去年_サンプル.xlsx", hoursAgo: 24 * 400),
+        ]
+        let shelfSec = ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: shelfFiles.map { RowItem(.file(FileResult(file: $0, score: 1))) })
+        let sh = panel("見積", committed: ["#kind doc,pdf,xls"])
+        sh.setResults(AppDelegate.timeShelves(shelfSec), query: sh.filterInput.currentQuery)
+        Snapshot.capture(sh, dir + "/recall-shelves.png")
+
         // #type app で全部出してスクロールした状態。アプリは OS 付属のもの（私的な名前は使わない）
         let appDirs = ["/System/Applications", "/System/Applications/Utilities"]
         let appPaths = appDirs.flatMap { d in

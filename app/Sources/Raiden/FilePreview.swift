@@ -191,6 +191,11 @@ final class FilePreviewPane: NSView {
     private func apply(_ m: PreviewMeta) {
         var rows: [(String, String)] = [("種類", m.kind)]
         if let s = m.sizeText { rows.append((m.isDir ? "中身" : "大きさ", s)) }
+        // いつ・どこから来たか（覚えている手がかりと見比べて「これだ」と分かるように）
+        if m.fromMail { rows.append(("入手元", "メール添付")) } else if let o = m.origin { rows.append(("入手元", o)) }
+        if let d = m.added { rows.append(("入手日", Self.dateFormat.string(from: d))) }
+        if let d = m.lastUsed { rows.append(("最後に開いた", Self.dateFormat.string(from: d))) }
+        if m.usedDays > 1 { rows.append(("開いた日数", "\(m.usedDays) 日")) }
         if let d = m.modified { rows.append(("変更日", Self.dateFormat.string(from: d))) }
         rows.append(("場所", RowItem.shortParent(m.path)))
         setInfo(rows)
@@ -272,6 +277,12 @@ struct PreviewMeta {
     var modified: Date?
     var children: [Child] = []
     var childCount = 0
+    /// 入手元のホスト（example.co.jp）・メール添付か・入手した日・最後に開いた日・開いた日数（Spotlight の記録）
+    var origin: String?
+    var fromMail = false
+    var added: Date?
+    var lastUsed: Date?
+    var usedDays = 0
 
     /// 種類の名前（よくある物は日本語で。それ以外は OS の説明）
     static func kindName(_ t: UTType?, isDir: Bool) -> String {
@@ -307,6 +318,16 @@ struct PreviewMeta {
             }
         } else if let s = v.fileSize {
             sizeText = ByteCountFormatter.string(fromByteCount: Int64(s), countStyle: .file)
+        }
+        if !isDir, let item = MDItemCreate(kCFAllocatorDefault, path as CFString) {
+            let froms = MDItemCopyAttribute(item, kMDItemWhereFroms) as? [String] ?? []
+            fromMail = froms.contains { $0.hasPrefix("message:") } || path.contains("/Mail Downloads/")
+            origin = froms.lazy.compactMap { URL(string: $0)?.host }.first.map { $0.hasPrefix("www.") ? String($0.dropFirst(4)) : $0 }
+            if !froms.isEmpty || path.hasPrefix(NSHomeDirectory() + "/Downloads/") {
+                added = MDItemCopyAttribute(item, "kMDItemDateAdded" as CFString) as? Date
+            }
+            lastUsed = MDItemCopyAttribute(item, kMDItemLastUsedDate) as? Date
+            usedDays = (MDItemCopyAttribute(item, "kMDItemUsedDates" as CFString) as? [Date])?.count ?? 0
         }
     }
 }
