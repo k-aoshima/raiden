@@ -721,6 +721,12 @@ public final class SpotlightFilterSource: FilterSource, @unchecked Sendable {
 
     public func total(_ f: QueryFilters) -> Int? { cached(f) }
 
+    /// 最近使った物（新しい順。refreshRecent で裏で取り直した物）
+    public func recentEntries(limit: Int) -> [FileEntry] {
+        lock.lock(); defer { lock.unlock() }
+        return Array(recent.prefix(limit))
+    }
+
     public func recentFiles(limit: Int) -> [String] {
         lock.lock(); defer { lock.unlock() }
         return Array(recent.prefix(limit).map(\.path))

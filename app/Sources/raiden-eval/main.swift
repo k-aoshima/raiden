@@ -87,6 +87,14 @@ if args.contains("--boot-bench") { try runBootBench(); exit(0) }
 if args.contains("--files") { try runFileEval(); exit(0) }
 // --settings-test --store <path>: 設定の読み書き・除外・DB の片付け・記録・動作の記録（SettingsTest.swift）
 if args.contains("--settings-test") { try runSettingsTest(); exit(0) }
+// --recent: 何も打っていないときに出す最近の作業のまとまり（読むだけ）
+if args.contains("--recent") {
+    let t0 = Date()
+    let es = SpotlightSearch().recent(limit: 40)
+    for ss in Recall.sessions(es) { print(ss.title); ss.items.forEach { print("   " + $0.name) } }
+    print(String(format: "%.0fms", Date().timeIntervalSince(t0) * 1000))
+    exit(0)
+}
 // --recall <入力>: Spotlight に実際に問い合わせて、件数と絞り込みの問いを見る（読むだけ）
 if let q = opt("--recall") {
     let sp = SpotlightSearch()

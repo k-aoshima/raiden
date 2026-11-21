@@ -62,6 +62,19 @@ func runRecallTests() -> (Int, Int) {
     ps += (0..<20).map { file(home + "/Project/bb/g\($0).md", days: 3) }
     let sp3 = Recall.split(ps, filters: nil, now: now, projectRoot: root)
     expect(sp3?.title == "場所で絞り込む" && sp3?.options.contains { $0.command == "#path ~/Project/aa" } == true, "場所で割る \(sp3?.options.map(\.command) ?? [])")
+    // 最近の作業のまとまり: 45 分あいたら分ける、1 まとまり 4 行まで、合計 9 行まで
+    func used(_ p: String, minAgo: Int) -> FileEntry {
+        FileEntry(path: home + p, name: (p as NSString).lastPathComponent, parentName: "", isDir: false, kind: "", families: [], size: 1,
+                  mtime: 0, created: 0, added: 0, lastUsed: t - minAgo * 60, usedDays: [], downloaded: false)
+    }
+    let rec = [used("/Project/aa/a1.swift", minAgo: 5), used("/Project/aa/a2.swift", minAgo: 20), used("/Project/aa/a3.md", minAgo: 50),
+               used("/Project/bb/b1.png", minAgo: 200), used("/Project/bb/b2.png", minAgo: 210), used("/Applications/X.app", minAgo: 1)]
+    let ses = Recall.sessions(rec, now: now, projectRoot: root)
+    expect(ses.count == 2 && ses[0].items.count == 3 && ses[1].items.count == 2, "45 分あいたら別のまとまり \(ses.map { "\($0.title) \($0.items.count)" })")
+    expect(ses.first?.title.hasPrefix("今日") == true && ses.first?.title.hasSuffix("· aa") == true, "まとまりの名前は日と場所 \(ses.first?.title ?? "")")
+    expect(!ses.flatMap(\.items).contains { $0.name.hasSuffix(".app") }, "アプリは入れない")
+    let many = (0..<20).map { used("/Project/cc/f\($0).txt", minAgo: $0 * 60) }
+    expect(Recall.sessions(many, now: now, projectRoot: root).reduce(0) { $0 + $1.items.count } <= 9, "合計 9 行まで")
     print("確かめ \(checks - failures)/\(checks)")
     return (checks, failures)
 }

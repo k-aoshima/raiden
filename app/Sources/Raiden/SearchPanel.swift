@@ -433,6 +433,8 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     /// (入力, 候補, ⌘ を押していたか)。⌘Enter は Finder に表示
     var onOpen: ((String, Candidate, Bool) -> Void)?
     var onHide: (() -> Void)?
+    /// 何も打っていないときに出す節（最近の作業のまとまり。AppDelegate が渡す）
+    var recentSections: (() -> [ResultSection])?
     /// 入力欄を出す直前に前面にあったアプリ（履歴から貼るときに戻す先）
     private(set) var previousApp: NSRunningApplication?
 
@@ -659,7 +661,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         lastHashCount = 0
         userMoved = false
         filterInput.reset()
-        setResults([], query: "")
+        showRecent()
         if let f = NSWorkspace.shared.frontmostApplication, f.bundleIdentifier != Bundle.main.bundleIdentifier { previousApp = f }
         NSApp.activate(ignoringOtherApps: true)
         hiding = false
@@ -816,7 +818,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         }
         // 絞り込みのコマンドが効いているときは全部出すので、節の見出しに件数を出す
         let filtered = !palette && QueryFilters.parse(query, now: filterInput.now()).isActive
-        let showHeaders = secs.count > 1 || notFound || filtered
+        let showHeaders = secs.count > 1 || notFound || filtered || (query.isEmpty && !secs.isEmpty)
         // 同じ入力の結果の届き直しで、選び直していたなら、選んでいた物とスクロールの位置を残す
         let keep = userMoved && query == shownQuery && palette == paletteRows && results.indices.contains(selected)
         let keepKey = keep ? Self.key(results[selected]) : nil
@@ -884,6 +886,12 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         }
         // 行を作り直しても入力欄は打てるままにする（カーソルの位置は動かさない）
         if panel.isVisible { focusField(caretToEnd: false) }
+    }
+
+    /// 入力欄が空なら最近の作業のまとまりを出す（最近の一覧が裏で届き直したときにも呼ぶ）
+    func showRecent() {
+        guard field.stringValue.isEmpty, filterInput.committed.isEmpty, filterInput.palette == nil, filterInput.currentQuery.isEmpty else { return }
+        setResults(recentSections?() ?? [], query: "")
     }
 
     /// 絞り込みの問いの i 番目を選ぶ（打ったときと同じチップにする）
@@ -1037,7 +1045,9 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     /// 今の候補で広げたいか（ファイルの行がある・絞り込みの一覧ではない・設定がオン・画面が広い）
     private var wantsWide: Bool {
         // 選んでいる行がファイル・フォルダの時だけ（アプリの行ではプレビューを出さない）
+        // 何も打っていないときの最近のまとまりは、↑↓ で選び直すまで出さない（開くたびに窓が広がらないように）
         Self.previewEnabled && !paletteRows && Self.screenFitsPreview && results.indices.contains(selected) && (results[selected].isFile || results[selected].isClip)
+            && !(shownQuery?.isEmpty == true && !userMoved)
     }
 
     private func updatePreview() {

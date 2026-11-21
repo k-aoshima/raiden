@@ -112,6 +112,45 @@ public enum Recall {
         return RecallSplit(title: "\(b.0)で絞り込む", total: total, options: b.1.map(\.0))
     }
 
+    // MARK: - 最近の作業のまとまり
+
+    public struct Session: Sendable {
+        public let title: String          // 今日 10:12–11:40 · raiden
+        public let items: [FileEntry]
+    }
+
+    /// 何も打っていないときに出す、最近の作業のまとまり。最後に使った時刻の順に並べ、gap 秒あいたら別のまとまりにする。
+    /// 名前はそのまとまりの日・時刻の幅・一番多い場所（プロジェクトの根）。近い時に使った物は一緒に思い出されやすい（Howard & Kahana 2002）
+    public static func sessions(_ entries: [FileEntry], gap: Int = 45 * 60, maxSessions: Int = 3, maxRows: Int = 9, now: Date = Date(),
+                                projectRoot: (String) -> String = { SpotlightSearch.projectRoot(of: $0) }) -> [Session] {
+        let es = entries.filter { $0.lastUsed > 0 && !$0.name.hasSuffix(".app") }.sorted { $0.lastUsed > $1.lastUsed }
+        var groups: [[FileEntry]] = []
+        for e in es {
+            if let last = groups.last?.last, last.lastUsed - e.lastUsed <= gap { groups[groups.count - 1].append(e) } else { groups.append([e]) }
+        }
+        var out: [Session] = []
+        var rows = 0
+        let cal = Calendar.current
+        let hm = DateFormatter(); hm.dateFormat = "H:mm"
+        let md = DateFormatter(); md.locale = Locale(identifier: "ja_JP"); md.dateFormat = "M/d（E）"
+        for g in groups where out.count < maxSessions && rows < maxRows {
+            // 1 つのまとまりは多くて 4 行（残りの行を後のまとまりに回す）
+            let take = Array(g.prefix(min(4, maxRows - rows)))
+            let newest = Date(timeIntervalSince1970: TimeInterval(g.first!.lastUsed))
+            let oldest = Date(timeIntervalSince1970: TimeInterval(g.last!.lastUsed))
+            let day = cal.isDate(newest, inSameDayAs: now) ? "今日"
+                : cal.isDate(newest, inSameDayAs: cal.date(byAdding: .day, value: -1, to: now)!) ? "昨日" : md.string(from: newest)
+            let span = g.count == 1 || hm.string(from: oldest) == hm.string(from: newest)
+                ? hm.string(from: newest) : "\(hm.string(from: oldest))–\(hm.string(from: newest))"
+            var count: [String: Int] = [:]
+            for e in g { count[placeLabel(cachedRoot((e.path as NSString).deletingLastPathComponent, path: e.path, projectRoot)), default: 0] += 1 }
+            let place = count.max { $0.value != $1.value ? $0.value < $1.value : $0.key > $1.key }?.key ?? ""
+            out.append(Session(title: "\(day) \(span)" + (place.isEmpty ? "" : " · \(place)"), items: take))
+            rows += take.count
+        }
+        return out
+    }
+
     /// プロジェクトの根を調べる親フォルダの数
     static let rootLookups = 40
     nonisolated(unsafe) static var rootCache: [String: String] = [:]

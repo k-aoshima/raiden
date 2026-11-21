@@ -707,6 +707,23 @@ enum FilterSnapshots {
         sh.setResults(AppDelegate.timeShelves(shelfSec), query: sh.filterInput.currentQuery)
         Snapshot.capture(sh, dir + "/recall-shelves.png")
 
+        // 何も打っていないときの最近の作業のまとまり（見本のファイル。今の時刻から）
+        func usedAgo(_ p: String, min: Int) -> FileEntry {
+            FileEntry(path: home + p, name: (p as NSString).lastPathComponent, parentName: "", isDir: false, kind: "", families: [], size: 1,
+                      mtime: 0, created: 0, added: 0, lastUsed: nowT - min * 60, usedDays: [], downloaded: false)
+        }
+        let recentSample = [usedAgo("/Documents/サンプル/企画書_サンプル.key", min: 4), usedAgo("/Documents/サンプル/企画メモ_サンプル.md", min: 18),
+                            usedAgo("/Documents/サンプル/画面案_サンプル.png", min: 35), usedAgo("/Desktop/スクリーンショット サンプル.png", min: 60 * 5),
+                            usedAgo("/Desktop/議事録_サンプル.txt", min: 60 * 5 + 20), usedAgo("/Downloads/invoice_sample.pdf", min: 60 * 26)]
+        let rp = SearchPanelController()
+        rp.recentSections = {
+            Recall.sessions(recentSample, projectRoot: { ($0 as NSString).deletingLastPathComponent }).map { ss in
+                ResultSection(title: ss.title, symbol: "clock", items: ss.items.map { RowItem(.file(FileResult(file: $0, score: 0))) })
+            }
+        }
+        rp.showRecent()
+        Snapshot.capture(rp, dir + "/recall-recent.png")
+
         // #type app で全部出してスクロールした状態。アプリは OS 付属のもの（私的な名前は使わない）
         let appDirs = ["/System/Applications", "/System/Applications/Utilities"]
         let appPaths = appDirs.flatMap { d in

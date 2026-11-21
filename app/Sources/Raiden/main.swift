@@ -55,6 +55,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setupHotKey()
         panel.onQuery = { [weak self] q in self?.query(q) }
         panel.onOpen = { [weak self] q, c, reveal in self?.open(q, c, reveal: reveal) }
+        panel.recentSections = { [weak self] in
+            guard let fs = self?.filterSource else { return [] }
+            return Recall.sessions(fs.recentEntries(limit: 40)).map { ss in
+                ResultSection(title: ss.title, symbol: "clock", items: ss.items.map { RowItem(.file(FileResult(file: $0, score: 0))) })
+            }
+        }
         panel.onHide = { [weak self] in
             self?.engine?.cancelFiles()
             // 選んで閉じたときは open が先に記録する。残っていれば選ばずに閉じた
@@ -142,7 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // 検索の問い合わせ（打つたびに前を止める）と取り消し合わないよう、別の SpotlightSearch で数える
             let fs = SpotlightFilterSource(search: SpotlightSearch(exclude: ex))
             fs.appCountProvider = { [weak e] in e?.apps.count ?? 0 }
-            fs.onUpdate = { [weak self] in DispatchQueue.main.async { self?.panel.filterInput.sourceDidUpdate() } }
+            fs.onUpdate = { [weak self] in DispatchQueue.main.async { self?.panel.filterInput.sourceDidUpdate(); self?.panel.showRecent() } }
             DispatchQueue.main.sync { self.filterSource = fs }
             rlog(String(format: "起動 %.2fs  アプリ %d  記録 %d  メモリ %.0fMB", Date().timeIntervalSince(t0), e.apps.count, e.examples.count, physFootprintMB()))
             DispatchQueue.main.async {
@@ -296,7 +302,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if q.isEmpty { s.shown = []; s.notFound = false; s.notFoundApps = false; s.notFoundFiles = false }
             session = s
         }
-        if q.isEmpty { panel.setResults([], query: q); return }
+        if q.isEmpty { panel.showRecent(); return }
         if let words = QueryFilters.clipText(q) { queryClips(words, q: q, generation: g); return }
         let order = settings.sectionOrder
         let item = DispatchWorkItem { [weak self] in
