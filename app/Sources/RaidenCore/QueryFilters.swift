@@ -512,7 +512,15 @@ public struct QueryFilters: Sendable {
 
     /// today / yesterday / 7d / 2w / 3m / 1y / 2026 / 2026-11 / 2026-11-14 / 11-14 / 11月14日 / 11月 / a..b / 今日・昨日・今週・先週・今月・先月・今年・去年
     public static func parseDate(_ v0: String, now: Date) -> (ClosedRange<Int>, String)? {
-        let v = Describe.normalize(v0).replacingOccurrences(of: "〜", with: "..").replacingOccurrences(of: "~", with: "..")
+        // 「先月ごろ」「夏頃」「11月くらい」: 前後に幅を持たせる（期間の 1/4、少なくとも 2 日）。人は日付を正確には覚えていないので、
+        // 境目の少し外（9 月末・11 月頭）も拾う
+        let n0 = Describe.normalize(v0)
+        for suf in ["ごろ", "頃", "くらい", "ぐらい"] where n0.hasSuffix(suf) && n0.count > suf.count {
+            guard let (r, l) = parseDate(String(n0.dropLast(suf.count)), now: now), r.lowerBound > Int.min, r.upperBound < Int.max else { return nil }
+            let m = max(2 * 86400, (r.upperBound - r.lowerBound) / 4)
+            return ((r.lowerBound - m)...(r.upperBound + m), l + "ごろ")
+        }
+        let v = n0.replacingOccurrences(of: "〜", with: "..").replacingOccurrences(of: "~", with: "..")
         if let r = v.range(of: "..") {
             let a = String(v[..<r.lowerBound]), b = String(v[r.upperBound...])
             let ra = a.isEmpty ? nil : single(a, now: now), rb = b.isEmpty ? nil : single(b, now: now)

@@ -502,6 +502,8 @@ final class ChipBar: NSView {
         let stack = Self.row(in: self)
         for c in chips {
             let p = Self.pill(c.label, symbol: c.symbol, filled: true, closable: true)
+            // 「先月ごろ」のような幅のある時期は点線の札（境目の外も少し入る）
+            if c.label.hasSuffix("ごろ") { (p as? PillView)?.soft = true }
             p.onTap = { onRemove(c.command) }
             p.toolTip = "押すとこの条件を外す"
             stack.addArrangedSubview(p)
@@ -607,11 +609,19 @@ final class SuggestBar: NSView {
 /// 札の面（角丸。効いている絞り込みは薄い青の面、候補は枠だけ）
 final class PillView: TapPill {
     let filled: Bool
+    var soft = false { didSet { needsDisplay = true } }
     init(filled: Bool) { self.filled = filled; super.init(frame: .zero); translatesAutoresizingMaskIntoConstraints = false }
     required init?(coder: NSCoder) { fatalError() }
     override func draw(_ dirtyRect: NSRect) {
         let p = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 11, yRadius: 11)
-        if filled {
+        if soft {
+            PanelStyle.indigo.withAlphaComponent(0.06).setFill()
+            p.fill()
+            PanelStyle.indigo.withAlphaComponent(0.7).setStroke()
+            p.lineWidth = 1
+            p.setLineDash([3, 2], count: 2, phase: 0)
+            p.stroke()
+        } else if filled {
             PanelStyle.pillFill.setFill()
             p.fill()
         } else {
@@ -685,6 +695,14 @@ enum FilterSnapshots {
             .init(label: "今年", symbol: "clock", command: "#date 今年", count: 74), .init(label: "去年", symbol: "clock", command: "#date 去年", count: 12)])
         ak.setResults([ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: akRows)], query: ak.filterInput.currentQuery, split: akSplit)
         Snapshot.capture(ak, dir + "/recall-ask.png")
+        // 答えた後: 「先月ごろ」（点線の札）と次の問い
+        let ak2 = panel("見積", committed: ["#date 先月ごろ"])
+        let akSplit2 = RecallSplit(title: "入手元で絞り込む", total: 41, options: [
+            .init(label: "ダウンロード", symbol: "arrow.down.circle", command: "#src dl", count: 18),
+            .init(label: "自分で作成", symbol: "pencil.and.outline", command: "#src mine", count: 15),
+            .init(label: "メール添付", symbol: "envelope", command: "#src mail", count: 8)])
+        ak2.setResults([ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: Array(akRows.prefix(2)))], query: ak2.filterInput.currentQuery, split: akSplit2)
+        Snapshot.capture(ak2, dir + "/recall-ask2.png")
 
         // 絞り込みの長い一覧を時期の棚に分けた状態（行に「いつ・どこから」）。今の時刻からの見本
         let nowT = Int(Date().timeIntervalSince1970)

@@ -62,6 +62,13 @@ func runRecallTests() -> (Int, Int) {
     ps += (0..<20).map { file(home + "/Project/bb/g\($0).md", days: 3) }
     let sp3 = Recall.split(ps, filters: nil, now: now, projectRoot: root)
     expect(sp3?.title == "場所で絞り込む" && sp3?.options.contains { $0.command == "#path ~/Project/aa" } == true, "場所で割る \(sp3?.options.map(\.command) ?? [])")
+    // 「ごろ」: 前後に幅
+    if let (r, l) = QueryFilters.parseDate("先月", now: now), let (rs, ls) = QueryFilters.parseDate("先月ごろ", now: now) {
+        expect(rs.lowerBound < r.lowerBound && rs.upperBound > r.upperBound && ls == l + "ごろ", "先月ごろ は先月より少し広い（\(ls)）")
+        expect(r.lowerBound - rs.lowerBound >= 2 * 86400, "少なくとも 2 日の幅")
+    } else { expect(false, "先月ごろ が読めない") }
+    expect(QueryFilters.parseDate("11月頃", now: now)?.1 == "11月ごろ", "11月頃")
+    expect(QueryFilters.parse("#date 先月ごろ 見積", now: now).chips.first?.label == "期間: 先月ごろ", "チップは「期間: 先月ごろ」")
     // 最近の作業のまとまり: 45 分あいたら分ける、1 まとまり 4 行まで、合計 9 行まで
     func used(_ p: String, minAgo: Int) -> FileEntry {
         FileEntry(path: home + p, name: (p as NSString).lastPathComponent, parentName: "", isDir: false, kind: "", families: [], size: 1,
