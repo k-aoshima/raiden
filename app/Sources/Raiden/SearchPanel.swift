@@ -475,6 +475,9 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     /// 行を一度に作る数（数千件でも最初はこれだけ作り、スクロールで足す）
     static let rowBatch = 200
     private var iconCache: [String: NSImage] = [:]
+    /// 古い順（先頭が一番前に使った物）。上限を超えたら先頭から捨てる
+    private var iconOrder: [String] = []
+    static let iconCacheLimit = 300
     private var heightConstraint: NSLayoutConstraint!
     private var glassView: NSView?
     private var veilView: VeilView?
@@ -773,7 +776,27 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             self.panel.orderOut(nil)
             self.panel.alphaValue = 1
             self.onHide?()
+            // 閉じたあと一覧の部品を手放す（次に開く時は show() で作り直す）。onHide の後片付けが済んでから
+            DispatchQueue.main.async { [weak self] in self?.releaseContent() }
         })
+    }
+
+    /// 閉じている間は行・見出し・問いの部品を持たない。空いたページは malloc から OS へ返す
+    private func releaseContent() {
+        guard !panel.isVisible else { return }
+        rows.forEach { $0.removeFromSuperview() }
+        lines.forEach { $0.removeFromSuperview() }
+        topStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        footer.subviews.forEach { $0.removeFromSuperview() }
+        rows = []
+        lines = []
+        results = []
+        rowAlpha = []
+        entries = []
+        built = 0
+        selected = 0
+        askSplit = nil
+        malloc_zone_pressure_relief(nil, 0)
     }
 
     /// 入力欄の右の状態（準備中など）。symbol は SF Symbols の名前
@@ -1153,12 +1176,19 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     }
 
     private func icon(_ path: String) -> NSImage {
-        if let i = iconCache[path] { return i }
+        if let i = iconCache[path] {
+            if let k = iconOrder.lastIndex(of: path) { iconOrder.remove(at: k) }
+            iconOrder.append(path)
+            return i
+        }
         let i = NSWorkspace.shared.icon(forFile: path)
         i.size = NSSize(width: 64, height: 64)
-        // ファイルは数が多いので、溜まりすぎたら捨てる
-        if iconCache.count > 2000 { iconCache.removeAll() }
+        // 1 つのアイコンが解像度違いの絵を十数枚抱えるので、最近使った物だけ残す
+        if iconOrder.count >= Self.iconCacheLimit {
+            iconCache[iconOrder.removeFirst()] = nil
+        }
         iconCache[path] = i
+        iconOrder.append(path)
         return i
     }
 
