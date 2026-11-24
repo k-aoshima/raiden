@@ -410,6 +410,7 @@ struct RowItem {
 
     var isFile: Bool { if case .file = preview { return true } else { return false } }
     var isClip: Bool { if case .clip = preview { return true } else { return false } }
+    var isApp: Bool { if case .app = preview { return true } else { return false } }
 
     static let appHint = "↩ 開く　⌘↩ Finder"
     static let fileHint = "↩ 開く　⌘↩ Finder に表示　⌘→ 基準に"
@@ -1263,9 +1264,9 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
 
     /// 今の候補で広げたいか（ファイルの行がある・絞り込みの一覧ではない・設定がオン・画面が広い）
     private var wantsWide: Bool {
-        // 選んでいる行がファイル・フォルダの時だけ（アプリの行ではプレビューを出さない）
+        // 選んでいる行がファイル・フォルダ・アプリ・コピー履歴の時
         // 何も打っていないときの最近のまとまりは、↑↓ で選び直すまで出さない（開くたびに窓が広がらないように）
-        Self.previewEnabled && !paletteRows && Self.screenFitsPreview && results.indices.contains(selected) && (results[selected].isFile || results[selected].isClip)
+        Self.previewEnabled && !paletteRows && Self.screenFitsPreview && results.indices.contains(selected) && (results[selected].isFile || results[selected].isClip || results[selected].isApp)
             && !(shownQuery?.isEmpty == true && !userMoved)
     }
 

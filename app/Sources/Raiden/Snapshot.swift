@@ -39,6 +39,7 @@ enum Snapshot {
         weakApps.items = Array(apps.prefix(2)); weakFiles.items = Array(files.prefix(2))
         shoot(dir + "/panel-notfound.png", query: "ふわふわのやつ", sections: [weakApps, weakFiles], notFound: true)
         shootPreview(dir + "/panel-preview.png", apps: apps)
+        shootAppPreview(dir + "/panel-preview-app.png", apps: apps, files: files)
         shootSettings(dir: dir)
         FilterSnapshots.run(dir: dir)
     }
@@ -72,6 +73,24 @@ enum Snapshot {
         c.preview.waitUntilLoaded()
         capture(c, path)
         try? FileManager.default.removeItem(atPath: root)
+    }
+
+    /// アプリの行を選んだ時のプレビュー（OS 付属のアプリ）
+    static func shootAppPreview(_ path: String, apps: [RowItem], files: [RowItem]) {
+        let withPreview = apps.map { a -> RowItem in
+            var r = a
+            r.preview = .app(title: a.title, path: a.sub)
+            return r
+        }
+        let secs = [ResultSection(title: "アプリ", symbol: "app.badge", items: withPreview),
+                    ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: Array(files.prefix(2)))]
+        let c = SearchPanelController()
+        c.setQueryText("テキスト")
+        c.setResults(secs, query: "テキスト")
+        c.select(2)
+        c.panel.contentView?.layoutSubtreeIfNeeded()
+        c.preview.waitUntilLoaded()
+        capture(c, path)
     }
 
     /// 見本の PDF（A4 の 1 枚に見積書らしい文字を並べる）

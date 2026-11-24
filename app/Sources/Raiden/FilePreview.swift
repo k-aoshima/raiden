@@ -3,7 +3,7 @@ import QuickLookThumbnailing
 import RaidenCore
 import UniformTypeIdentifiers
 
-/// 右のプレビューに出す物。ファイル・フォルダは中身、アプリは簡素に（アイコンと名前だけ）
+/// 右のプレビューに出す物。ファイル・フォルダは中身、アプリは大きなアイコンと版・起動中か・最後に開いた日など
 enum PreviewTarget: Equatable {
     case file(String)
     case app(title: String, path: String)
@@ -124,7 +124,10 @@ final class FilePreviewPane: NSView {
         switch t {
         case .app(_, let path):
             setInfo([("種類", "アプリ"), ("場所", RowItem.shortParent(path))])
-            loadedToken = token
+            let tk = token
+            let item = DispatchWorkItem { [weak self] in self?.loadApp(path: path, token: tk) }
+            pending = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.delay, execute: item)
         case .clip(let c):
             image.isHidden = true
             body.isHidden = false
@@ -184,6 +187,30 @@ final class FilePreviewPane: NSView {
                         self.loadedToken = tk
                     }
                 }
+            }
+        }
+    }
+
+    /// アプリは Info.plist と Spotlight の記録を裏で読み、アイコンは大きい物に差し替える
+    private func loadApp(path: String, token tk: Int) {
+        guard tk == token else { return }
+        Self.work.async { [weak self] in
+            let meta = AppPreviewMeta(path: path)
+            let big = NSWorkspace.shared.icon(forFile: path)
+            big.size = NSSize(width: 256, height: 256)
+            DispatchQueue.main.async {
+                guard let self, tk == self.token else { return }
+                self.image.image = big
+                var rows: [(String, String)] = [("種類", meta.category.map { "アプリ（\($0)）" } ?? "アプリ")]
+                if let v = meta.version { rows.append(("バージョン", v)) }
+                rows.append(("状態", meta.runningText))
+                if let d = meta.lastUsed { rows.append(("最後に開いた", Self.dateFormat.string(from: d))) }
+                if meta.usedDays > 1 { rows.append(("開いた日数", "\(meta.usedDays) 日")) }
+                if let s = meta.source { rows.append(("入手元", s)) }
+                if let c = meta.copyright { rows.append(("提供元", c)) }
+                rows.append(("場所", RowItem.shortParent(path)))
+                self.setInfo(rows)
+                self.loadedToken = tk
             }
         }
     }
@@ -331,6 +358,71 @@ struct PreviewMeta {
             }
             lastUsed = MDItemCopyAttribute(item, kMDItemLastUsedDate) as? Date
             usedDays = (MDItemCopyAttribute(item, "kMDItemUsedDates" as CFString) as? [Date])?.count ?? 0
+        }
+    }
+}
+
+/// 裏で読むアプリの情報（Info.plist・Spotlight の記録・起動中か）
+struct AppPreviewMeta {
+    var version: String?
+    var category: String?
+    var copyright: String?
+    var source: String?
+    var lastUsed: Date?
+    var usedDays = 0
+    var runningText = "起動していません"
+
+    /// LSApplicationCategoryType の主なもの（それ以外は出さない）
+    static let categories: [String: String] = [
+        "developer-tools": "開発", "productivity": "仕事効率化", "utilities": "ユーティリティ",
+        "graphics-design": "グラフィック", "photography": "写真", "video": "ビデオ", "music": "音楽",
+        "social-networking": "SNS", "business": "ビジネス", "education": "教育", "entertainment": "エンタメ",
+        "finance": "ファイナンス", "games": "ゲーム", "news": "ニュース", "reference": "辞書・参考",
+        "lifestyle": "ライフスタイル", "medical": "医療", "travel": "旅行", "weather": "天気",
+        "healthcare-fitness": "ヘルスケア", "sports": "スポーツ",
+    ]
+
+    /// 「Copyright © 1995-2026 Apple Inc. All rights reserved.」→「Apple Inc.」（会社名だけ）
+    static func vendor(_ s: String) -> String? {
+        var t = s.components(separatedBy: .newlines).first ?? s
+        for pat in ["(?i)copyright", "©", "(?i)\\(c\\)", "[0-9]{4}\\s*[-–]\\s*[0-9]{4}", "[0-9]{4}", "(?i)all rights reserved\\.?", "^[\\s,.]+", "[\\s,]+$"] {
+            t = t.replacingOccurrences(of: pat, with: "", options: .regularExpression)
+        }
+        t = t.trimmingCharacters(in: .whitespaces)
+        return t.isEmpty ? nil : t
+    }
+
+    init(path: String) {
+        let url = URL(fileURLWithPath: path)
+        let b = Bundle(url: url)
+        let info = b?.infoDictionary ?? [:]
+        let short = info["CFBundleShortVersionString"] as? String
+        let build = info["CFBundleVersion"] as? String
+        if let short { version = (build != nil && build != short) ? "\(short)（\(build!)）" : short } else { version = build }
+        if let c = info["LSApplicationCategoryType"] as? String, let tail = c.split(separator: ".").last {
+            category = Self.categories[String(tail)]
+        }
+        let cr = (b?.localizedInfoDictionary?["NSHumanReadableCopyright"] ?? info["NSHumanReadableCopyright"]) as? String
+        copyright = cr.flatMap(Self.vendor)
+        if path.hasPrefix("/System/") { source = "macOS 付属" }
+        else if FileManager.default.fileExists(atPath: path + "/Contents/_MASReceipt/receipt") { source = "App Store" }
+        if let item = MDItemCreate(kCFAllocatorDefault, path as CFString) {
+            lastUsed = MDItemCopyAttribute(item, kMDItemLastUsedDate) as? Date
+            usedDays = (MDItemCopyAttribute(item, "kMDItemUsedDates" as CFString) as? [Date])?.count ?? 0
+        }
+        let bid = b?.bundleIdentifier
+        let running = NSWorkspace.shared.runningApplications.filter {
+            $0.bundleURL?.standardizedFileURL.path == url.standardizedFileURL.path || (bid != nil && $0.bundleIdentifier == bid)
+        }
+        if let r = running.first {
+            // 窓の数は画面収録の許可なしで数えられる（持ち主と層だけ見る）
+            let pids = Set(running.map { $0.processIdentifier })
+            let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+            let wins = list.filter { ($0[kCGWindowLayer as String] as? Int) == 0 && pids.contains(($0[kCGWindowOwnerPID as String] as? Int32) ?? -1) }.count
+            var t = r.isHidden ? "起動中（隠しています）" : "起動中"
+            if wins > 0 { t += "・窓 \(wins) 枚" }
+            if let d = r.launchDate { t += "・" + RowItem.ago(d) + "から" }
+            runningText = t
         }
     }
 }
