@@ -117,7 +117,7 @@ components:
 - アクセント: アイコンの稲妻の藍（#3B34D6、暗い地は #9C97FF）。地に 7.6:1（暗い地 6.7:1）
 - 使う人と画面の大きさ: 本人（開発者）。画面中央の幅 660pt のパネル、ファイルを選ぶと右に 380pt のプレビュー
 - AppKit で作る: 値は `app/Sources/Raiden/Kodou.swift` の `K` に写してあり、部品は `K` だけを使う。値を変えたらこのファイルと `K` の両方を直す
-- 字体: JetBrains Mono を同梱（`app/Resources/Fonts`）、日本語は BIZ UDゴシック（macOS 付属）。文は Noto Sans JP が無ければヒラギノ角ゴ
+- 字体: 等幅は JetBrains Mono を同梱（`app/Resources/Fonts`）。日本語の字体は指定せず macOS に任せ、文はシステムの字体（SF Pro・ヒラギノ角ゴ）。Andon の Kodou テーマに合わせ、Kodou-ui の決まり（BIZ UDゴシック・Noto Sans JP）からは外している
 - アイコン: Kodou-ui のドット絵（`PixelGlyphs.swift` と、Raiden で足した物は `Kodou.swift` の `RaidenGlyphs`）。アプリとファイルのアイコンは中身のデータなので Mac のアイコンのまま
 - 外観: ライトが既定。設定の「一般 → 外観」でダーク・Mac に合わせるを選べる
 

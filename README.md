@@ -16,7 +16,7 @@ scripts/build.sh            # build/Raiden.app と build/raiden-eval を作る
 scripts/build.sh --install  # ~/Applications/Raiden.app に入れて起動
 ```
 
-モデルは同梱しない（アプリは 1.8MB。前はモデル込みで 476MB）。
+モデルは同梱しない。等幅の字体（JetBrains Mono）を同梱してアプリは約 4MB（前はモデル込みで 476MB）。
 
 ## しくみ
 
@@ -101,7 +101,7 @@ X は `~/` `/` で始まればそのパス、そうでなければ名前が一�
 
 ### 入力欄の見た目（app/Sources/Raiden/SearchPanel.swift）
 
-Kodou-ui（`DESIGN.md`、値は `app/Sources/Raiden/Kodou.swift` の `K`）で作る。透かさない地に 1px の罫線の枠を引き、左上に「raiden」、右上に状態（準備中など）を枠の線の上に載せる。入力欄は等幅（同梱の JetBrains Mono ＋ BIZ UDゴシック）で、下にフォーカスの 2px の藍の線。節の見出しは区切り線の形（名前のあとを細い罫線でつなぎ、件数を右端に）。選んだ行は反転表示（角は丸めない）。操作の手がかりは行には出さず、下のキーの帯に選んだ行で効くキー（↩ 開く ⌘↩ Finder …）と、件数・最後に打ってから描き終わるまでの時間（ms）を出す。アイコンは Kodou-ui のドット絵（アプリとファイルは Mac のアイコンのまま）。「#」を打つと稲妻が 140ms だけ反転する。動きは 80ms / 140ms だけ。外観は設定の「一般 → 外観」（ライト・ダーク・Mac に合わせる、既定はライト）。見本は `build/Raiden.app/Contents/MacOS/Raiden --snapshot docs/ui` で PNG に書き出す（画面には出さない。`RAIDEN_THEME=dark` で暗い地）。
+Kodou-ui（`DESIGN.md`、値は `app/Sources/Raiden/Kodou.swift` の `K`）で作る。透かさない地に 1px の罫線の枠を引き、左上に「raiden」、右上に状態（準備中など）を枠の線の上に載せる。入力欄は等幅（同梱の JetBrains Mono。日本語の字体は macOS に任せる）で、下にフォーカスの 2px の藍の線。節の見出しは区切り線の形（名前のあとを細い罫線でつなぎ、件数を右端に）。選んだ行は反転表示（角は丸めない）。操作の手がかりは行には出さず、下のキーの帯に選んだ行で効くキー（↩ 開く ⌘↩ Finder …）と、件数・最後に打ってから描き終わるまでの時間（ms）を出す。アイコンは Kodou-ui のドット絵（アプリとファイルは Mac のアイコンのまま）。「#」を打つと稲妻が 140ms だけ反転する。動きは 80ms / 140ms だけ。外観は設定の「一般 → 外観」（ライト・ダーク・Mac に合わせる、既定はライト）。見本は `build/Raiden.app/Contents/MacOS/Raiden --snapshot docs/ui` で PNG に書き出す（画面には出さない。`RAIDEN_THEME=dark` で暗い地）。
 
 **ファイルのプレビュー**（app/Sources/Raiden/FilePreview.swift）: 候補にファイル・フォルダの行があるときだけ、パネルを中央のまま右に広げ（一覧 660px ＋ プレビュー 380px、0.14 秒）、選んだ行（矢印・マウスを乗せる）の中身を出す。中身は Quick Look のサムネイル（`QLThumbnailGenerator`、PDF・画像・テキスト・コード・動画など）と、名前・種類・大きさ・変更日・場所。フォルダは中身の先頭いくつかと件数、アプリの行はアイコンと名前だけ。行を動かしてから 0.12 秒待って読み、その間に動いたら前の読み込みは取り消す。属性とフォルダの中身は裏のキューで読むので、入力や矢印は待たせない。打っている途中でファイルの行が消えたときは 0.25 秒待ってから狭める。画面の幅が 1120px 未満のときと、設定の「一般 → ファイルのプレビューを出す」（初期値オン）を切ったときは出さない。見本は `docs/ui/panel-preview.png`（`/tmp/raiden-preview-sample` にその場で作った見本のファイルを写す）。
 - 選んだ「入力 → ファイル」は例の点から chose の線で残し（`Store.recordFileChoice`）、一覧を作り直すたびに `Engine.addFileExamples` で入れ直す。

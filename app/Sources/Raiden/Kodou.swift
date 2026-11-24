@@ -67,27 +67,16 @@ enum K {
 
     // MARK: 字体
 
-    /// 等幅（JetBrains Mono ＋ 日本語は BIZ UDゴシック）。データ・コマンド・入力欄・名前とパス
+    /// 等幅（同梱の JetBrains Mono）。データ・コマンド・入力欄・名前とパス。
+    /// 日本語の字体は指定せず、macOS が選ぶ字体に任せる（Andon の Kodou テーマと同じ）
     static func mono(_ size: CGFloat, bold: Bool = false) -> NSFont {
-        let key = "\(size)-\(bold)"
-        if let f = monoCache[key] { return f }
-        let name = bold ? "JetBrainsMono-SemiBold" : "JetBrainsMono-Regular"
-        let jp = bold ? "BIZUDGothic-Bold" : "BIZUDGothic-Regular"
-        let base = NSFont(name: name, size: size) ?? .monospacedSystemFont(ofSize: size, weight: bold ? .semibold : .regular)
-        let desc = base.fontDescriptor.addingAttributes([
-            .cascadeList: [NSFontDescriptor(name: jp, size: size), NSFontDescriptor(name: "HiraginoSans-W3", size: size)],
-        ])
-        let f = NSFont(descriptor: desc, size: size) ?? base
-        monoCache[key] = f
-        return f
+        NSFont(name: bold ? "JetBrainsMono-SemiBold" : "JetBrainsMono-Regular", size: size)
+            ?? .monospacedSystemFont(ofSize: size, weight: bold ? .semibold : .regular)
     }
-    private static var monoCache: [String: NSFont] = [:]
 
-    /// 文（説明・案内）。Kodou-ui は Noto Sans JP、無ければヒラギノ角ゴ
+    /// 文（説明・案内）。システムの字体（英字は SF Pro、日本語はヒラギノ角ゴ。Andon の Kodou テーマと同じ）
     static func read(_ size: CGFloat, bold: Bool = false) -> NSFont {
-        NSFont(name: bold ? "NotoSansJP-Bold" : "NotoSansJP-Regular", size: size)
-            ?? NSFont(name: bold ? "HiraginoSans-W6" : "HiraginoSans-W3", size: size)
-            ?? .systemFont(ofSize: size, weight: bold ? .semibold : .regular)
+        .systemFont(ofSize: size, weight: bold ? .semibold : .regular)
     }
 
     // MARK: 余白と動き

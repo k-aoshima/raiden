@@ -30,6 +30,10 @@ final class FocusLineView: NSView {
 
 /// 入力欄の編集部品。変換中の文字の下線を藍にする（日本語入力が付ける線の太さはそのまま、色だけ変える）
 final class BandFieldEditor: NSTextView {
+    /// 文字か変換中の文字が変わったとき（案内文を出すか決め直す）
+    var onEdit: (() -> Void)?
+    override func unmarkText() { super.unmarkText(); onEdit?() }
+    override func didChangeText() { super.didChangeText(); onEdit?() }
     override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
         let m: NSMutableAttributedString
         if let a = string as? NSAttributedString { m = NSMutableAttributedString(attributedString: a) }
@@ -42,6 +46,36 @@ final class BandFieldEditor: NSTextView {
             m.addAttribute(.underlineColor, value: PanelStyle.caret, range: all)
         }
         super.setMarkedText(m, selectedRange: selectedRange, replacementRange: replacementRange)
+        onEdit?()
+    }
+}
+
+/// 検索の入力欄。字は欄の高さの真ん中に描く（JetBrains Mono に日本語の字体が混ざると、
+/// NSTextField の既定では日本語の字の上が欄からはみ出して切れる。欄を高くし、字の行を真ん中に置く）
+final class BandField: NSTextField {
+    override class var cellClass: AnyClass? { get { BandFieldCell.self } set {} }
+    /// コードから文字を書き換えたとき（「#」の一覧で選んだ・取り消した）にも案内文を決め直す
+    var onSet: (() -> Void)?
+    override var stringValue: String { didSet { onSet?() } }
+}
+
+final class BandFieldCell: NSTextFieldCell {
+    /// 日本語と英字を混ぜた 1 行の実際の高さ（字体を混ぜた分も含む）
+    private func lineHeight() -> CGFloat {
+        let f = font ?? K.mono(20)
+        return ceil(NSAttributedString(string: "Rg検索あ", attributes: [.font: f]).size().height)
+    }
+    private func centered(_ r: NSRect) -> NSRect {
+        let h = min(r.height, lineHeight())
+        return NSRect(x: r.minX, y: r.minY + ((r.height - h) / 2).rounded(), width: r.width, height: h)
+    }
+    override func drawingRect(forBounds rect: NSRect) -> NSRect { centered(super.drawingRect(forBounds: rect)) }
+    override func titleRect(forBounds rect: NSRect) -> NSRect { centered(super.titleRect(forBounds: rect)) }
+    override func edit(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?, event: NSEvent?) {
+        super.edit(withFrame: centered(rect), in: controlView, editor: textObj, delegate: delegate, event: event)
+    }
+    override func select(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?, start selStart: Int, length selLength: Int) {
+        super.select(withFrame: centered(rect), in: controlView, editor: textObj, delegate: delegate, start: selStart, length: selLength)
     }
 }
 
@@ -402,7 +436,8 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     let panel: KeyPanel
     /// 中身の面（PNG の書き出しはこれを撮る）
     let content = NSView()
-    private let field = NSTextField()
+    private let field = BandField()
+    private let placeholderLabel = NSTextField(labelWithString: "")
     private let statusIcon = NSImageView()
     private let status = NSTextField(labelWithString: "")
     /// 一覧の上に固定で出す行（チップ・知らせ・絞り込みの一覧の見出し）
@@ -514,7 +549,10 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         field.font = K.mono(20)
         field.textColor = K.fg
         // 入力欄が空のときの案内文: 「Raiden 検索」は薄く、「filter: #」は # の使い方の手がかりとして小さく
-        field.placeholderAttributedString = Self.defaultPlaceholder
+        // 案内文は欄の外のラベルで出す（欄の案内文は編集中に入力の部品が別に描き、字の上が切れたため）
+        placeholderLabel.attributedStringValue = Self.defaultPlaceholder
+        placeholderLabel.lineBreakMode = .byTruncatingTail
+        field.onSet = { [weak self] in self?.updatePlaceholder() }
         field.delegate = self
         field.cell?.usesSingleLineMode = true
         statusIcon.contentTintColor = K.faint
@@ -545,9 +583,16 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
 
     /// 案内文を差し替える（#alias の行き先を選んでいる間は「黒い画面 → どれに？」）。nil でいつもの案内
     func setPlaceholder(_ text: String?) {
-        guard let text else { field.placeholderAttributedString = Self.defaultPlaceholder; return }
-        field.placeholderAttributedString = NSAttributedString(string: text, attributes: [
-            .foregroundColor: K.faint, .font: K.mono(20)])
+        placeholderLabel.attributedStringValue = text.map {
+            NSAttributedString(string: $0, attributes: [.foregroundColor: K.faint, .font: K.mono(20)])
+        } ?? Self.defaultPlaceholder
+        updatePlaceholder()
+    }
+
+    /// 案内文は、欄が空で変換中の字も無いときだけ出す
+    private func updatePlaceholder() {
+        let marked = (field.currentEditor() as? NSTextView)?.hasMarkedText() ?? false
+        placeholderLabel.isHidden = !field.stringValue.isEmpty || marked
     }
 
     private func setupList(sep: HairlineView, glyph: NSImageView) {
@@ -583,7 +628,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             v.translatesAutoresizingMaskIntoConstraints = false
             statusBox.addSubview(v)
         }
-        for v in [frameView, focusLine, glyph, field, frameTitle, statusBox, sep, topStack, scroll, footer, bandRule, keyBand, bandInfo] as [NSView] {
+        for v in [frameView, focusLine, glyph, placeholderLabel, field, frameTitle, statusBox, sep, topStack, scroll, footer, bandRule, keyBand, bandInfo] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(v)
         }
@@ -609,8 +654,13 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             glyph.centerYAnchor.constraint(equalTo: content.topAnchor, constant: (KFrameView.inset + 1 + Self.fieldHeight - 2) / 2 + 3),
             field.leadingAnchor.constraint(equalTo: glyph.trailingAnchor, constant: 10),
             field.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
-            // 入力欄の字は欄の上寄りに描かれる（BIZ UDゴシックの行の高さ）ので、字の真ん中が稲妻とそろうよう下げる
-            field.centerYAnchor.constraint(equalTo: glyph.centerYAnchor, constant: Self.fieldTextNudge),
+            // 欄は高めに取り、字は BandFieldCell が欄の真ん中に描く
+            field.centerYAnchor.constraint(equalTo: glyph.centerYAnchor),
+            field.heightAnchor.constraint(equalToConstant: 40),
+            // 欄の字の描き始め（左 2pt）と同じ所から
+            placeholderLabel.leadingAnchor.constraint(equalTo: field.leadingAnchor, constant: 2),
+            placeholderLabel.trailingAnchor.constraint(lessThanOrEqualTo: field.trailingAnchor),
+            placeholderLabel.centerYAnchor.constraint(equalTo: glyph.centerYAnchor),
             focusLine.topAnchor.constraint(equalTo: content.topAnchor, constant: Self.fieldHeight - 2),
             focusLine.heightAnchor.constraint(equalToConstant: 2),
             focusLine.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: inset + 1),
@@ -693,6 +743,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
 
     func show() {
         field.stringValue = ""
+        updatePlaceholder()
         lastHashCount = 0
         userMoved = false
         filterInput.reset()
@@ -771,6 +822,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     /// 見本を撮るとき用（入力欄の文字を入れる）
     func setQueryText(_ s: String) {
         field.stringValue = s
+        updatePlaceholder()
         lastHashCount = s.reduce(0) { $0 + ($1 == "#" || $1 == "＃" ? 1 : 0) }
     }
 
@@ -796,7 +848,6 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     static var maxPanelHeight: CGFloat { visibleFrame.height * 0.65 }
 
     /// 一覧の下から窓の下端まで（すき間・キーの帯・枠）
-    static let fieldTextNudge: CGFloat = 5
     static var chromeBottom: CGFloat { 6 + bandHeight + KFrameView.inset + 1 }
 
     private func layoutPanel(top: CGFloat, list: CGFloat) {
@@ -1301,6 +1352,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         let n = field.stringValue.reduce(0) { $0 + ($1 == "#" || $1 == "＃" ? 1 : 0) }
         if n > lastHashCount { flashBolt() }
         typedAt = CACurrentMediaTime()
+        updatePlaceholder()
         filterInput.textDidChange()
         lastHashCount = field.stringValue.reduce(0) { $0 + ($1 == "#" || $1 == "＃" ? 1 : 0) }
     }
@@ -1358,6 +1410,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         tv.insertionPointColor = PanelStyle.caret
         tv.selectedTextAttributes = [.backgroundColor: K.selBg, .foregroundColor: K.selFg]
         tv.markedTextAttributes = [.underlineStyle: NSUnderlineStyle.single.rawValue, .underlineColor: PanelStyle.caret]
+        tv.onEdit = { [weak self] in self?.updatePlaceholder() }
         return tv
     }()
 
