@@ -33,8 +33,8 @@ enum Snapshot {
         let fileSec = ResultSection(title: "ファイル・フォルダ", symbol: "folder", items: files)
 
         shoot(dir + "/panel-empty.png", query: "", sections: [])
-        shoot(dir + "/panel-normal.png", query: "PDFを見るやつ", sections: [appSec, fileSec])
-        shoot(dir + "/panel-selected.png", query: "PDFを見るやつ", sections: [appSec, fileSec], select: 6)
+        shoot(dir + "/panel-normal.png", query: "pdf", sections: [appSec, fileSec])
+        shoot(dir + "/panel-selected.png", query: "pdf", sections: [appSec, fileSec], select: 6)
         var weakApps = appSec, weakFiles = fileSec
         weakApps.items = Array(apps.prefix(2)); weakFiles.items = Array(files.prefix(2))
         shoot(dir + "/panel-notfound.png", query: "ふわふわのやつ", sections: [weakApps, weakFiles], notFound: true)
@@ -152,7 +152,7 @@ enum Snapshot {
         compose(shot, size: b.size, radius: 0, path: path)
     }
 
-    /// 明るい壁紙の代わりの背景に載せて書き出す（ガラスのぼかしは画面外では描かれないため、白い面だけが写る）
+    /// 無地の背景に載せて書き出す
     static func compose(_ shot: NSBitmapImageRep, size b: NSSize, radius: CGFloat, path: String) {
         let pad: CGFloat = 48, scale: CGFloat = 2
         let size = NSSize(width: b.width + pad * 2, height: b.height + pad * 2)
@@ -162,11 +162,14 @@ enum Snapshot {
         out.size = size
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: out)
-        NSGradient(starting: NSColor(srgbRed: 0.80, green: 0.86, blue: 0.94, alpha: 1),
-                   ending: NSColor(srgbRed: 0.93, green: 0.90, blue: 0.95, alpha: 1))?.draw(in: NSRect(origin: .zero, size: size), angle: -60)
+        // 背景は無地（Kodou-ui の地より一段濃い色）。ガラスのころの青紫のぼかしはやめた
+        let dark = K.theme == .dark
+        (dark ? NSColor(srgbRed: 0x0E / 255, green: 0x10 / 255, blue: 0x14 / 255, alpha: 1)
+              : NSColor(srgbRed: 0xE2 / 255, green: 0xE2 / 255, blue: 0xDC / 255, alpha: 1)).setFill()
+        NSRect(origin: .zero, size: size).fill()
         let sh = NSShadow()
-        sh.shadowColor = NSColor(white: 0, alpha: 0.18)
-        sh.shadowBlurRadius = 24
+        sh.shadowColor = NSColor(white: 0, alpha: 0.12)
+        sh.shadowBlurRadius = 16
         sh.shadowOffset = NSSize(width: 0, height: -6)
         sh.set()
         let img = NSImage(size: b)
