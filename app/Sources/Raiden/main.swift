@@ -83,12 +83,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func loadSettings() {
         settings = RaidenSettings.load()
-        PanelStyle.transparency = settings.transparency
+        K.theme = RaidenTheme(rawValue: settings.theme) ?? .light
         SearchPanelController.maxRows = settings.maxRows
         SearchPanelController.previewEnabled = settings.showPreview
         SavedFilters.set(settings.savedFilters)
         PhraseDictionary.set(settings.dictionary)
-        panel.applyTransparency()
+        panel.applyTheme()
     }
 
     /// 設定を変えて保存し、変わった所をアプリに当てる
@@ -103,7 +103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let ex = s.exclude
             work.async { [weak self] in self?.engine?.spotlight.exclude = ex; self?.filterSource?.search.exclude = ex }
         }
-        if old.transparency != s.transparency { previewTransparency(s.transparency) }
+        if old.theme != s.theme { applyTheme(s.theme) }
         if old.maxRows != s.maxRows { SearchPanelController.maxRows = s.maxRows }
         if old.showPreview != s.showPreview { SearchPanelController.previewEnabled = s.showPreview }
         if old.savedFilters != s.savedFilters { SavedFilters.set(s.savedFilters) }
@@ -118,10 +118,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    func previewTransparency(_ t: Double) {
-        PanelStyle.transparency = t
-        panel.applyTransparency()
-        settingsWindow?.applyTransparency(t)
+    /// 外観を入力欄と設定窓に当てる
+    func applyTheme(_ name: String) {
+        K.theme = RaidenTheme(rawValue: name) ?? .light
+        panel.applyTheme()
+        settingsWindow?.applyTheme()
     }
 
     @objc private func openSettings() {

@@ -28,6 +28,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp build/Raiden "$APP/Contents/MacOS/Raiden"
 cp app/Resources/Info.plist "$APP/Contents/Info.plist"
 cp app/Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+cp -R app/Resources/Fonts "$APP/Contents/Resources/Fonts"
 # 署名。アドホック（-）だとビルドごとに cdhash が変わり、macOS が別のアプリと見なして、書類・デスクトップ・ダウンロードへの
 # アクセス許可を入れ直すたびに聞き直す。キーチェーンの自己署名の証明書（Andon と同じ「Andon Local Signing」）があればそれで署名する
 SIGN=$(security find-identity -p codesigning 2>/dev/null | awk -F'"' '/Andon Local Signing/{print $2; exit}')

@@ -107,17 +107,17 @@ final class HotKeyRecorder: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let r = bounds.insetBy(dx: 0.5, dy: 0.5)
-        (recording ? SettingsStyle.selection : NSColor(white: 1, alpha: 0.9)).setFill()
-        let p = NSBezierPath(roundedRect: r, xRadius: 7, yRadius: 7)
-        p.fill()
-        (recording ? SettingsStyle.accent.withAlphaComponent(0.6) : NSColor(white: 0, alpha: 0.15)).setStroke()
-        p.lineWidth = 1
+        // 録っている間はアクセントの 2px の枠（フォーカスと同じ）、ふだんは部品の境界の 1px
+        K.panel.setFill()
+        bounds.fill()
+        let p = NSBezierPath(rect: bounds.insetBy(dx: recording ? 1 : 0.5, dy: recording ? 1 : 0.5))
+        (recording ? K.accent : K.ui).setStroke()
+        p.lineWidth = recording ? 2 : 1
         p.stroke()
         let s = recording ? "キーを押してください…" : label
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: recording ? 12 : 13, weight: .medium),
-            .foregroundColor: recording ? SettingsStyle.accent : SettingsStyle.text,
+            .font: recording ? K.read(12) : K.mono(13, bold: true),
+            .foregroundColor: recording ? K.accent : K.fg,
         ]
         let size = (s as NSString).size(withAttributes: attrs)
         (s as NSString).draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2), withAttributes: attrs)

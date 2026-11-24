@@ -532,9 +532,9 @@ final class ChipBar: NSView {
         }
         for n in notes {
             let l = NSTextField(labelWithString: n)
-            l.font = .systemFont(ofSize: 11)
-            l.textColor = NSColor(srgbRed: 0.75, green: 0.36, blue: 0.0, alpha: 1)
-            let icon = NSImageView(image: symbol("exclamationmark.circle", size: 10, weight: .medium) ?? NSImage())
+            l.font = K.read(11.5)
+            l.textColor = K.yellow
+            let icon = NSImageView(image: symbol("exclamationmark.circle", size: 12) ?? NSImage())
             icon.contentTintColor = l.textColor
             stack.addArrangedSubview(icon)
             stack.addArrangedSubview(l)
@@ -568,11 +568,11 @@ final class ChipBar: NSView {
 
     static func caption(_ s: String, symbol name: String? = nil) -> NSView {
         let l = NSTextField(labelWithString: s)
-        l.font = .systemFont(ofSize: 11)
-        l.textColor = PanelStyle.faint
+        l.font = K.read(11.5)
+        l.textColor = K.faint
         guard let name else { return l }
-        let icon = NSImageView(image: symbol(name, size: 10, weight: .medium) ?? NSImage())
-        icon.contentTintColor = PanelStyle.faint
+        let icon = NSImageView(image: symbol(name, size: 12) ?? NSImage())
+        icon.contentTintColor = K.faint
         let st = NSStackView(views: [icon, l])
         st.spacing = 4
         return st
@@ -581,14 +581,14 @@ final class ChipBar: NSView {
     /// 札 1 つ（アイコン＋文字）。filled: 効いている絞り込み（closable なら右に ×）、false: 押すと足せる候補（枠だけ）
     static func pill(_ text: String, symbol name: String, filled: Bool, closable: Bool = false, faint: Bool = false) -> TapPill {
         let v = PillView(filled: filled)
-        let icon = NSImageView(image: symbol(name, size: 10, weight: .semibold) ?? NSImage())
-        icon.contentTintColor = filled ? PanelStyle.indigo : PanelStyle.subText
+        let icon = NSImageView(image: symbol(name, size: 12) ?? NSImage())
+        icon.contentTintColor = filled ? K.accent : K.dim
         let l = NSTextField(labelWithString: text)
-        l.font = .systemFont(ofSize: 11, weight: .medium)
-        l.textColor = filled ? PanelStyle.text : (faint ? PanelStyle.faint : PanelStyle.subText)
+        l.font = K.mono(11.5)
+        l.textColor = filled ? K.fg : (faint ? K.faint : K.dim)
         var views: [NSView] = [icon, l]
-        let x = NSImageView(image: symbol("xmark", size: 8, weight: .bold) ?? NSImage())
-        x.contentTintColor = PanelStyle.faint
+        let x = NSImageView(image: symbol("xmark", size: 12) ?? NSImage())
+        x.contentTintColor = K.dim
         if closable { views.append(x) }
         for e in views { e.translatesAutoresizingMaskIntoConstraints = false; v.addSubview(e) }
         NSLayoutConstraint.activate([
@@ -628,29 +628,25 @@ final class SuggestBar: NSView {
     required init?(coder: NSCoder) { fatalError() }
 }
 
-/// 札の面（角丸。効いている絞り込みは薄い青の面、候補は枠だけ）
+/// 札の面（Kodou-ui のタグ。角は丸めない。効いている絞り込みは薄いアクセントの面とアクセントの枠、
+/// 幅のある時期は破線の枠、押すと足せる候補は部品の境界の色の枠だけ）
 final class PillView: TapPill {
     let filled: Bool
     var soft = false { didSet { needsDisplay = true } }
     init(filled: Bool) { self.filled = filled; super.init(frame: .zero); translatesAutoresizingMaskIntoConstraints = false }
     required init?(coder: NSCoder) { fatalError() }
     override func draw(_ dirtyRect: NSRect) {
-        let p = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 11, yRadius: 11)
-        if soft {
-            PanelStyle.indigo.withAlphaComponent(0.06).setFill()
-            p.fill()
-            PanelStyle.indigo.withAlphaComponent(0.7).setStroke()
-            p.lineWidth = 1
-            p.setLineDash([3, 2], count: 2, phase: 0)
-            p.stroke()
-        } else if filled {
-            PanelStyle.pillFill.setFill()
-            p.fill()
+        let p = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
+        p.lineWidth = 1
+        if soft || filled {
+            K.accentBg.setFill()
+            bounds.fill()
+            K.accent.setStroke()
+            if soft { p.setLineDash([3, 2], count: 2, phase: 0) }
         } else {
-            NSColor(white: 0, alpha: 0.14).setStroke()
-            p.lineWidth = 1
-            p.stroke()
+            K.ui.setStroke()
         }
+        p.stroke()
     }
 }
 

@@ -8,70 +8,23 @@ final class KeyPanel: NSPanel {
     override var canBecomeMain: Bool { true }
 }
 
-/// パネルの色。OS がダークモードでもライトの見た目（白基調）にする
+/// パネルの色。中身は Kodou-ui の値（Kodou.swift の K）。古い名前は呼ぶ側を直すまでの別名
 enum PanelStyle {
-    static let appearance = NSAppearance(named: .aqua)!
-    static let text = NSColor(white: 0.13, alpha: 1)        // 濃いグレー
-    static let subText = NSColor(white: 0.42, alpha: 1)
-    static let faint = NSColor(white: 0.55, alpha: 1)
-    /// 透け具合（設定の「一般 → 透明度」。0 = 白い、0.9 = いちばん透ける。既定 0.6）
-    static var transparency = RaidenSettings.defaultTransparency
-    /// ガラスの白寄りの色: 不透明度 0.65 ×（1 − 透け具合）。既定 0.6 で 0.26（前は 0.55 固定）
-    static var glassTint: NSColor { NSColor(white: 1, alpha: CGFloat(0.65 * (1 - transparency))) }
-    /// ガラスの上に重ねる白い面: 不透明度 0.75 ×（1 − 透け具合）。既定 0.6 で 0.30（前は 0.62 固定）
-    static var veil: NSColor { NSColor(white: 1, alpha: CGFloat(0.75 * (1 - transparency))) }
-    /// これ以上透けさせるときはガラスを .clear にする
-    static let clearGlassAbove = 0.75
-    /// Raiden の色（アイコンの稲妻の藍）
-    static let indigo = NSColor(srgbRed: 0.231, green: 0.204, blue: 0.839, alpha: 1)      // #3B34D6
-    static let indigoDeep = NSColor(srgbRed: 0.165, green: 0.141, blue: 0.659, alpha: 1)  // #2A24A8 選んだ行の名前
-    static let indigoLabel = NSColor(srgbRed: 0.31, green: 0.29, blue: 0.69, alpha: 1)    // 節の見出し
-    /// 入力欄のカーソル・変換中の下線（藍）
-    static let caret = indigo
-    static let selection = NSColor(srgbRed: 0.231, green: 0.204, blue: 0.839, alpha: 0.10)
-    /// 絞り込みの札（効いている物）の面
-    static let pillFill = NSColor(srgbRed: 0.231, green: 0.204, blue: 0.839, alpha: 0.09)
-    static let separator = NSColor(white: 0, alpha: 0.08)
-    static let radius: CGFloat = 22
+    static var appearance: NSAppearance? { K.appearance }
+    static var text: NSColor { K.fg }
+    static var subText: NSColor { K.dim }
+    static var faint: NSColor { K.faint }
+    /// Raiden の色（アイコンの稲妻の藍）＝ Kodou-ui のアクセント
+    static var indigo: NSColor { K.accent }
+    static var caret: NSColor { K.accent }
+    static var separator: NSColor { K.ruleSoft }
 }
 
-/// SF Symbols の画像
-func symbol(_ name: String, size: CGFloat, weight: NSFont.Weight = .regular) -> NSImage? {
-    NSImage(systemSymbolName: name, accessibilityDescription: nil)?
-        .withSymbolConfiguration(.init(pointSize: size, weight: weight))
-}
-
-/// 白い面（ガラスの上に重ねる。draw で描くので PNG に書き出しても出る）
-final class VeilView: NSView {
+/// 入力欄の下の線。入力欄はいつもフォーカスがあるので、Kodou-ui のテキスト入力のフォーカス（下に 2px のアクセントの線）を引く
+final class FocusLineView: NSView {
     override func draw(_ dirtyRect: NSRect) {
-        PanelStyle.veil.setFill()
-        NSBezierPath(roundedRect: bounds, xRadius: PanelStyle.radius, yRadius: PanelStyle.radius).fill()
-        NSColor(white: 0, alpha: 0.06).setStroke()
-        let p = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: PanelStyle.radius, yRadius: PanelStyle.radius)
-        p.lineWidth = 1
-        p.stroke()
-    }
-}
-
-/// 入力欄の下の光る藍の線（両端は消えていく。藍から紫へ、薄い光をまとう）
-final class GlowLineView: NSView {
-    override func draw(_ dirtyRect: NSRect) {
-        let line = NSRect(x: 0, y: bounds.midY - 1, width: bounds.width, height: 2)
-        let g = NSGradient(colorsAndLocations:
-            (NSColor(srgbRed: 0.231, green: 0.204, blue: 0.839, alpha: 0), 0),
-            (NSColor(srgbRed: 0.231, green: 0.204, blue: 0.839, alpha: 1), 0.18),
-            (NSColor(srgbRed: 0.416, green: 0.298, blue: 0.941, alpha: 1), 0.6),
-            (NSColor(srgbRed: 0.416, green: 0.298, blue: 0.941, alpha: 0), 1))
-        NSGraphicsContext.saveGraphicsState()
-        let sh = NSShadow()
-        sh.shadowColor = NSColor(srgbRed: 0.35, green: 0.27, blue: 0.94, alpha: 0.55)
-        sh.shadowBlurRadius = 5
-        sh.shadowOffset = .zero
-        sh.set()
-        NSColor(srgbRed: 0.33, green: 0.25, blue: 0.9, alpha: 0.35).setFill()
-        NSBezierPath(roundedRect: line.insetBy(dx: bounds.width * 0.2, dy: 0), xRadius: 1, yRadius: 1).fill()
-        NSGraphicsContext.restoreGraphicsState()
-        g?.draw(in: NSBezierPath(roundedRect: line, xRadius: 1, yRadius: 1), angle: 0)
+        K.accent.setFill()
+        bounds.fill()
     }
 }
 
@@ -100,54 +53,47 @@ final class HairlineView: NSView {
     }
 }
 
-/// 候補 1 行（アイコン・名前・場所）。選択中は面の色だけで示す（左端の縦線や帯は使わない）。
-/// 操作の手がかり（↩ 開く・⌘↩ Finder）は選択中の行の右に小さく出す。
+/// 候補 1 行（アイコン・名前・場所）。選択中は反転表示（Kodou-ui のリスト）。左端の縦線や帯は使わない。
+/// 操作の手がかり（↩ 開く・⌘↩ Finder）は行には出さず、パネルの下のキーの帯に出す（SearchPanelController.keyBand）
 final class ResultRow: NSView {
     let icon = NSImageView()
     let title = NSTextField(labelWithString: "")
     let sub = NSTextField(labelWithString: "")
-    let hint = NSTextField(labelWithString: "")
-    /// 見出しの右に小さく添える文字（「#」の一覧のコマンド名 #date #k）。藍・等幅
+    /// 操作の手がかり（キーの帯に出す元の文字。行には出さない）
+    private(set) var hintText = ""
+    /// 見出しの右に小さく添える文字（「#」の一覧のコマンド名 #date #k）。アクセント・等幅
     let tagLabel = NSTextField(labelWithString: "")
     var onClick: (() -> Void)?
     var selected = false {
-        didSet { needsDisplay = true; hint.isHidden = !selected || card; title.textColor = selected ? PanelStyle.indigoDeep : PanelStyle.text }
+        didSet { needsDisplay = true; applyColors() }
     }
 
-    /// 操作の手がかり。キー（↩ ⌘↩ など）は藍、言葉は薄いグレー
-    func setHint(_ s: String) {
-        let out = NSMutableAttributedString()
-        for (i, part) in s.components(separatedBy: "　").enumerated() {
-            if i > 0 { out.append(NSAttributedString(string: "　　", attributes: [.font: NSFont.systemFont(ofSize: 11)])) }
-            let sp = part.split(separator: " ", maxSplits: 1).map(String.init)
-            guard !sp.isEmpty else { continue }   // 空の区切り（ヒントが空・「　」で始まる）で落ちないように
-            out.append(NSAttributedString(string: sp[0], attributes: [
-                .font: NSFont.systemFont(ofSize: 11, weight: .bold), .foregroundColor: PanelStyle.indigo]))
-            if sp.count > 1 {
-                out.append(NSAttributedString(string: " " + sp[1], attributes: [
-                    .font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: PanelStyle.faint]))
-            }
-        }
-        hint.attributedStringValue = out
+    func setHint(_ s: String) { hintText = s }
+
+    /// 反転しているときは中の文字も反転の色にそろえる
+    private func applyColors() {
+        title.textColor = selected ? K.selFg : K.fg
+        sub.textColor = selected ? K.selDim : K.dim
+        tagLabel.textColor = selected ? K.selFg : K.accent
+        if card { icon.contentTintColor = selected ? K.selFg : K.accent }
+        else if icon.image?.isTemplate == true { icon.contentTintColor = selected ? K.selFg : K.dim }
     }
 
-    /// カードの形（2 列の「入口」）: 枠線の角丸、薄い藍の角丸の下地にアイコン、右端にコマンド
+    /// カードの形（2 列の「入口」）: 1px の罫線の四角、アイコンは地のまま、右端にコマンド
     private(set) var card = false
-    private let iconBack = NSView()
 
     convenience init(card: Bool) {
         self.init(frame: .zero)
         guard card else { return }
         self.card = true
         NSLayoutConstraint.deactivate(constraints)
-        for v in [icon, title, sub, hint, tagLabel] as [NSView] { v.removeFromSuperview() }
-        iconBack.wantsLayer = true
-        iconBack.layer?.cornerRadius = 8
-        iconBack.layer?.backgroundColor = PanelStyle.indigo.withAlphaComponent(0.10).cgColor
-        icon.contentTintColor = PanelStyle.indigo
-        title.font = .systemFont(ofSize: 14, weight: .semibold)
+        for v in [icon, title, sub, tagLabel] as [NSView] { v.removeFromSuperview() }
+        icon.contentTintColor = K.accent
+        icon.imageScaling = .scaleNone
+        title.font = K.mono(13, bold: true)
+        sub.font = K.read(11.5)
         sub.lineBreakMode = .byTruncatingTail
-        for v in [iconBack, icon, title, sub, tagLabel] as [NSView] {
+        for v in [icon, title, sub, tagLabel] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -156,12 +102,10 @@ final class ResultRow: NSView {
         title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         sub.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         NSLayoutConstraint.activate([
-            iconBack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            iconBack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            iconBack.widthAnchor.constraint(equalToConstant: 32), iconBack.heightAnchor.constraint(equalToConstant: 32),
-            icon.centerXAnchor.constraint(equalTo: iconBack.centerXAnchor), icon.centerYAnchor.constraint(equalTo: iconBack.centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 17), icon.heightAnchor.constraint(equalToConstant: 17),
-            title.leadingAnchor.constraint(equalTo: iconBack.trailingAnchor, constant: 10),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 18), icon.heightAnchor.constraint(equalToConstant: 18),
+            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 10),
             title.topAnchor.constraint(equalTo: topAnchor, constant: 8),
             title.trailingAnchor.constraint(lessThanOrEqualTo: tagLabel.leadingAnchor, constant: -8),
             sub.leadingAnchor.constraint(equalTo: title.leadingAnchor),
@@ -170,60 +114,55 @@ final class ResultRow: NSView {
             tagLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             tagLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+        applyColors()
     }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         icon.imageScaling = .scaleProportionallyUpOrDown
-        title.font = .systemFont(ofSize: 15, weight: .medium)
-        title.textColor = PanelStyle.text
+        title.font = K.mono(14)
         title.lineBreakMode = .byTruncatingTail
-        sub.font = .systemFont(ofSize: 11)
-        sub.textColor = PanelStyle.subText
+        sub.font = K.mono(11.5)
         sub.lineBreakMode = .byTruncatingMiddle
-        hint.font = .systemFont(ofSize: 11, weight: .medium)
-        hint.textColor = PanelStyle.faint
-        hint.isHidden = true
-        tagLabel.font = .monospacedSystemFont(ofSize: 11.5, weight: .medium)
-        tagLabel.textColor = PanelStyle.indigo
+        tagLabel.font = K.mono(11.5, bold: true)
         tagLabel.lineBreakMode = .byTruncatingTail
-        for v in [icon, title, sub, hint, tagLabel] as [NSView] {
+        for v in [icon, title, sub, tagLabel] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
         tagLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        hint.setContentCompressionResistancePriority(.required, for: .horizontal)
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 30), icon.heightAnchor.constraint(equalToConstant: 30),
+            icon.widthAnchor.constraint(equalToConstant: 28), icon.heightAnchor.constraint(equalToConstant: 28),
             title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 12),
             title.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            title.trailingAnchor.constraint(lessThanOrEqualTo: hint.leadingAnchor, constant: -10),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -20),
             tagLabel.leadingAnchor.constraint(equalTo: title.trailingAnchor, constant: 10),
             tagLabel.firstBaselineAnchor.constraint(equalTo: title.firstBaselineAnchor),
-            tagLabel.trailingAnchor.constraint(lessThanOrEqualTo: hint.leadingAnchor, constant: -10),
+            tagLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -20),
             sub.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            sub.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 1),
-            sub.trailingAnchor.constraint(lessThanOrEqualTo: hint.leadingAnchor, constant: -10),
-            hint.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
-            hint.centerYAnchor.constraint(equalTo: centerYAnchor),
+            sub.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 2),
+            sub.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -20),
         ])
+        applyColors()
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override func draw(_ dirtyRect: NSRect) {
         if card {
-            let p = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 12, yRadius: 12)
-            if selected { PanelStyle.selection.setFill(); p.fill() } else {
-                PanelStyle.text.withAlphaComponent(0.10).setStroke(); p.lineWidth = 1; p.stroke()
-            }
+            if selected { K.selBg.setFill(); bounds.fill(); return }
+            K.rule.setStroke()
+            let p = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
+            p.lineWidth = 1
+            p.stroke()
             return
         }
         guard selected else { return }
-        PanelStyle.selection.setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 1), xRadius: 10, yRadius: 10).fill()
+        // 枠の内側いっぱいに反転（角は丸めない）
+        K.selBg.setFill()
+        bounds.insetBy(dx: KFrameView.inset + 1, dy: 0).fill()
     }
 
     override func mouseDown(with event: NSEvent) { onClick?() }
@@ -254,20 +193,26 @@ final class ResultRow: NSView {
     }
 }
 
-/// アイコンと文字の 1 行（節の見出し・「見つかりません」）。選べない
+/// アイコンと文字の 1 行（節の見出し・「見つかりません」）。選べない。
+/// 節の見出しは区切り線の形（── アプリ ───────── 3 件）: 名前のあとを細い罫線でつなぎ、件数を右端に置く
 final class LabelLine: NSView {
+    private var ruleFrom: NSTextField?
+    private var ruleTo: NSView?
+    private let big: Bool
+
     /// count: 右の端にそろえて出す件数（「12 件」。時期の棚など）。plain: 大きい一文を太字にしない
     init(_ text: String, symbol name: String, detail: String? = nil, big: Bool = false, count: String? = nil, plain: Bool = false) {
+        self.big = big
         super.init(frame: .zero)
-        let glyph = NSImageView(image: symbol(name, size: big ? 15 : 10, weight: .semibold) ?? NSImage())
-        glyph.contentTintColor = big ? PanelStyle.subText : PanelStyle.indigoLabel
+        let glyph = NSImageView(image: symbol(name, size: big ? 14 : 12) ?? NSImage())
+        glyph.contentTintColor = big ? K.dim : K.accent
         let label = NSTextField(labelWithString: text)
-        label.font = big ? .systemFont(ofSize: 14, weight: plain ? .regular : .semibold) : .systemFont(ofSize: 11, weight: .semibold)
-        label.textColor = big ? PanelStyle.text : PanelStyle.indigoLabel
+        label.font = big ? K.read(14, bold: !plain) : K.mono(11.5, bold: true)
+        label.textColor = big ? K.fg : K.dim
         var views: [NSView] = [glyph, label]
         let d = NSTextField(labelWithString: detail ?? "")
-        d.font = .systemFont(ofSize: 11)
-        d.textColor = PanelStyle.faint
+        d.font = K.read(11.5)
+        d.textColor = K.faint
         if detail != nil { views.append(d) }
         for v in views {
             v.translatesAutoresizingMaskIntoConstraints = false
@@ -285,20 +230,39 @@ final class LabelLine: NSView {
                 d.firstBaselineAnchor.constraint(equalTo: label.firstBaselineAnchor),
             ])
         }
+        var c: NSTextField?
         if let count {
-            let c = NSTextField(labelWithString: count)
-            c.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-            c.textColor = PanelStyle.faint
-            c.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(c)
+            let l = NSTextField(labelWithString: count)
+            l.font = K.mono(11.5)
+            l.textColor = K.faint
+            l.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(l)
             NSLayoutConstraint.activate([
-                c.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
-                c.firstBaselineAnchor.constraint(equalTo: label.firstBaselineAnchor),
+                l.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
+                l.firstBaselineAnchor.constraint(equalTo: label.firstBaselineAnchor),
             ])
+            c = l
         }
+        guard !big else { return }
+        ruleFrom = detail != nil ? d : label
+        ruleTo = c
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard !big, let from = ruleFrom else { return }
+        let x0 = from.frame.maxX + 8
+        let x1 = (ruleTo?.frame.minX ?? bounds.maxX - 20 + 8) - 8
+        guard x1 > x0 else { return }
+        K.ruleSoft.setFill()
+        NSRect(x: x0, y: from.frame.midY.rounded(), width: x1 - x0, height: 1).fill()
+    }
+
+    override func layout() {
+        super.layout()
+        needsDisplay = true
+    }
 }
 
 /// 候補 1 件。アプリかファイル・フォルダ
@@ -479,14 +443,25 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     private var iconOrder: [String] = []
     static let iconCacheLimit = 300
     private var heightConstraint: NSLayoutConstraint!
-    private var glassView: NSView?
-    private var veilView: VeilView?
-    private var glowLine: GlowLineView?
+    /// 地と罫線の枠（左上に名前、右上に状態）
+    private let frameView = KFrameView()
+    private let frameTitle = KFrameView.title(" raiden ")
+    /// 右上の状態（準備中など）。地の色で枠の線を切る
+    private let statusBox: KFill = { let v = KFill(K.panel); v.isHidden = true; return v }()
+    /// 入力欄の下のフォーカスの線
+    private let focusLine = FocusLineView()
+    /// 下のキーの帯（選んでいる行で効くキー・件数・入力から描き終わるまでの時間）
+    private let keyBand = NSTextField(labelWithString: "")
+    private let bandInfo = NSTextField(labelWithString: "")
+    private let bandRule = KFill(K.ruleSoft)
+    static let bandHeight: CGFloat = 28
+    /// 最後に打った時刻（入力から描き終わるまでを測る）
+    private var typedAt: CFTimeInterval?
+    private var lastDrawMs: Double?
     /// 入力欄の左の稲妻（# を打ったら光らせる）
     private var boltView: NSImageView?
     /// 前に見た入力欄の # の数（増えたら光らせる）
     private var lastHashCount = 0
-    private var effectView: NSVisualEffectView?
     /// 絞り込みのコマンド（#kind ss #date 7d）の一覧・チップ（FilterUI.swift）
     let filterInput = FilterInput()
     var selectedRow: Int { selected }
@@ -514,9 +489,9 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         super.init()
         panel.isFloatingPanel = true
         panel.level = .modalPanel
-        panel.backgroundColor = .clear
-        panel.isOpaque = false
-        // 影はシステムに付けてもらう。ガラスの部品と中身を丸い角で切り抜いて、影が四角く作られないようにする（下の glass と content）
+        panel.backgroundColor = K.panel
+        panel.isOpaque = true
+        // 影はシステムに付けてもらう（角は丸めないので四角い影のまま）
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
@@ -524,68 +499,32 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         panel.appearance = PanelStyle.appearance
         panel.delegate = self
 
-        // ガラス（macOS 26 以降）か、すりガラス（それより前）の上に、白い面と中身を載せる
-        let veil = VeilView()
-        if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView()
-            glass.style = PanelStyle.transparency >= PanelStyle.clearGlassAbove ? .clear : .regular
-            glass.cornerRadius = PanelStyle.radius
-            glass.tintColor = PanelStyle.glassTint
-            glass.contentView = content
-            // ガラスの部品も丸い角で切り抜く（切り抜かないと四角いまま描かれ、窓の影が四角く作られて角の外に線が出る）
-            glass.wantsLayer = true
-            glass.layer?.cornerRadius = PanelStyle.radius
-            glass.layer?.cornerCurve = .continuous
-            glass.layer?.masksToBounds = true
-            panel.contentView = glass
-            glassView = glass
-        } else {
-            let bg = NSVisualEffectView()
-            bg.material = PanelStyle.transparency >= 0.5 ? .underWindowBackground : .popover
-            bg.blendingMode = .behindWindow
-            bg.state = .active
-            bg.wantsLayer = true
-            bg.layer?.cornerRadius = PanelStyle.radius
-            bg.layer?.masksToBounds = true
-            content.translatesAutoresizingMaskIntoConstraints = false
-            bg.addSubview(content)
-            NSLayoutConstraint.activate([
-                content.topAnchor.constraint(equalTo: bg.topAnchor), content.bottomAnchor.constraint(equalTo: bg.bottomAnchor),
-                content.leadingAnchor.constraint(equalTo: bg.leadingAnchor), content.trailingAnchor.constraint(equalTo: bg.trailingAnchor),
-            ])
-            panel.contentView = bg
-            effectView = bg
-        }
-        veilView = veil
+        // 地と罫線の枠の上に中身を載せる（Kodou-ui のパネル。角は丸めず、透かさない）
+        panel.contentView = content
         content.appearance = PanelStyle.appearance
-        // 中身（白い面・一覧・プレビュー）もパネルと同じ丸い角で切り抜く。切り抜かないと四角いまま描かれ、
-        // 窓の影がその四角い形で作られて、角の外に四角い影が出る
-        content.wantsLayer = true
-        content.layer?.cornerRadius = PanelStyle.radius
-        content.layer?.cornerCurve = .continuous
-        content.layer?.masksToBounds = true
 
-        let glyph = NSImageView(image: symbol("bolt.fill", size: 20, weight: .semibold) ?? NSImage())
+        let glyph = NSImageView(image: symbol("bolt", size: 18) ?? NSImage())
         boltView = glyph
-        glyph.contentTintColor = PanelStyle.indigo
+        glyph.contentTintColor = K.accent
+        glyph.wantsLayer = true
+        glyph.imageScaling = .scaleNone
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none
-        field.font = .systemFont(ofSize: 24, weight: .regular)
-        field.textColor = PanelStyle.text
-        // 入力欄が空のときの案内文: 「Raiden 検索」は薄いグレー、「filter: #」は # の使い方の手がかりとしてさらに薄く小さく
+        field.font = K.mono(20)
+        field.textColor = K.fg
+        // 入力欄が空のときの案内文: 「Raiden 検索」は薄く、「filter: #」は # の使い方の手がかりとして小さく
         field.placeholderAttributedString = Self.defaultPlaceholder
         field.delegate = self
         field.cell?.usesSingleLineMode = true
-        // 稲妻の光（# を打ったとき）に使う影。ふだんは見えない
-        glyph.wantsLayer = true
-        glyph.layer?.shadowColor = PanelStyle.indigo.cgColor
-        glyph.layer?.shadowOpacity = 0
-        glyph.layer?.shadowOffset = .zero
-        statusIcon.contentTintColor = PanelStyle.faint
-        status.font = .systemFont(ofSize: 12)
-        status.textColor = PanelStyle.subText
+        statusIcon.contentTintColor = K.faint
+        status.font = K.mono(11.5)
+        status.textColor = K.dim
         status.alignment = .right
+        keyBand.lineBreakMode = .byTruncatingTail
+        bandInfo.font = K.mono(11.5)
+        bandInfo.textColor = K.faint
+        bandInfo.alignment = .right
         let sep = HairlineView()
         for st in [stack, topStack] {
             st.orientation = .vertical
@@ -598,10 +537,9 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     /// 入力欄が空のときの案内文: 「Raiden 検索」は薄いグレー、「filter: #」は # の使い方の手がかりとしてさらに薄く小さく
     static var defaultPlaceholder: NSAttributedString {
         let ph = NSMutableAttributedString(string: "Raiden 検索", attributes: [
-            .foregroundColor: PanelStyle.faint, .font: NSFont.systemFont(ofSize: 24)])
+            .foregroundColor: K.faint, .font: K.mono(20)])
         ph.append(NSAttributedString(string: "   filter: #", attributes: [
-            .foregroundColor: NSColor(white: 0.70, alpha: 1), .font: NSFont.systemFont(ofSize: 15),
-            .baselineOffset: 2]))
+            .foregroundColor: K.faint, .font: K.mono(12), .baselineOffset: 3]))
         return ph
     }
 
@@ -609,11 +547,10 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     func setPlaceholder(_ text: String?) {
         guard let text else { field.placeholderAttributedString = Self.defaultPlaceholder; return }
         field.placeholderAttributedString = NSAttributedString(string: text, attributes: [
-            .foregroundColor: PanelStyle.faint, .font: NSFont.systemFont(ofSize: 24)])
+            .foregroundColor: K.faint, .font: K.mono(20)])
     }
 
     private func setupList(sep: HairlineView, glyph: NSImageView) {
-        let veil = veilView!
         // 候補の場所はスクロールできる（絞り込みで全部出すとき）。中身は上から並べる
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
@@ -639,10 +576,14 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         NotificationCenter.default.addObserver(self, selector: #selector(listScrolled(_:)),
                                                name: NSView.boundsDidChangeNotification, object: scroll.contentView)
 
-        let glow = GlowLineView()
-        glowLine = glow
-        sep.isHidden = true   // 区切りは光る線
-        for v in [veil, glow, glyph, field, statusIcon, status, sep, topStack, scroll, footer] as [NSView] {
+        sep.isHidden = true   // 区切りはフォーカスの線
+        let inset = KFrameView.inset
+        statusBox.subviews.forEach { $0.removeFromSuperview() }
+        for v in [statusIcon, status] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            statusBox.addSubview(v)
+        }
+        for v in [frameView, focusLine, glyph, field, frameTitle, statusBox, sep, topStack, scroll, footer, bandRule, keyBand, bandInfo] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(v)
         }
@@ -650,20 +591,28 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         topHeightConstraint = topStack.heightAnchor.constraint(equalToConstant: 0)
         footerHeightConstraint = footer.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
-            veil.topAnchor.constraint(equalTo: content.topAnchor), veil.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-            veil.leadingAnchor.constraint(equalTo: content.leadingAnchor), veil.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            glow.centerYAnchor.constraint(equalTo: content.topAnchor, constant: Self.fieldHeight), glow.heightAnchor.constraint(equalToConstant: 14),
-            glow.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18), glow.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
-            glyph.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 22),
-            glyph.centerYAnchor.constraint(equalTo: content.topAnchor, constant: Self.fieldHeight / 2),
-            field.leadingAnchor.constraint(equalTo: glyph.trailingAnchor, constant: 12),
-            field.trailingAnchor.constraint(equalTo: statusIcon.leadingAnchor, constant: -8),
+            frameView.topAnchor.constraint(equalTo: content.topAnchor), frameView.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            frameView.leadingAnchor.constraint(equalTo: content.leadingAnchor), frameView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            frameTitle.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            frameTitle.centerYAnchor.constraint(equalTo: content.topAnchor, constant: inset + 0.5),
+            statusBox.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+            statusBox.centerYAnchor.constraint(equalTo: content.topAnchor, constant: inset + 0.5),
+            statusBox.heightAnchor.constraint(equalToConstant: 16),
+            statusIcon.leadingAnchor.constraint(equalTo: statusBox.leadingAnchor, constant: 4),
+            statusIcon.centerYAnchor.constraint(equalTo: statusBox.centerYAnchor),
+            status.leadingAnchor.constraint(equalTo: statusIcon.trailingAnchor, constant: 4),
+            status.trailingAnchor.constraint(equalTo: statusBox.trailingAnchor, constant: -4),
+            status.centerYAnchor.constraint(equalTo: statusBox.centerYAnchor),
+            status.widthAnchor.constraint(lessThanOrEqualToConstant: 220),
+            glyph.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+            glyph.centerYAnchor.constraint(equalTo: content.topAnchor, constant: Self.fieldHeight / 2 + 2),
+            field.leadingAnchor.constraint(equalTo: glyph.trailingAnchor, constant: 10),
+            field.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
             field.centerYAnchor.constraint(equalTo: glyph.centerYAnchor),
-            statusIcon.trailingAnchor.constraint(equalTo: status.leadingAnchor, constant: -5),
-            statusIcon.centerYAnchor.constraint(equalTo: glyph.centerYAnchor),
-            status.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
-            status.centerYAnchor.constraint(equalTo: glyph.centerYAnchor),
-            status.widthAnchor.constraint(lessThanOrEqualToConstant: 180),
+            focusLine.topAnchor.constraint(equalTo: content.topAnchor, constant: Self.fieldHeight - 2),
+            focusLine.heightAnchor.constraint(equalToConstant: 2),
+            focusLine.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: inset + 1),
+            focusLine.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -(inset + 1)),
             sep.topAnchor.constraint(equalTo: content.topAnchor, constant: Self.fieldHeight),
             sep.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
             sep.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
@@ -681,7 +630,19 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             footer.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             footer.widthAnchor.constraint(equalToConstant: Self.width),
             footerHeightConstraint,
+            // 下のキーの帯（枠の内側の一番下。プレビューを出しているときも全体の幅）
+            bandRule.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -(inset + 1) - Self.bandHeight),
+            bandRule.heightAnchor.constraint(equalToConstant: 1),
+            bandRule.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: inset + 1),
+            bandRule.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -(inset + 1)),
+            keyBand.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
+            keyBand.centerYAnchor.constraint(equalTo: content.bottomAnchor, constant: -(inset + 1) - Self.bandHeight / 2),
+            keyBand.trailingAnchor.constraint(lessThanOrEqualTo: bandInfo.leadingAnchor, constant: -12),
+            bandInfo.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
+            bandInfo.centerYAnchor.constraint(equalTo: keyBand.centerYAnchor),
         ])
+        keyBand.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        bandInfo.setContentCompressionResistancePriority(.required, for: .horizontal)
         status.setContentCompressionResistancePriority(.required, for: .horizontal)
         statusIcon.setContentCompressionResistancePriority(.required, for: .horizontal)
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -712,15 +673,14 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
 
     var isVisible: Bool { panel.isVisible }
 
-    /// 透け具合を当て直す（設定を変えたとき）。ガラスの tint と白い面の濃さ、透けるほうではガラスを .clear に
-    func applyTransparency() {
-        let t = PanelStyle.transparency
-        if #available(macOS 26.0, *), let g = glassView as? NSGlassEffectView {
-            g.tintColor = PanelStyle.glassTint
-            g.style = t >= PanelStyle.clearGlassAbove ? .clear : .regular
-        }
-        effectView?.material = t >= 0.5 ? .underWindowBackground : .popover
-        veilView?.needsDisplay = true
+    /// 外観を当て直す（設定を変えたとき）。色は外観に合わせて変わる NSColor なので、外観を差し替えて描き直すだけ
+    func applyTheme() {
+        panel.appearance = K.appearance
+        content.appearance = K.appearance
+        panel.backgroundColor = K.panel
+        content.needsDisplay = true
+        func redraw(_ v: NSView) { v.needsDisplay = true; v.subviews.forEach(redraw) }
+        redraw(content)
     }
 
     /// クリップボードの履歴の状態で出す（専用のキー）。出ていれば履歴の状態に切り替える
@@ -744,14 +704,14 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         let target = panel.frame
         panel.alphaValue = 0
         if !reduce {
-            let dx = (target.width * 0.03).rounded(), dy = (target.height * 0.03).rounded()
+            let dx = (target.width * 0.015).rounded(), dy = (target.height * 0.015).rounded()
             panel.setFrame(target.insetBy(dx: dx, dy: dy), display: false)
         }
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(field)
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = reduce ? 0.08 : 0.18
-            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1.0)
+            ctx.duration = reduce ? K.tFast : K.tBase
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             panel.animator().alphaValue = 1
             if !reduce { panel.animator().setFrame(target, display: true) }
         }, completionHandler: { [weak self] in
@@ -767,8 +727,8 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         hiding = true
         // 消すときは 0.1 秒で薄くしてから閉じる
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.1
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            ctx.duration = K.tFast
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             panel.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
             guard let self, self.hiding else { return }
@@ -802,7 +762,8 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     /// 入力欄の右の状態（準備中など）。symbol は SF Symbols の名前
     func setStatus(_ s: String, symbol name: String? = nil) {
         status.stringValue = s
-        statusIcon.image = s.isEmpty ? nil : name.flatMap { symbol($0, size: 12, weight: .medium) }
+        statusIcon.image = s.isEmpty ? nil : name.flatMap { symbol($0, size: 12) }
+        statusBox.isHidden = s.isEmpty
     }
 
     /// 見本を撮るとき用（入力欄の文字を入れる）
@@ -832,17 +793,20 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     /// パネル全体の高さの上限（画面の高さの 65%）
     static var maxPanelHeight: CGFloat { visibleFrame.height * 0.65 }
 
+    /// 一覧の下から窓の下端まで（すき間・キーの帯・枠）
+    static var chromeBottom: CGFloat { 6 + bandHeight + KFrameView.inset + 1 }
+
     private func layoutPanel(top: CGFloat, list: CGFloat) {
         lastLayout = (top, list)
         topHeightConstraint.constant = top
-        let maxList = max(Self.rowHeight * 3, Self.maxPanelHeight - Self.fieldHeight - 16 - top - footerH)
+        let maxList = max(Self.rowHeight * 3, Self.maxPanelHeight - Self.fieldHeight - Self.chromeBottom - top - footerH)
         let listH = min(list, maxList)
         heightConstraint.constant = listH
         footerHeightConstraint.constant = footerH
         var inner = top + listH + footerH
         // プレビューを出している間は、プレビューが読める高さを取る
-        if wide { inner = max(inner, min(Self.previewMinHeight, Self.maxPanelHeight - Self.fieldHeight - 16)) }
-        let h = Self.fieldHeight + (inner > 0 ? inner + 16 : 0)
+        if wide { inner = max(inner, min(Self.previewMinHeight, Self.maxPanelHeight - Self.fieldHeight - Self.chromeBottom)) }
+        let h = Self.fieldHeight + inner + Self.chromeBottom
         let vf = Self.visibleFrame
         // 上端の位置を固定して下に伸ばす（候補の数で入力欄が動かないように）
         let top = vf.maxY - vf.height * 0.22
@@ -853,8 +817,8 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             // 幅が変わるときは中央のまま 0.18 秒で広げる・狭める（入力欄の出方と同じ動き）
             animatingFrame = true
             NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.18
-                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1.0)
+                ctx.duration = K.tBase
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 panel.animator().setFrame(frame, display: true)
             }, completionHandler: { [weak self] in
                 guard let self else { return }
@@ -980,6 +944,28 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         }
         // 行を作り直しても入力欄は打てるままにする（カーソルの位置は動かさない）
         if panel.isVisible { focusField(caretToEnd: false) }
+        measureDraw()
+    }
+
+    /// 下のキーの帯: 選んでいる行で効くキー（左）と、件数・最後に打ってから描き終わるまでの時間（右）
+    private func updateKeyBand() {
+        let hint: String
+        if results.indices.contains(selected) { hint = results[selected].hint + "　Esc 閉じる" }
+        else { hint = "# 絞り込み　Esc 閉じる" }
+        keyBand.attributedStringValue = K.keys(hint)
+        var info: [String] = []
+        if !results.isEmpty { info.append("\(results.count) 件") }
+        if let ms = lastDrawMs { info.append(String(format: "%.0fms", ms)) }
+        bandInfo.stringValue = info.joined(separator: " · ")
+    }
+
+    /// 最後に打ってから、次の画面が描き終わるまで（Kodou-ui の目安は 16ms）
+    private func measureDraw() {
+        guard let t0 = typedAt else { updateKeyBand(); return }
+        typedAt = nil
+        content.displayIfNeeded()
+        lastDrawMs = (CACurrentMediaTime() - t0) * 1000
+        updateKeyBand()
     }
 
     /// 入力欄が空なら最近の作業のまとまりを出す（最近の一覧が裏で届き直したときにも呼ぶ）
@@ -1087,6 +1073,11 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         row.tagLabel.stringValue = item.tag
         row.setHint(item.hint)
         row.icon.image = item.iconImage ?? item.iconPath.map(icon)
+        // ドット絵（テンプレート画像）は拡大縮小せず、マスのまま描く
+        if row.icon.image?.isTemplate == true {
+            row.icon.imageScaling = .scaleNone
+            if !item.card { row.icon.contentTintColor = K.dim }
+        }
         row.alphaValue = rowAlpha[i]
         row.onClick = { [weak self] in self?.clickRow(i) }
         row.onHover = { [weak self] in self?.hoverRow(i) }
@@ -1194,6 +1185,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
 
     private func updateSelection() {
         for (i, r) in rows.enumerated() where r.selected != (i == selected) { r.selected = i == selected }
+        updateKeyBand()
         updateWide()   // アプリの行に移ったら閉じ、ファイルの行に移ったら広げる（setWide が並べ直す）
         updatePreview()
     }
@@ -1237,9 +1229,9 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             content.addSubview(v)
         }
         // 下端は弱くつなぐ（プレビューを出していない入力欄だけの時に、中身の最低の高さがパネルを押し広げないように）
-        let pb = preview.bottomAnchor.constraint(equalTo: content.bottomAnchor)
+        let pb = preview.bottomAnchor.constraint(equalTo: bandRule.topAnchor, constant: -6)
         pb.priority = .defaultLow
-        let lb = previewLine.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14)
+        let lb = previewLine.bottomAnchor.constraint(equalTo: bandRule.topAnchor)
         lb.priority = .defaultLow
         NSLayoutConstraint.activate([
             preview.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Self.width),
@@ -1248,7 +1240,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             pb,
             previewLine.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Self.width),
             previewLine.widthAnchor.constraint(equalToConstant: 1),
-            previewLine.topAnchor.constraint(equalTo: content.topAnchor, constant: Self.fieldHeight + 14),
+            previewLine.topAnchor.constraint(equalTo: content.topAnchor, constant: Self.fieldHeight),
             lb,
         ])
     }
@@ -1278,7 +1270,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         let animate = panel.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         if animate {
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.18
+                ctx.duration = K.tBase
                 preview.animator().alphaValue = on ? 1 : 0
                 previewLine.animator().alphaValue = on ? 1 : 0
             }
@@ -1305,40 +1297,21 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     func controlTextDidChange(_ obj: Notification) {
         let n = field.stringValue.reduce(0) { $0 + ($1 == "#" || $1 == "＃" ? 1 : 0) }
         if n > lastHashCount { flashBolt() }
+        typedAt = CACurrentMediaTime()
         filterInput.textDidChange()
         lastHashCount = field.stringValue.reduce(0) { $0 + ($1 == "#" || $1 == "＃" ? 1 : 0) }
     }
 
-    /// 稲妻をピカッと光らせる（0.9 秒）。稲妻のまわりに藍の光が広がって消え、印が大きくなって戻る。
-    /// 「視差効果を減らす」がオンなら大きさは変えず光だけ
+    /// # を打ったら稲妻を一瞬反転させる（アクセントの面に地の色の稲妻、140ms）。光やにじみは使わない
     func flashBolt() {
         guard let v = boltView, let l = v.layer else { return }
-        let dur = 0.9
-        let glow = CAAnimationGroup()
-        let color = CABasicAnimation(keyPath: "shadowColor")
-        color.fromValue = PanelStyle.indigo.cgColor; color.toValue = PanelStyle.indigo.cgColor
-        let radius = CAKeyframeAnimation(keyPath: "shadowRadius")
-        radius.values = [2, 20, 16, 4]; radius.keyTimes = [0, 0.15, 0.45, 1]
-        let opacity = CAKeyframeAnimation(keyPath: "shadowOpacity")
-        opacity.values = [0, 0.9, 0.9, 0]; opacity.keyTimes = [0, 0.12, 0.45, 1]
-        var parts: [CAAnimation] = [color, radius, opacity]
-        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            // 層の基準点は左下なので、真ん中を中心に大きくする
-            let c = CGPoint(x: l.bounds.midX, y: l.bounds.midY)
-            func scale(_ k: CGFloat) -> NSValue {
-                var t = CATransform3DMakeTranslation(c.x, c.y, 0)
-                t = CATransform3DScale(t, k, k, 1)
-                return NSValue(caTransform3D: CATransform3DTranslate(t, -c.x, -c.y, 0))
-            }
-            let pop = CAKeyframeAnimation(keyPath: "transform")
-            pop.values = [scale(1), scale(1.6), scale(1.45), scale(0.92), scale(1)]
-            pop.keyTimes = [0, 0.14, 0.32, 0.65, 1]
-            parts.append(pop)
+        l.backgroundColor = K.cg(K.accent, in: v)
+        v.contentTintColor = K.panel
+        DispatchQueue.main.asyncAfter(deadline: .now() + K.tBase) { [weak v] in
+            guard let v else { return }
+            v.layer?.backgroundColor = nil
+            v.contentTintColor = K.accent
         }
-        glow.animations = parts
-        glow.duration = dur
-        l.removeAnimation(forKey: "flash")
-        l.add(glow, forKey: "flash")
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
@@ -1380,7 +1353,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
         let tv = BandFieldEditor()
         tv.isFieldEditor = true
         tv.insertionPointColor = PanelStyle.caret
-        tv.selectedTextAttributes = [.backgroundColor: NSColor(srgbRed: 0.231, green: 0.204, blue: 0.839, alpha: 0.18)]
+        tv.selectedTextAttributes = [.backgroundColor: K.selBg, .foregroundColor: K.selFg]
         tv.markedTextAttributes = [.underlineStyle: NSUnderlineStyle.single.rawValue, .underlineColor: PanelStyle.caret]
         return tv
     }()

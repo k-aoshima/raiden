@@ -240,10 +240,9 @@ extension SettingsWindowController {
     // MARK: 部品
 
     private func field(_ s: String, placeholder: String) -> NSTextField {
-        let f = NSTextField(string: s)
+        let f = KField(text: s)
         f.placeholderString = placeholder
-        f.font = .systemFont(ofSize: 12)
-        f.bezelStyle = .roundedBezel
+        f.font = K.mono(12)
         f.translatesAutoresizingMaskIntoConstraints = false
         return f
     }

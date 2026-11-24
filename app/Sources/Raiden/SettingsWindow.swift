@@ -27,8 +27,6 @@ protocol SettingsHost: AnyObject {
     var logFolderPath: String { get }
     /// 見つからなかった言い方に正解を教える（NSOpenPanel で選ぶ）
     func teach(_ e: SearchLogEntry, completion: @escaping (String?) -> Void)
-    /// 透け具合を入力欄に当てる（保存はしない。スライダーを動かしている間）
-    func previewTransparency(_ t: Double)
     /// 検索の記録から数えた「#」のよく使う組み合わせ（学習タブに出す）
     func filterCombos() -> [FilterMemory.Combo]
     /// クリップボードの履歴を開くキー
@@ -46,16 +44,17 @@ extension SettingsHost {
     func clearClips() {}
 }
 
-/// 左の一覧の 1 行（アイコン＋名前）。選択中は面の色だけ
+/// 左の一覧の 1 行（アイコン＋名前）。選択中は反転表示（Kodou-ui のタブ）
 final class SidebarItem: NSView {
-    var selected = false { didSet { needsDisplay = true; label.textColor = selected ? SettingsStyle.text : SettingsStyle.subText; icon.contentTintColor = selected ? SettingsStyle.accent : SettingsStyle.subText } }
+    var selected = false { didSet { needsDisplay = true; label.textColor = selected ? K.selFg : K.dim; icon.contentTintColor = selected ? K.selFg : K.dim } }
     var onClick: (() -> Void)?
     private let icon: NSImageView
     private let label: NSTextField
 
     init(title: String, symbol name: String) {
         icon = sIcon(name, size: 14, color: SettingsStyle.subText)
-        label = sLabel(title, size: 13, weight: .medium, color: SettingsStyle.subText)
+        label = sLabel(title, size: 13, weight: .regular, color: SettingsStyle.subText)
+        label.font = K.mono(13)
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         addSubview(icon); addSubview(label)
@@ -71,17 +70,16 @@ final class SidebarItem: NSView {
     required init?(coder: NSCoder) { fatalError() }
     override func draw(_ dirtyRect: NSRect) {
         guard selected else { return }
-        SettingsStyle.selection.setFill()
-        NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8).fill()
+        K.selBg.setFill()
+        bounds.fill()
     }
     override func mouseDown(with event: NSEvent) { onClick?() }
 }
 
-/// 白い面（透け具合に合わせて濃さを変える。draw で描くので PNG にも出る）
+/// 窓の地（draw で描くので PNG にも出る）
 final class TintView: NSView {
-    var alpha: CGFloat = 0.7 { didSet { needsDisplay = true } }
     override func draw(_ dirtyRect: NSRect) {
-        NSColor(white: 1, alpha: alpha).setFill()
+        K.bg.setFill()
         bounds.fill()
     }
 }
@@ -117,16 +115,13 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
         window.title = "Raiden 設定"
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
-        window.isOpaque = false
-        window.backgroundColor = .clear
+        window.isOpaque = true
+        window.backgroundColor = K.bg
         window.appearance = SettingsStyle.appearance
         window.delegate = self
 
-        // すりガラス（窓の後ろが透ける）の上に、透け具合に合わせた白い面を載せる。普通の窓として読みやすいよう、入力欄より白め
-        let root = NSVisualEffectView()
-        root.material = .underWindowBackground
-        root.blendingMode = .behindWindow
-        root.state = .active
+        // 透かさない地（Kodou-ui の --bg）。枠の中は --panel
+        let root = NSView()
         root.appearance = SettingsStyle.appearance
         window.contentView = root
 
@@ -161,13 +156,17 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
             paneHost.leadingAnchor.constraint(equalTo: sideLine.trailingAnchor),
             paneHost.trailingAnchor.constraint(equalTo: root.trailingAnchor),
         ])
-        applyTransparency(host.settings.transparency)
         select(.scope)
     }
 
-    /// 透け具合を窓の白い面に当てる（0 → 0.92、0.9 → 0.61。入力欄より白めにして読みやすさを保つ）
-    func applyTransparency(_ t: Double) {
-        tint.alpha = CGFloat(0.92 - 0.35 * t)
+    /// 外観を当て直す（設定を変えたとき）
+    func applyTheme() {
+        window.appearance = K.appearance
+        window.contentView?.appearance = K.appearance
+        window.backgroundColor = K.bg
+        for it in items { let s = it.selected; it.selected = s }
+        tint.needsDisplay = true
+        reload()
     }
 
     func show(_ t: Tab? = nil) {
@@ -333,7 +332,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
         let tf = NSTokenField()
         tf.objectValue = s.excludeNames
         tf.tokenizingCharacterSet = CharacterSet(charactersIn: ", \n")
-        tf.font = .systemFont(ofSize: 12)
+        tf.font = K.mono(12)
         tf.isBordered = false
         tf.drawsBackground = false
         tf.focusRingType = .none
@@ -460,24 +459,9 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
         let order = sPopup(orders.map(\.label), selected: orders.firstIndex(of: s.sectionOrder) ?? 0) { [weak self] i in
             self?.host?.updateSettings { $0.sectionOrder = orders[i] }
         }
-        let pct = sLabel("\(Int((s.transparency * 100).rounded()))%", size: 12, color: SettingsStyle.subText)
-        pct.widthAnchor.constraint(equalToConstant: 36).isActive = true
-        pct.alignment = .right
-        let slider = NSSlider(value: s.transparency, minValue: RaidenSettings.transparencyRange.lowerBound,
-                              maxValue: RaidenSettings.transparencyRange.upperBound, target: nil, action: nil)
-        slider.controlSize = .small
-        slider.isContinuous = true
-        slider.translatesAutoresizingMaskIntoConstraints = false
-        slider.widthAnchor.constraint(equalToConstant: 160).isActive = true
-        slider.onAction { [weak self] c in
-            let v = (c.doubleValue * 20).rounded() / 20
-            pct.stringValue = "\(Int((v * 100).rounded()))%"
-            self?.applyTransparency(v)
-            self?.host?.previewTransparency(v)
-            // 指を離したときだけ保存する
-            if NSApp.currentEvent?.type == .leftMouseUp || NSApp.currentEvent == nil {
-                self?.host?.updateSettings { $0.transparency = v }
-            }
+        let themes = RaidenTheme.allCases
+        let theme = sPopup(themes.map(\.label), selected: themes.firstIndex { $0.rawValue == s.theme } ?? 0) { [weak self] i in
+            self?.host?.updateSettings { $0.theme = themes[i].rawValue }
         }
 
         out.append(sectionTitle("入力欄", symbol: "magnifyingglass"))
@@ -497,7 +481,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTokenFieldDe
         out.append(card(hkRows + [
             formRow("list.number", "候補の最大件数", detail: "アプリとファイルを合わせた数", trailing: [maxRows]),
             formRow("rectangle.split.1x2", "アプリとファイルの節の並び", detail: "自動は「先週のPDF」のような言い方でファイルを先にします", trailing: [order]),
-            formRow("circle.lefthalf.filled", "透明度", detail: "上げるほど後ろが透けます", trailing: [slider, pct]),
+            formRow("circle.lefthalf.filled", "外観", detail: "入力欄と設定の窓の明るさ。既定はライト", trailing: [theme]),
             formRow("sidebar.right", "ファイルのプレビューを出す", detail: "ファイルの行を選ぶと右に中身を出します（画面が狭いときは出しません）",
                     trailing: [sSwitch(s.showPreview) { [weak self] on in self?.host?.updateSettings { $0.showPreview = on } }]),
         ]))
@@ -718,6 +702,6 @@ final class BannerTag: NSView {
     required init?(coder: NSCoder) { fatalError() }
     override func draw(_ dirtyRect: NSRect) {
         SettingsStyle.warnFill.setFill()
-        NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
+        bounds.fill()
     }
 }

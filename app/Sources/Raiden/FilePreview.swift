@@ -37,20 +37,20 @@ final class FilePreviewPane: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         box.wantsLayer = true
-        box.layer?.cornerRadius = 12
+        box.layer?.cornerRadius = 0
         box.layer?.masksToBounds = true
         image.imageScaling = .scaleProportionallyUpOrDown
         image.imageAlignment = .alignCenter
         children.orientation = .vertical
         children.alignment = .leading
         children.spacing = 2
-        body.font = .systemFont(ofSize: 12)
-        body.textColor = PanelStyle.text
+        body.font = K.mono(12)
+        body.textColor = K.fg
         body.lineBreakMode = .byCharWrapping
         body.cell?.truncatesLastVisibleLine = true
         body.isHidden = true
-        name.font = .systemFont(ofSize: 14, weight: .semibold)
-        name.textColor = PanelStyle.text
+        name.font = K.mono(13, bold: true)
+        name.textColor = K.fg
         name.maximumNumberOfLines = 2
         name.lineBreakMode = .byTruncatingMiddle
         name.cell?.truncatesLastVisibleLine = true
@@ -129,7 +129,7 @@ final class FilePreviewPane: NSView {
             image.isHidden = true
             body.isHidden = false
             body.stringValue = c.text.count > 4000 ? String(c.text.prefix(4000)) + "…" : c.text
-            box.layer?.backgroundColor = NSColor(white: 1, alpha: 0.35).cgColor
+            box.layer?.backgroundColor = K.cg(K.bg, in: box)
             let lines = c.text.split(separator: "\n", omittingEmptySubsequences: false).count
             name.stringValue = "\(c.text.count) 文字" + (lines > 1 ? "・\(lines) 行" : "")
             func place(_ p: ClipItem.Place) -> String {
@@ -179,7 +179,7 @@ final class FilePreviewPane: NSView {
                         self.request = nil
                         if let rep, rep.type == .thumbnail {
                             self.image.image = rep.nsImage
-                            self.box.layer?.backgroundColor = NSColor(white: 1, alpha: 0.35).cgColor
+                            self.box.layer?.backgroundColor = K.cg(K.bg, in: self.box)
                         }
                         self.loadedToken = tk
                     }
@@ -203,7 +203,7 @@ final class FilePreviewPane: NSView {
         // フォルダは中身の先頭いくつか（アイコンは裏で読んだ物）
         image.isHidden = true
         children.isHidden = false
-        box.layer?.backgroundColor = NSColor(white: 1, alpha: 0.35).cgColor
+        box.layer?.backgroundColor = K.cg(K.bg, in: box)
         let maxLines = max(3, Int((box.bounds.height - 20) / 22))
         for (i, c) in m.children.prefix(maxLines).enumerated() {
             if i == maxLines - 1 && m.childCount > maxLines {
@@ -216,8 +216,8 @@ final class FilePreviewPane: NSView {
 
     private static func childLine(_ icon: NSImage?, _ text: String) -> NSView {
         let l = NSTextField(labelWithString: text)
-        l.font = .systemFont(ofSize: 12)
-        l.textColor = icon == nil ? PanelStyle.faint : PanelStyle.text
+        l.font = K.mono(12)
+        l.textColor = icon == nil ? K.faint : K.fg
         l.lineBreakMode = .byTruncatingMiddle
         let iv = NSImageView(image: icon ?? NSImage())
         iv.imageScaling = .scaleProportionallyUpOrDown
@@ -234,16 +234,16 @@ final class FilePreviewPane: NSView {
     private func setInfo(_ rows: [(String, String)]) {
         info.arrangedSubviews.forEach { $0.removeFromSuperview() }
         // ラベルの列は一番長いラベルに合わせる（52 固定だと「最後に開いた」が切れた）
-        let font = NSFont.systemFont(ofSize: 11)
+        let font = K.read(11.5)
         let keyW = ceil(rows.map { ($0.0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0) + 4
         for (k, v) in rows {
             let kl = NSTextField(labelWithString: k)
-            kl.font = .systemFont(ofSize: 11)
-            kl.textColor = PanelStyle.faint
+            kl.font = font
+            kl.textColor = K.faint
             kl.widthAnchor.constraint(equalToConstant: max(52, keyW)).isActive = true
             let vl = NSTextField(labelWithString: v)
-            vl.font = .systemFont(ofSize: 11)
-            vl.textColor = PanelStyle.subText
+            vl.font = K.mono(11.5)
+            vl.textColor = K.fg
             vl.lineBreakMode = .byTruncatingMiddle
             vl.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             let s = NSStackView(views: [kl, vl])

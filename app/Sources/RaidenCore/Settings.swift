@@ -89,7 +89,7 @@ public struct RaidenSettings: Codable, Equatable, Sendable {
     public var hotKey: HotKeySetting?          // nil = 既定（⌥Space、取れなければ ⌃⌥⌘Space）
     public var maxRows = 9                     // 候補の最大件数（アプリ＋ファイル）
     public var sectionOrder: SectionOrder = .auto
-    public var transparency = RaidenSettings.defaultTransparency  // 入力欄と設定窓の透け具合（0 = 白い、0.9 = いちばん透ける）
+    public var theme = "light"                 // 外観（light / dark / system）。既定はライト
     public var showPreview = true              // ファイルの行を選んだらパネルの右にプレビューを出す
     // クリップボード
     public var clipboard = true                // コピーした文字を覚える
@@ -108,8 +108,6 @@ public struct RaidenSettings: Codable, Equatable, Sendable {
     /// 除くフォルダの初期値（Spotlight はメールやキャッシュも返すので ~/Library は見ない）
     public static let defaultExcludeFolders = ["~/Library"]
     public static let maxRowsRange = 5...15
-    public static let defaultTransparency = 0.6
-    public static let transparencyRange = 0.0...0.9
 
     public static var defaultURL: URL { RaidenPaths.support.appendingPathComponent("settings.json") }
 
@@ -128,7 +126,7 @@ public struct RaidenSettings: Codable, Equatable, Sendable {
 
     // 項目ごとに読めなければ初期値（古い版・壊れた値で全部が初期値に戻らないように）
     enum CodingKeys: String, CodingKey {
-        case version, excludeFolders, excludeNames, knownExcludeDefaults, knownExcludeFolderDefaults, hotKey, maxRows, sectionOrder, transparency, showPreview, clipboard, clipHotKey, clipKeep, learn, dictionary, savedFilters, logSearches, logDays
+        case version, excludeFolders, excludeNames, knownExcludeDefaults, knownExcludeFolderDefaults, hotKey, maxRows, sectionOrder, theme, showPreview, clipboard, clipHotKey, clipKeep, learn, dictionary, savedFilters, logSearches, logDays
     }
 
     public init(from d: Decoder) throws {
@@ -148,7 +146,7 @@ public struct RaidenSettings: Codable, Equatable, Sendable {
         hotKey = (try? c.decodeIfPresent(HotKeySetting.self, forKey: .hotKey)) ?? nil
         maxRows = min(max(get(.maxRows, def.maxRows), Self.maxRowsRange.lowerBound), Self.maxRowsRange.upperBound)
         sectionOrder = get(.sectionOrder, def.sectionOrder)
-        transparency = min(max(get(.transparency, def.transparency), Self.transparencyRange.lowerBound), Self.transparencyRange.upperBound)
+        theme = ["light", "dark", "system"].contains(get(.theme, def.theme)) ? get(.theme, def.theme) : def.theme
         showPreview = get(.showPreview, def.showPreview)
         clipboard = get(.clipboard, def.clipboard)
         clipHotKey = (try? c.decodeIfPresent(HotKeySetting.self, forKey: .clipHotKey)) ?? nil

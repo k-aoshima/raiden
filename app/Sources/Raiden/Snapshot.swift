@@ -9,6 +9,8 @@ enum Snapshot {
     static func run(dir: String) {
         let app = NSApplication.shared
         app.appearance = NSAppearance(named: .darkAqua)
+        // RAIDEN_THEME=dark で暗い地の見本を撮る（既定はライト）
+        K.theme = ProcessInfo.processInfo.environment["RAIDEN_THEME"].flatMap(RaidenTheme.init(rawValue:)) ?? .light
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
 
         func fileIcon(_ t: UTType) -> NSImage { NSWorkspace.shared.icon(for: t) }
@@ -114,13 +116,13 @@ enum Snapshot {
             v.layoutSubtreeIfNeeded()
             let b = v.bounds
             var shot: NSBitmapImageRep?
-            SettingsStyle.appearance.performAsCurrentDrawingAppearance {
+            (K.appearance ?? NSAppearance(named: .aqua)!).performAsCurrentDrawingAppearance {
                 guard let rep = v.bitmapImageRepForCachingDisplay(in: b) else { return }
                 v.cacheDisplay(in: b, to: rep)
                 shot = rep
             }
             guard let shot else { print("撮れませんでした: \(t.file)"); continue }
-            compose(shot, size: b.size, radius: 12, path: dir + "/settings-\(t.file).png")
+            compose(shot, size: b.size, radius: 0, path: dir + "/settings-\(t.file).png")
         }
     }
 
@@ -140,7 +142,7 @@ enum Snapshot {
         v.layoutSubtreeIfNeeded()
         let b = v.bounds
         var shot: NSBitmapImageRep?
-        PanelStyle.appearance.performAsCurrentDrawingAppearance {
+        (K.appearance ?? NSAppearance(named: .aqua)!).performAsCurrentDrawingAppearance {
             guard let rep = v.bitmapImageRepForCachingDisplay(in: b) else { return }
             v.cacheDisplay(in: b, to: rep)
             shot = rep
@@ -219,5 +221,4 @@ final class DummySettingsHost: SettingsHost {
     func openLogFolder() {}
     var logFolderPath: String { "~/Library/Logs/Raiden" }
     func teach(_ e: SearchLogEntry, completion: @escaping (String?) -> Void) { completion(nil) }
-    func previewTransparency(_ t: Double) {}
 }

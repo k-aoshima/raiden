@@ -14,20 +14,20 @@ final class AskBar: NSView {
 
     init(_ split: RecallSplit, width: CGFloat, onPick: @escaping (Int) -> Void) {
         let head = NSTextField(labelWithString: split.total > 0 ? "\(FilterCompletion.countText(split.total)) 件 · \(split.title)" : split.title)
-        head.font = .systemFont(ofSize: 11.5, weight: .semibold)
-        head.textColor = PanelStyle.indigo
+        head.font = K.mono(11.5, bold: true)
+        head.textColor = K.accent
         head.lineBreakMode = .byTruncatingTail
         // 選ぶと何件になるか（「3〜41 件になります」）を薄い字で添える
         let counts = split.options.filter { !$0.replaces && $0.count >= 0 }.map(\.count)
         if split.total > 0, let lo = counts.min(), let hi = counts.max() {
-            let a = NSMutableAttributedString(string: head.stringValue, attributes: [.font: head.font!, .foregroundColor: PanelStyle.indigo])
+            let a = NSMutableAttributedString(string: head.stringValue, attributes: [.font: head.font!, .foregroundColor: K.accent])
             let range = lo == hi ? FilterCompletion.countText(lo) : "\(FilterCompletion.countText(lo))〜\(FilterCompletion.countText(hi))"
             a.append(NSAttributedString(string: "　\(range) 件になります", attributes: [
-                .font: NSFont.systemFont(ofSize: 11.5), .foregroundColor: PanelStyle.subText]))
+                .font: K.read(11.5), .foregroundColor: K.dim]))
             head.attributedStringValue = a
         }
-        let icon = NSImageView(image: symbol("questionmark.circle", size: 11, weight: .semibold) ?? NSImage())
-        icon.contentTintColor = PanelStyle.indigo
+        let icon = NSImageView(image: symbol("questionmark.circle", size: 12) ?? NSImage())
+        icon.contentTintColor = K.accent
         var pills: [NSView] = []
         // 一番効く案（選ぶと半分くらいに減る案。少なすぎず多すぎない）を藍の枠で強め、コマンドを添える（打ち方を覚えられるように）
         let half = Double(split.total) / 2
@@ -67,14 +67,18 @@ final class AskBar: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     override func draw(_ dirtyRect: NSRect) {
-        let r = NSRect(x: 10, y: 3, width: bounds.width - 20, height: bounds.height - 10)
-        let p = NSBezierPath(roundedRect: r, xRadius: 12, yRadius: 12)
-        PanelStyle.indigo.withAlphaComponent(0.08).setFill()
-        p.fill()
+        // 罫線の枠（角は丸めない）。問いなので面は薄いアクセント
+        let r = NSRect(x: 10.5, y: 3.5, width: bounds.width - 21, height: bounds.height - 11)
+        K.accentBg.setFill()
+        r.fill()
+        K.rule.setStroke()
+        let p = NSBezierPath(rect: r)
+        p.lineWidth = 1
+        p.stroke()
     }
 }
 
-/// 問いの選び先 1 つ: 角丸の四角に「⌘1」のキーの枠・名前・件数（hot なら藍の枠とコマンド）
+/// 問いの選び先 1 つ: 四角に「⌘1」のキーの札（反転）・名前・件数（hot ならアクセントの 2px の枠とコマンド）
 final class AskPill: TapPill {
     private let hot: Bool
 
@@ -82,13 +86,9 @@ final class AskPill: TapPill {
         self.hot = hot
         super.init(frame: .zero)
         let k = NSTextField(labelWithString: key)
-        k.font = .systemFont(ofSize: 10.5, weight: .medium)
-        k.textColor = PanelStyle.faint
-        let kb = NSView()
-        kb.wantsLayer = true
-        kb.layer?.cornerRadius = 4
-        kb.layer?.borderWidth = 1
-        kb.layer?.borderColor = PanelStyle.text.withAlphaComponent(0.15).cgColor
+        k.font = K.mono(11.5, bold: true)
+        k.textColor = K.selFg
+        let kb = KFill(K.selBg)
         k.translatesAutoresizingMaskIntoConstraints = false
         kb.addSubview(k)
         NSLayoutConstraint.activate([
@@ -96,21 +96,21 @@ final class AskPill: TapPill {
             k.topAnchor.constraint(equalTo: kb.topAnchor, constant: 0), k.bottomAnchor.constraint(equalTo: kb.bottomAnchor, constant: 0),
         ])
         let l = NSTextField(labelWithString: label)
-        l.font = .systemFont(ofSize: 12.5)
-        l.textColor = PanelStyle.text
+        l.font = K.read(12.5)
+        l.textColor = K.fg
         l.lineBreakMode = .byTruncatingMiddle
         l.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         var views: [NSView] = [kb, l]
         if let count {
             let c = NSTextField(labelWithString: count)
-            c.font = .monospacedDigitSystemFont(ofSize: 11.5, weight: .regular)
-            c.textColor = PanelStyle.subText
+            c.font = K.mono(11.5)
+            c.textColor = K.dim
             views.append(c)
         }
         if let command {
             let c = NSTextField(labelWithString: command)
-            c.font = .monospacedSystemFont(ofSize: 10.5, weight: .regular)
-            c.textColor = PanelStyle.faint
+            c.font = K.mono(11.5)
+            c.textColor = K.accent
             views.append(c)
         }
         let st = NSStackView(views: views)
@@ -127,10 +127,10 @@ final class AskPill: TapPill {
     required init?(coder: NSCoder) { fatalError() }
 
     override func draw(_ dirtyRect: NSRect) {
-        let p = NSBezierPath(roundedRect: bounds.insetBy(dx: hot ? 1 : 0.5, dy: hot ? 1 : 0.5), xRadius: 10, yRadius: 10)
-        NSColor.white.withAlphaComponent(0.55).setFill()
-        p.fill()
-        (hot ? PanelStyle.indigo : PanelStyle.text.withAlphaComponent(0.12)).setStroke()
+        let p = NSBezierPath(rect: bounds.insetBy(dx: hot ? 1 : 0.5, dy: hot ? 1 : 0.5))
+        K.panel.setFill()
+        bounds.fill()
+        (hot ? K.accent : K.ui).setStroke()
         p.lineWidth = hot ? 2 : 1
         p.stroke()
     }

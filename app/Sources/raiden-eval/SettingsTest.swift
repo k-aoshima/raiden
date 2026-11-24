@@ -30,7 +30,7 @@ func runSettingsTest() throws {
     s.excludeFolders = ["~/Documents/raiden-test-ex"]
     s.excludeNames.append("*.tmp")
     s.hotKey = .init(keyCode: 49, modifiers: 4096 | 2048, label: "⌃⌥Space")
-    s.maxRows = 12; s.sectionOrder = .filesFirst; s.transparency = 0.3
+    s.maxRows = 12; s.sectionOrder = .filesFirst; s.theme = "dark"
     s.learn = false; s.logSearches = false; s.logDays = 30
     try s.save(to: su)
     let back = RaidenSettings.load(from: su)
@@ -40,11 +40,11 @@ func runSettingsTest() throws {
     check("保存は ~/ の形", text.contains("\"~/Documents/raiden-test-ex\"") && !text.contains(NSHomeDirectory()))
     try "{ 壊れた json".write(to: su, atomically: true, encoding: .utf8)
     check("壊れていたら初期値", RaidenSettings.load(from: su) == RaidenSettings())
-    try #"{"maxRows": "たくさん", "logDays": 7, "folders": [{"path": "~/Desktop", "enabled": true}], "transparency": 5, "unloadMinutes": 5}"#
+    try #"{"maxRows": "たくさん", "logDays": 7, "folders": [{"path": "~/Desktop", "enabled": true}], "theme": "まっくろ", "unloadMinutes": 5}"#
         .write(to: su, atomically: true, encoding: .utf8)
     let part = RaidenSettings.load(from: su)
     check("読めない項目だけ初期値（maxRows 9・logDays 7・透明度は 0.9 まで。前の版の folders・unloadMinutes は読み捨てる）",
-          part.maxRows == 9 && part.logDays == 7 && part.transparency == 0.9)
+          part.maxRows == 9 && part.logDays == 7 && part.theme == "light")
     check("前の版の settings.json（除外のフォルダの初期値を知らない）には ~/Library を足す", part.excludeFolders == ["~/Library"])
     var noLib = part
     noLib.excludeFolders = []
