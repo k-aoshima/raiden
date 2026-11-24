@@ -605,10 +605,12 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
             status.centerYAnchor.constraint(equalTo: statusBox.centerYAnchor),
             status.widthAnchor.constraint(lessThanOrEqualToConstant: 220),
             glyph.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
-            glyph.centerYAnchor.constraint(equalTo: content.topAnchor, constant: Self.fieldHeight / 2 + 2),
+            // 稲妻と入力欄は、枠の上の線とフォーカスの線のあいだの真ん中（7〜58pt の中央 ≈ 33）にそろえる
+            glyph.centerYAnchor.constraint(equalTo: content.topAnchor, constant: (KFrameView.inset + 1 + Self.fieldHeight - 2) / 2 + 3),
             field.leadingAnchor.constraint(equalTo: glyph.trailingAnchor, constant: 10),
             field.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
-            field.centerYAnchor.constraint(equalTo: glyph.centerYAnchor),
+            // 入力欄の字は欄の上寄りに描かれる（BIZ UDゴシックの行の高さ）ので、字の真ん中が稲妻とそろうよう下げる
+            field.centerYAnchor.constraint(equalTo: glyph.centerYAnchor, constant: Self.fieldTextNudge),
             focusLine.topAnchor.constraint(equalTo: content.topAnchor, constant: Self.fieldHeight - 2),
             focusLine.heightAnchor.constraint(equalToConstant: 2),
             focusLine.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: inset + 1),
@@ -794,6 +796,7 @@ final class SearchPanelController: NSObject, NSTextFieldDelegate, NSWindowDelega
     static var maxPanelHeight: CGFloat { visibleFrame.height * 0.65 }
 
     /// 一覧の下から窓の下端まで（すき間・キーの帯・枠）
+    static let fieldTextNudge: CGFloat = 5
     static var chromeBottom: CGFloat { 6 + bandHeight + KFrameView.inset + 1 }
 
     private func layoutPanel(top: CGFloat, list: CGFloat) {
