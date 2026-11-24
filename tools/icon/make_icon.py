@@ -1,6 +1,7 @@
 # Raiden のアプリアイコン: Kodou-ui の稲妻のドット絵（12×12）を藍のガラスの立方体で組み、白いすりガラスの板に載せる。
 # /Applications/Blender.app/Contents/MacOS/Blender -b -P tools/icon/make_icon.py -- docs/icon-1024.png 512 0.35 0.6 8
 #   引数: 出力の png、サンプル数、板の光（emission）、ガラスの藍の濃さ（吸収）、カメラの傾き（度）。上が今のアイコンの値
+# 書き出すのは角丸の四角の中身（端まで）。tools/icon/finish_icon.py が 824 に縮めて Apple の格子の角丸で切り抜き、1024 に置く
 # 開いている Blender で exec すると、今のシーンには触らず「RaidenIcon」シーンに組む（描き出しはしない）
 # AppIcon.icns は sips で 16〜1024 の大きさを作り、iconutil -c icns で固める
 import bpy, sys, math
@@ -71,7 +72,7 @@ def squircle(half, r, n=5, steps=32):
 me = bpy.data.meshes.new("plate"); plate = bpy.data.objects.new("plate", me)
 scene.collection.objects.link(plate)
 bm = bmesh.new()
-vs = [bm.verts.new((x, y, -0.6)) for x, y in squircle(PLATE / 2, 2.4)]
+vs = [bm.verts.new((x, y, -0.6)) for x, y in squircle(PLATE, 2.4)]   # 枠より大きくして縁を写さない（角丸は後で切り抜く）
 f = bm.faces.new(vs)
 ext = bmesh.ops.extrude_face_region(bm, geom=[f])
 for v in [e for e in ext["geom"] if isinstance(e, bmesh.types.BMVert)]: v.co.z = 0
@@ -182,7 +183,7 @@ bg.inputs[0].default_value = (0.92, 0.93, 0.97, 1); bg.inputs[1].default_value =
 t = math.radians(TILT)
 bpy.ops.object.camera_add(location=(0, -20 * math.sin(t), 20 * math.cos(t)), rotation=(t, 0, 0))
 cam = bpy.context.object
-cam.data.type = "ORTHO"; cam.data.ortho_scale = 10.24
+cam.data.type = "ORTHO"; cam.data.ortho_scale = PLATE   # 写すのはアイコンの中身（1024 の中の 824）だけ
 scene.camera = cam
 
 scene.render.engine = "CYCLES"
@@ -196,7 +197,7 @@ try:
     scene.cycles.device = "GPU"
 except Exception as e:
     print("GPU なし", e)
-scene.render.film_transparent = True
+scene.render.film_transparent = False
 for o in scene.objects:
     try:
         if o.name.startswith("bolt"): o.cycles.is_caustics_caster = True
