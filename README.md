@@ -105,3 +105,7 @@ build/Raiden.app/Contents/MacOS/Raiden --snapshot docs/ui   # 画面の見本を
 この Mac の Command Line Tools では SwiftPM のリンクが通らないので、`swiftc` を直接呼んでいます。並べ方、Spotlight への問い合わせ、保存の形、答え合わせの結果は [docs/architecture.md](docs/architecture.md) にあります。
 
 画面は [Kodou-ui](https://github.com/k-aoshima/kodou-ui) で作っています。色と決まりは [DESIGN.md](DESIGN.md) にあります。等幅の字体に [JetBrains Mono](https://www.jetbrains.com/lp/mono/)（SIL Open Font License 1.1）を同梱しています。
+
+## ライセンス
+
+MIT です（[LICENSE](LICENSE)）。同梱の JetBrains Mono は SIL Open Font License 1.1 です（`app/Resources/Fonts/JetBrainsMono-OFL.txt`）。
